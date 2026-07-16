@@ -59,7 +59,7 @@ def smoke() -> None:
     typer.echo(f"as_of   : normalize_as_of('2026-09-10') -> {as_of}")
 
     line = {"rushing_yards": 80, "rushing_tds": 1, "receptions": 5, "receiving_yards": 42}
-    typer.echo(f"scoring : RB {line} -> {score('RB', line):.1f} pts (PLACEHOLDER rules)")
+    typer.echo(f"scoring : RB {line} -> {score('RB', line):.1f} pts (house rules)")
 
     resp = Router.from_toml().complete("smoke_test", "hello from ziggurat")
     typer.echo(f"router  : task 'smoke_test' -> backend '{resp.backend}' -> {resp.text!r}")

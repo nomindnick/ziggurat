@@ -36,5 +36,7 @@ def test_smoke_exercises_the_three_spines():
     result = runner.invoke(app, ["smoke"])
     assert result.exit_code == 0
     assert "as_of" in result.output
-    assert "PLACEHOLDER" in result.output  # scoring honesty marker
+    # Scoring is the real league settings as of item 1.3 (no longer placeholder);
+    # the RB line prices through the house rules: 80*0.1 + 6 + 5 + 42*0.1 = 23.2.
+    assert "23.2 pts (house rules)" in result.output
     assert "echo" in result.output

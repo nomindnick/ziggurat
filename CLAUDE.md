@@ -24,10 +24,16 @@ facts, markdown under `intel/` holds judgment.
   `/research` ownership), so Phase 4 is scoped a **full backtest program**
   (`intel/research/market-archives.md`).
 
-Next: **1.3 house-rules scoring engine** (ESPN scoring numbers in hand), then
-1.4/1.5 ingestion, then Checkpoint 1. Calendar anchors: draft expected
-mid-to-late August 2026 (Phases 0–2 must precede it); NFL Week 1 ~Sept 10
-(Phase 3 must precede it).
+**1.3 house-rules scoring engine — done 2026-07-16.** `core/scoring.py` is
+complete: full PPR (+2-pt, nflverse fumble components), distance kicker with
+−1/miss (missed XP scores 0), and D/ST with BOTH points- and yards-allowed
+brackets incl. the explicit implicit-zero bands — all values transcribed from
+spike 1.1 and locked to the ESPN fixture. 112 tests green; triple-derived and
+adversarially reviewed (see the 1.3 Update block).
+
+Next: **1.4 NFL data ingestion**, then 1.5, then Checkpoint 1. Calendar anchors:
+draft expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL Week 1
+~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 
@@ -38,9 +44,11 @@ Update this section whenever a phase or checkpoint closes.
    at that moment. Every accessor ships with a leakage test. Convention:
    `ziggurat/data/asof.py`; exemplar to copy: `tests/test_asof_pattern.py`.
 2. **House scoring rules live ONLY in `ziggurat/core/scoring.py`.** No other
-   module hard-codes a scoring value. Current numeric values are PLACEHOLDERS
-   until item 1.3 transcribes the real league settings; D/ST and K scoring
-   deliberately raise until then.
+   module hard-codes a scoring value. As of item 1.3 the numbers are the real
+   league settings (transcribed from spike 1.1, locked to the ESPN fixture) and
+   live only in the frozen `ScoringRules`; offense, D/ST (both bracket systems),
+   and kicker are all implemented. Post-Week-1 box-score validation is the one
+   open confirmation (anchored TODO in the module + item 3.8).
 3. **No logic in the CLI layer** (`ziggurat/cli/`). Commands parse, call, print.
 4. **Every LLM call goes through the router** (`ziggurat/llm/`, config in
    `config/llm.toml`). No component imports a model SDK or shells out to a
