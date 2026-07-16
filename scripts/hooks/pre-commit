@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Pre-commit guard for the public-repo boundary.
+
+Blocks any commit that stages league-private paths (intel/, data/, sqlite
+files, .env). The pattern list lives in ziggurat/repo_guard.py so the hook
+and the test suite enforce the same rules.
+
+Install once per clone:
+    git config core.hooksPath scripts/hooks
+
+Testing / manual check:
+    scripts/hooks/pre-commit --paths intel/notes.md   # exits 1
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+# The hook runs under the system interpreter with no venv guaranteed; make the
+# in-repo package importable directly (stdlib-only import, safe everywhere).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from ziggurat.repo_guard import violations  # noqa: E402
+
+
+def staged_paths() -> list[str]:
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return [p for p in out.split("\0") if p]
+
+
+def main(argv: list[str]) -> int:
+    if "--paths" in argv:
+        paths = argv[argv.index("--paths") + 1 :]
+    else:
+        paths = staged_paths()
+    bad = violations(paths)
+    if bad:
+        print("COMMIT BLOCKED — league-private paths staged (this repo is public):", file=sys.stderr)
+        for p in bad:
+            print(f"  {p}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Unstage with: git restore --staged <path>", file=sys.stderr)
+        print("These paths are the SPEC privacy boundary; do not force past this.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

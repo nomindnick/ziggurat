@@ -1,0 +1,23 @@
+# LLM task routing (SPEC key decision 13: model-tier routing with local optionality).
+# Every programmatic model call in this repo goes through ziggurat.llm.Router,
+# which resolves the task tag against this table. No component calls a model
+# directly — backends are configuration, not code.
+#
+#   tier    = routine | standard | high_stakes
+#             (stakes tagging from day one; drives backend assignment, e.g.
+#              routine tasks move to a local Ollama model once the Phase 4.5
+#              bake-off qualifies one)
+#   backend = echo | claude_cli | anthropic_api | ollama
+#             (see ziggurat/llm/backends.py — only `echo` is implemented in
+#              Phase 0; the others are registered but raise until their phase)
+#   model   = optional backend-specific model name
+
+[tasks.smoke_test]
+backend = "echo"
+tier = "routine"
+
+# Real task tags land with their features, e.g.:
+#   morning_briefing         (3.6, standard)
+#   news_summarization       (3.6, routine)
+#   podcast_claim_extraction (4.3, routine)
+#   trade_pitch_drafting     (5.3, standard)

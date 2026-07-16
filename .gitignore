@@ -1,0 +1,30 @@
+# ── Public-repo boundary (SPEC: Security & Privacy) — never commit ──────────
+# Patterns are anchored where needed: ziggurat/data/ is the (public) ingestion
+# package; only the top-level intel/ and data/ trees are league-private.
+/intel/
+/data/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+.env
+.env.*
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+
+# ── Local tooling ────────────────────────────────────────────────────────────
+.claude/settings.local.json
+.DS_Store
