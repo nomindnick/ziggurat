@@ -12,11 +12,16 @@ facts, markdown under `intel/` holds judgment.
 
 ## Current status
 
-**Phase 0 (Foundations) complete — 2026-07-16.** Next up: **Phase 1** (ground
-truth & data spine), starting with the two scheduled-first spikes: **1.1 ESPN
-access** and **1.2 historical market archives** (the #1 backtest-feasibility
-risk). Calendar anchors: draft expected mid-to-late August 2026 (Phases 0–2
-must precede it); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
+**Phase 1 (Ground Truth & Data Spine) — in progress.** Phase 0 complete
+2026-07-16. Spike **1.1 ESPN access** closed 2026-07-16: `espn_api` authenticates
+against the league (SWID/ESPN_S2 in local `.env`) and the full custom scoring —
+PPR, distance-based kicker (incl. −1/miss), and the D/ST points-allowed **and**
+yards-allowed brackets — is exposed programmatically, so **no hand-transcription
+of scoring is required** (findings: `intel/research/espn-access.md`; the numbers
+feed item 1.3). Next: spike **1.2 historical market archives** (the #1
+backtest-feasibility risk), then **1.3 house-rules scoring engine** (inputs now in
+hand). Calendar anchors: draft expected mid-to-late August 2026 (Phases 0–2 must
+precede it); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 
@@ -36,10 +41,14 @@ Update this section whenever a phase or checkpoint closes.
    model directly. Tasks carry a stakes tier (routine / standard / high_stakes).
 5. **Public-repo boundary.** This repo is public. `intel/`, top-level `data/`,
    `*.sqlite*`, and `.env*` are never committed — enforced by `.gitignore`,
-   the pre-commit hook, and `tests/test_repo_boundary.py`. Committed files,
-   fixtures, and commit messages contain **no colleague names or league-private
-   details** (team names in local intel/ only; the hook can't catch prose — you
-   must).
+   the pre-commit hook, and `tests/test_repo_boundary.py`. The league name and
+   the operator's own team name (as stated in SPEC.md) are acceptable in
+   committed files — operator's decision, 2026-07-16. The hard red line for
+   committed files, fixtures, and commit messages is **real names of the other
+   league members (colleagues)**: never commit those; keep colleague names,
+   other managers' rosters, and league-private data in local `intel/` only.
+   Opponents' team names can encode real identities in an office league — use
+   judgment; the hook can't catch prose, so you must.
 6. **Explainability.** The operator is a football novice and cannot smell
    absurd outputs: every recommendation ships with its reasons and data.
    Sanity checks (e.g., never recommend starting a player ruled OUT or on bye)

@@ -1,0 +1,278 @@
+[
+  {
+    "abbr": "INTT",
+    "label": "Interceptions Thrown",
+    "id": 20,
+    "points": -2.0
+  },
+  {
+    "abbr": "FUML",
+    "label": "Total Fumbles Lost",
+    "id": 72,
+    "points": -2.0
+  },
+  {
+    "abbr": "FGM",
+    "label": "Total FG Missed",
+    "id": 85,
+    "points": -1.0
+  },
+  {
+    "abbr": "PA0",
+    "label": "0 points allowed",
+    "id": 89,
+    "points": 5.0
+  },
+  {
+    "abbr": "PA1",
+    "label": "1-6 points allowed",
+    "id": 90,
+    "points": 4.0
+  },
+  {
+    "abbr": "PA7",
+    "label": "7-13 points allowed",
+    "id": 91,
+    "points": 3.0
+  },
+  {
+    "abbr": "PA14",
+    "label": "14-17 points allowed",
+    "id": 92,
+    "points": 1.0
+  },
+  {
+    "abbr": "INT",
+    "label": "Each Interception",
+    "id": 95,
+    "points": 2.0
+  },
+  {
+    "abbr": "FR",
+    "label": "Each Fumble Recovered",
+    "id": 96,
+    "points": 2.0
+  },
+  {
+    "abbr": "BLKK",
+    "label": "Blocked Punt, PAT or FG",
+    "id": 97,
+    "points": 2.0
+  },
+  {
+    "abbr": "SF",
+    "label": "Each Safety",
+    "id": 98,
+    "points": 2.0
+  },
+  {
+    "abbr": "SK",
+    "label": "Each Sack",
+    "id": 99,
+    "points": 1.0
+  },
+  {
+    "abbr": "PA28",
+    "label": "28-34 points allowed",
+    "id": 123,
+    "points": -1.0
+  },
+  {
+    "abbr": "PA35",
+    "label": "35-45 points allowed",
+    "id": 124,
+    "points": -3.0
+  },
+  {
+    "abbr": "PA46",
+    "label": "46+ points allowed",
+    "id": 125,
+    "points": -5.0
+  },
+  {
+    "abbr": "YA100",
+    "label": "Less than 100 total yards allowed",
+    "id": 128,
+    "points": 5.0
+  },
+  {
+    "abbr": "YA199",
+    "label": "100-199 total yards allowed",
+    "id": 129,
+    "points": 3.0
+  },
+  {
+    "abbr": "YA299",
+    "label": "200-299 total yards allowed",
+    "id": 130,
+    "points": 2.0
+  },
+  {
+    "abbr": "YA399",
+    "label": "350-399 total yards allowed",
+    "id": 132,
+    "points": -1.0
+  },
+  {
+    "abbr": "YA449",
+    "label": "400-449 total yards allowed",
+    "id": 133,
+    "points": -3.0
+  },
+  {
+    "abbr": "YA499",
+    "label": "450-499 total yards allowed",
+    "id": 134,
+    "points": -5.0
+  },
+  {
+    "abbr": "YA549",
+    "label": "500-549 total yards allowed",
+    "id": 135,
+    "points": -6.0
+  },
+  {
+    "abbr": "YA550",
+    "label": "550+ total yards allowed",
+    "id": 136,
+    "points": -7.0
+  },
+  {
+    "abbr": "PY",
+    "label": "Passing Yards",
+    "id": 3,
+    "points": 0.04
+  },
+  {
+    "abbr": "RY",
+    "label": "Rushing Yards",
+    "id": 24,
+    "points": 0.1
+  },
+  {
+    "abbr": "REY",
+    "label": "Receiving Yards",
+    "id": 42,
+    "points": 0.1
+  },
+  {
+    "abbr": "REC",
+    "label": "Each reception",
+    "id": 53,
+    "points": 1.0
+  },
+  {
+    "abbr": "PAT",
+    "label": "Each PAT Made",
+    "id": 86,
+    "points": 1.0
+  },
+  {
+    "abbr": "1PSF",
+    "label": "1pt Safety",
+    "id": 209,
+    "points": 1.0
+  },
+  {
+    "abbr": "2PC",
+    "label": "2pt Passing Conversion",
+    "id": 19,
+    "points": 2.0
+  },
+  {
+    "abbr": "2PR",
+    "label": "2pt Rushing Conversion",
+    "id": 26,
+    "points": 2.0
+  },
+  {
+    "abbr": "2PRE",
+    "label": "2pt Receiving Conversion",
+    "id": 44,
+    "points": 2.0
+  },
+  {
+    "abbr": "2PRET",
+    "label": "2pt Return",
+    "id": 206,
+    "points": 2.0
+  },
+  {
+    "abbr": "FG0",
+    "label": "FG Made (0-39 yards)",
+    "id": 80,
+    "points": 3.0
+  },
+  {
+    "abbr": "PTD",
+    "label": "TD Pass",
+    "id": 4,
+    "points": 4.0
+  },
+  {
+    "abbr": "FG40",
+    "label": "FG Made (40-49 yards)",
+    "id": 77,
+    "points": 4.0
+  },
+  {
+    "abbr": "FG50",
+    "label": "FG Made (50-59 yards)",
+    "id": 198,
+    "points": 5.0
+  },
+  {
+    "abbr": "RTD",
+    "label": "TD Rush",
+    "id": 25,
+    "points": 6.0
+  },
+  {
+    "abbr": "RETD",
+    "label": "TD Reception",
+    "id": 43,
+    "points": 6.0
+  },
+  {
+    "abbr": "FTD",
+    "label": "Fumble Recovered for TD",
+    "id": 63,
+    "points": 6.0
+  },
+  {
+    "abbr": "BLKKRTD",
+    "label": "Blocked Punt or FG return for TD",
+    "id": 93,
+    "points": 6.0
+  },
+  {
+    "abbr": "KRTD",
+    "label": "Kickoff Return TD",
+    "id": 101,
+    "points": 6.0
+  },
+  {
+    "abbr": "PRTD",
+    "label": "Punt Return TD",
+    "id": 102,
+    "points": 6.0
+  },
+  {
+    "abbr": "INTTD",
+    "label": "Interception Return TD",
+    "id": 103,
+    "points": 6.0
+  },
+  {
+    "abbr": "FRTD",
+    "label": "Fumble Return TD",
+    "id": 104,
+    "points": 6.0
+  },
+  {
+    "abbr": "FG60",
+    "label": "FG Made (60+ yards)",
+    "id": 201,
+    "points": 6.0
+  }
+]

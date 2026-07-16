@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
+    "espn_api>=0.46",  # ESPN private-league access (spike 1.1); reads host is lm-api-reads.fantasy.espn.com
 ]
 
 [project.optional-dependencies]
