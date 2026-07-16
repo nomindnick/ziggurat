@@ -13,15 +13,21 @@ facts, markdown under `intel/` holds judgment.
 ## Current status
 
 **Phase 1 (Ground Truth & Data Spine) — in progress.** Phase 0 complete
-2026-07-16. Spike **1.1 ESPN access** closed 2026-07-16: `espn_api` authenticates
-against the league (SWID/ESPN_S2 in local `.env`) and the full custom scoring —
-PPR, distance-based kicker (incl. −1/miss), and the D/ST points-allowed **and**
-yards-allowed brackets — is exposed programmatically, so **no hand-transcription
-of scoring is required** (findings: `intel/research/espn-access.md`; the numbers
-feed item 1.3). Next: spike **1.2 historical market archives** (the #1
-backtest-feasibility risk), then **1.3 house-rules scoring engine** (inputs now in
-hand). Calendar anchors: draft expected mid-to-late August 2026 (Phases 0–2 must
-precede it); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
+2026-07-16. Both scheduled-first spikes closed 2026-07-16:
+- **1.1 ESPN access** — `espn_api` authenticates (SWID/ESPN_S2 in local `.env`)
+  and the full custom scoring (PPR, distance kicker incl. −1/miss, D/ST
+  points-and-yards brackets) is machine-readable, so **no hand-transcription of
+  scoring is needed** (`intel/research/espn-access.md`; numbers feed item 1.3).
+- **1.2 historical market archives** (the #1 backtest-feasibility risk) —
+  **retired**: two independent, free, weekly point-in-time market proxies span
+  2021-2025 (DynastyProcess `db_fpecr` weekly FantasyPros ECR + Sleeper
+  `/research` ownership), so Phase 4 is scoped a **full backtest program**
+  (`intel/research/market-archives.md`).
+
+Next: **1.3 house-rules scoring engine** (ESPN scoring numbers in hand), then
+1.4/1.5 ingestion, then Checkpoint 1. Calendar anchors: draft expected
+mid-to-late August 2026 (Phases 0–2 must precede it); NFL Week 1 ~Sept 10
+(Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 
