@@ -9,7 +9,7 @@ def test_schema_applies_and_is_idempotent(tmp_path):
     apply_schema(conn)
     apply_schema(conn)  # second run must be a no-op, not an error
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    assert row["value"] == "0"
+    assert row["value"] == "1"
     conn.close()
     assert db_path.exists()
 

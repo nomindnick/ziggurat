@@ -27,13 +27,21 @@ facts, markdown under `intel/` holds judgment.
 **1.3 house-rules scoring engine — done 2026-07-16.** `core/scoring.py` is
 complete: full PPR (+2-pt, nflverse fumble components), distance kicker with
 −1/miss (missed XP scores 0), and D/ST with BOTH points- and yards-allowed
-brackets incl. the explicit implicit-zero bands — all values transcribed from
-spike 1.1 and locked to the ESPN fixture. 112 tests green; triple-derived and
-adversarially reviewed (see the 1.3 Update block).
+brackets incl. the explicit implicit-zero bands — locked to the ESPN fixture.
 
-Next: **1.4 NFL data ingestion**, then 1.5, then Checkpoint 1. Calendar anchors:
-draft expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL Week 1
-~Sept 10 (Phase 3 must precede it).
+**1.4 NFL data ingestion — done 2026-07-16.** nflverse sources (players
+crosswalk, schedules, weekly stats, snaps, NGS, depth charts, injuries) land in
+SQLite under `ziggurat/data/nfl/` with the as-of leakage model: **`knowable_as_of`
+is the sole leakage gate; `retrieved_as_of` never gates** (so backtests bulk-pulled
+now read only what was knowable then) — `base.select_as_of` is the one read path.
+Done-when met: `usage.usage_deltas` (leakage-tested RB usage trends). `nfl_data_py`
+installs `--no-deps` (see dev workflow). 154 tests green; adversarial leakage audit
+resolved (see the 1.4 Update block). Two forward items recorded there: intraday
+knowledge time (Phase 3) and the D/ST team-defense-stats gap (before Phase 4).
+
+Next: **1.5 projections/ADP/odds/weather ingestion**, then Checkpoint 1. Calendar
+anchors: draft expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL
+Week 1 ~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 
@@ -101,6 +109,7 @@ tests/               pytest suite; patterns established here get copied
 ```bash
 # fresh clone, once:
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+.venv/bin/pip install --no-deps nfl_data_py   # see note below (item 1.4)
 git config core.hooksPath scripts/hooks   # per clone, required
 .venv/bin/ziggurat intel init             # recreate private intel/ skeleton
 .venv/bin/ziggurat db init                # create db/ziggurat.sqlite
@@ -114,6 +123,15 @@ Tests land **with** each item, not in a cleanup phase. Test conventions:
 golden-master cases for scoring, leakage tests for accessors, the mock-draft
 sim as the draft engine's harness, unit tests for pure logic, thin
 cached-fixture integration tests for ingestion.
+
+**`nfl_data_py` install (item 1.4).** It must be installed with `--no-deps`: its
+released metadata pins `pandas<2` / `numpy<2`, which have no cp312 wheels (pip
+would try to source-build pandas 1.x and fail), yet the library runs fine on
+modern pandas. Its real runtime deps (pandas/numpy/pyarrow/appdirs/dateutil/
+requests) are declared in `pyproject.toml`, so `pip install -e '.[dev]'` then
+`pip install --no-deps nfl_data_py` gives a working env. Ingestion clients wrap
+each `nfl.import_*` call at a single seam so cached-fixture tests patch there
+(no network in the test suite).
 
 Phase 1 prep: ESPN private-league auth needs `SWID` and `ESPN_S2` cookie
 values in a local `.env` (gitignored; never committed, never echoed into
