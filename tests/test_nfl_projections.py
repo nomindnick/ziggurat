@@ -194,8 +194,6 @@ def test_bulk_historical_revision_needs_latest_truth(db):
         db, revised, retrieved_as_of="2024-02-01", bulk_historical=True
     )
 
-    qb = _by_id(_raw_rows(), "3163")["player_id"]
-
     # knowable stamped at gameday, not the bulk-load day.
     stored = projections.get_projections(
         db, as_of="2024-03-01", season=2023, week=1, position="QB", source=projections.SOURCE

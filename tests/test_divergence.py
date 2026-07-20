@@ -10,7 +10,6 @@ league-private data.
 
 import pandas as pd
 
-from ziggurat.core import divergence
 from ziggurat.core.divergence import (
     CONTESTED,
     ESPN_HIGHER,

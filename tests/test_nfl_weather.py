@@ -227,7 +227,7 @@ def test_stadium_reference_covers_all_2020_2025_venues():
 
 def test_pull_reads_schedules_and_stores(db, nfl_fixture, patch_fetch):
     """pull_game_weather reads the ingested schedule and stores weather per game."""
-    rec = patch_fetch()
+    patch_fetch()  # install the no-network fetch (no handle needed here)
     schedules.ingest_schedules(db, nfl_fixture("schedules"), retrieved_as_of="2023-08-01")
     n = weather.pull_game_weather(db, 2023, 1, retrieved_as_of="2023-09-05", mode="forecast")
     assert n > 0
