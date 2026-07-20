@@ -5,7 +5,7 @@ ingested first: players (to resolve gsis_id via the crosswalk) and schedules
 (to resolve the team gameday that becomes knowable_as_of).
 """
 
-from ziggurat.data.nfl import players, schedules, snap_counts
+from ziggurat.data.nfl import base, players, schedules, snap_counts
 
 
 def _seed_upstream(db, nfl_fixture):
@@ -81,3 +81,28 @@ def test_snap_counts_leakage_by_gameday(db, nfl_fixture):
         )
     }
     assert weeks_all == {5, 6}
+
+
+def test_latest_truth_helper_closes_the_bulk_backtest_footgun(db, nfl_fixture):
+    # The exact backtest scenario: all history bulk-pulled "now" (2026). The
+    # default historical view gates retrieval time, so a 2023 read is silently
+    # empty. base.latest_truth binds the correct view so the read returns rows.
+    _seed_upstream(db, nfl_fixture)
+    snap_counts.ingest_snap_counts(
+        db, nfl_fixture("snap_counts"), retrieved_as_of="2026-07-16"
+    )
+
+    # The footgun: default historical read of bulk history is empty, not an error.
+    assert snap_counts.get_snap_counts(db, as_of="2023-10-11", season=2023) == []
+
+    read = base.latest_truth(snap_counts.get_snap_counts)
+    weeks = {r["week"] for r in read(db, as_of="2023-10-11", season=2023)}
+    assert 5 in weeks and 6 not in weeks
+    # Identical to spelling the view out by hand.
+    explicit = {
+        r["week"]
+        for r in snap_counts.get_snap_counts(
+            db, as_of="2023-10-11", season=2023, view="latest_truth"
+        )
+    }
+    assert weeks == explicit

@@ -17,6 +17,7 @@ two deliberately distinct views:
   grading and bulk-loaded immutable history, but must be requested explicitly.
 """
 
+import functools
 import logging
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
@@ -30,6 +31,37 @@ logger = logging.getLogger("ziggurat.data.nfl")
 
 AsOfView = Literal["historical", "latest_truth"]
 AS_OF_VIEWS = ("historical", "latest_truth")
+
+
+def latest_truth(accessor: Callable) -> Callable:
+    """Bind an as-of ``accessor`` to the immutable-bulk-history view.
+
+    Backtests and outcome grading read history bulk-loaded *now*
+    (``retrieved_as_of`` = today). The safe-default ``historical`` view also gates
+    retrieval time, so for any past ``as_of`` it returns NOTHING — and returns it
+    *silently*. That empty result is the footgun: it reads as "no data", not
+    "wrong view". This wrapper makes ``latest_truth`` the read path a backtest
+    can't forget:
+
+        read_snaps = latest_truth(get_snap_counts)
+        read_snaps(conn, as_of="2023-10-11", season=2023)   # bulk history, right view
+
+    Fact-time protection is unchanged — ``latest_truth`` still hides facts not yet
+    knowable by ``as_of``. A conflicting explicit ``view=`` is rejected rather than
+    silently honored, so wrapping can only ever *add* the bulk-history semantics.
+    """
+    @functools.wraps(accessor)
+    def read(*args, **kwargs):
+        requested = kwargs.get("view", "latest_truth")
+        if requested != "latest_truth":
+            raise ValueError(
+                f"latest_truth() reads the 'latest_truth' view; "
+                f"got conflicting view={requested!r}"
+            )
+        kwargs["view"] = "latest_truth"
+        return accessor(*args, **kwargs)
+
+    return read
 
 
 def require_columns(df: pd.DataFrame, required: Sequence[str], *, source: str) -> None:

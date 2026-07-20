@@ -52,7 +52,10 @@ Update this section whenever a phase or checkpoint closes.
    `as_of` (no default, no implicit "now") and defaults to the `historical` view,
    which gates both `knowable_as_of` and `retrieved_as_of`. `latest_truth` is an
    explicit opt-in for corrected outcomes or deliberately accepted immutable
-   bulk history; never use it for mutable decision inputs. Every accessor ships
+   bulk history; never use it for mutable decision inputs. Because a bulk-loaded
+   backtest DB (all `retrieved_as_of` = today) reads *empty* under the default
+   `historical` view, backtest/grading code reads through `base.latest_truth(accessor)`,
+   which binds that view so it can't be silently forgotten. Every accessor ships
    with a leakage test. Convention: `ziggurat/data/asof.py` and
    `ziggurat/data/nfl/base.py`.
 2. **House scoring rules live ONLY in `ziggurat/core/scoring.py`.** No other

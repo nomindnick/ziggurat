@@ -79,6 +79,33 @@ def test_latest_truth_view_intentionally_uses_later_correction():
     }
 
 
+def test_latest_truth_helper_binds_the_view():
+    # The helper injects view="latest_truth" so bulk/backtest callers cannot
+    # forget it (and cannot silently get an empty historical read).
+    seen = {}
+
+    def fake_accessor(conn, *, as_of, view="historical"):
+        seen["view"] = view
+        return []
+
+    base.latest_truth(fake_accessor)(_syn(), as_of="2025-09-15")
+    assert seen["view"] == "latest_truth"
+
+
+def test_latest_truth_helper_matches_explicit_view():
+    # Wrapping select_as_of reproduces the explicit latest_truth semantics: the
+    # 09-20 correction to b is applied for an as-of-09-15 read.
+    reader = base.latest_truth(base.select_as_of)
+    seen = {r["k"]: r["v"] for r in reader(_syn(), "syn", as_of="2025-09-15", key_cols=["k"])}
+    assert seen["b"] == 22.0
+
+
+def test_latest_truth_helper_rejects_conflicting_view():
+    reader = base.latest_truth(base.select_as_of)
+    with pytest.raises(ValueError, match="conflicting view"):
+        reader(_syn(), "syn", as_of="2025-09-15", key_cols=["k"], view="historical")
+
+
 def test_knowable_gate_hides_future_fact_even_though_already_retrieved():
     # c was pulled 09-01 but is not knowable until 09-25 — must stay hidden.
     assert "c" not in _read(_syn(), "2025-09-24")
