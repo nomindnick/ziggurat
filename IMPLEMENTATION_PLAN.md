@@ -87,7 +87,81 @@ This plan is deliberately looser than a conventional sprint plan, because this p
 **Goal:** Current-season consensus projections (full stat lines), preseason ADP distributions (market source + ESPN default rankings side by side — the divergence table is a first-class artifact), Vegas totals/spreads, and the Open-Meteo weather client keyed to stadium coordinates/dome flags. News headline speed-lane ingestion can land here or in 3.6 — Claude Code's call.
 **Done when:** each source lands in SQLite with `as_of`; the ESPN-vs-market divergence report runs and produces a readable table.
 **Update:**
-> _[To be completed]_
+> **Done 2026-07-20.** Five sources land in SQLite under `ziggurat/data/nfl/` behind
+> migration `003_market_context.sql` (five tables, each with the two knowledge-time
+> columns + a temporal index; `schema_version` now 3), all following the item-1.4
+> ingester pattern (thin `source.import_*` seam → `require_columns` fail-loud →
+> knowledge-time stamp → `note_drops` (never NULL-insert) → `base.upsert`; keyword-only
+> `as_of` accessor through `base.select_as_of`; leakage + cached-fixture tests each).
+> **Done-when met:** the ESPN-vs-market **divergence report** (`core/divergence.py`, thin
+> `ziggurat divergence` CLI) runs end-to-end against real FantasyPros data and prints a
+> readable positional-rank divergence table. Design doc: `intel/research/ingestion-1.5-design.md`.
+>
+> **Sources:**
+> - **team_defense** (`load_team_stats` weekly + schedules scores) — the D/ST ride-along.
+>   One `(season, week, team)` row named with `scoring.py` D/ST keys so `dict(row)` prices
+>   directly through `score_dst` (verified live: KC 2023-wk1 = 2.0, DET = 8.0). The line is
+>   DERIVED: `fumble_recoveries = fumble_recovery_opp` (not `_own`); `def_tds = def_tds +
+>   fumble_recovery_tds + special_teams_tds` (probed: `def_tds` excludes fumble-return TDs);
+>   `blocked_kicks` from the OPPONENT's kicking row; `points_allowed` = opponent final score;
+>   `yards_allowed` = opp `passing+rushing+sack_yards_lost`. `knowable_as_of` = the team's own
+>   gameday. Any row whose opponent self-join or schedules score fails to resolve is DROPPED
+>   (a NULL bracket input is silently skipped by `score_dst`).
+> - **game_odds** (`load_schedules` odds columns → own `game_odds` table, own patch seam) —
+>   closing spread/total/moneylines, `knowable_as_of = gameday` (leakage-safe; a same-day
+>   pre-kickoff caller must pass `D-1`). Null-odds rows KEPT, null-gameday dropped. Kept OUT of
+>   the structural `schedules` table by design.
+> - **weather** (Open-Meteo forecast + ERA5 archive, stadium-keyed) — `game_weather`, decision
+>   context only (no scoring contact). Two-regime `forecast_source`: `forecast` (knowable =
+>   retrieved = pull day) vs `archive_actual` (knowable = gameday; grading reads via
+>   `latest_truth`, which relaxes only the retrieval gate). Committed public `_STADIUM_COORDS`
+>   reference (36 venues incl. international). Fixed domes never fetch.
+> - **projections** (Sleeper `sleeper_rotowire`, undocumented endpoint) — full stat line under
+>   `scoring.py` canonical keys so a row scores directly; `projected_points` stored as a
+>   cross-check only. Strict `validate_projection_keys` imports the `scoring.py` key-sets (no
+>   re-hardcoded values) — this is the unknown-key validator 1.3 deferred here.
+> - **adp_rankings** (`load_ff_rankings` FantasyPros ECR) — market rankings, `knowable_as_of =
+>   scrape_date`; IDP dropped, DST kept NULL-`gsis_id` and joined by normalized team abbr
+>   (`JAC→JAX` alias added). New `base.ids_by_fantasypros` crosswalk helper.
+>
+> **PROJECTIONS SCOPE DECISION (operator-confirmed 2026-07-20).** Free, leakage-clean,
+> point-in-time *historical* (2021-2025) stat-line projections do NOT exist: Sleeper's endpoint
+> returns historical rows but its `last_modified` is null or a POST-game batch stamp, failing the
+> spike-1.2 point-in-time bar that `db_fpecr` cleared. Decision: projections are **current-season-
+> forward** (pull pre-game, stamp knowable=retrieved=pull day; feeds 2.1 + the live loop); a bulk
+> historical backfill is permitted ONLY under the explicit `latest_truth` view (knowable =
+> `week_first_gameday`), never presented as a reconstructed pre-game snapshot. This amends the
+> plan's "consensus projections" wording — the source is a **single provider (Rotowire), not a
+> consensus**. **Phase-4 backtest consequence:** the verified point-in-time market signal remains
+> spike-1.2's `db_fpecr` weekly ECR (which lands in `adp_rankings`); a projection-driven backtest
+> series is exploratory until Phase 4 verifies/reconstructs a trustworthy series.
+>
+> **Verification (multi-agent, ultracode).** Three sequential workflows: (1) read-only recon —
+> five source-domain probes → adversarial verify → synthesis into the locked design doc; (2) build
+> — shared-foundation barrier then five per-source modules + divergence in parallel; (3) adversarial
+> leakage + correctness audit, one skeptic per module re-deriving against REAL nflverse data. The
+> audit found **no leakage bugs** (the load-bearing property held across all six accessors) and 4
+> confirmed correctness findings, all fixed here: **[MED]** weather selected the wrong game-hour for
+> every non-Eastern venue (ET `gametime` indexed into a stadium-local hourly array) — fixed to fetch
+> in ET (`_SCHEDULE_TZ`) with `kickoff_local` converted to true local via `zoneinfo`; **[LOW]** the
+> stadium-completeness test only exercised the 2023 fixture — replaced with a frozen 36-venue set;
+> **[LOW]** the projections kicker mapper silently dropped `fgm_0_19` (sub-20-yd makes scored 0 not
+> +3) — folded into the 0–39 bucket with a regression test; **[LOW]** the divergence confidence gate
+> compares a positional delta against overall-scale `sd` (units mismatch) — documented honestly and
+> the columns labelled `sd(ovr)`/`spread(ovr)` (a positional-scale gate + VBD weighting land with
+> valuation in 2.1; rule 6). Suite green: **212 passed** (from 167), `ziggurat smoke` + repo-boundary
+> clean.
+>
+> **Forward items / deferrals.** (1) Exact ESPN D/ST `points_allowed`/`yards_allowed` charge
+> semantics (opponent def/return TDs & safeties scored against our offense — ESPN does not count
+> them; v1 over-charges) → **item 3.8** post-Week-1 box-score reconciliation; audit columns
+> (`team_score`/`opp_score`) retained so it refines without re-ingesting. (2) Kicker 50–59 vs 60+
+> cannot be split from Sleeper's `fgm_50p` (a 60+ FG scores +5 not +6, rare). (3) News headline
+> speed-lane deferred to **3.6** (in-season concern). (4) Live ESPN-side rank snapshot for the
+> divergence report → **item 3.1** (the report reads ESPN-side rows from JSON until then). (5) Odds
+> API 5-min snapshots, `db_fpecr` weekly-panel backfill, and a trusted historical projection series
+> → **Phase 4**. (6) Weather live forecast-pull cadence → the weekly loop (**3.7**); sub-day/intraday
+> knowledge time remains the standing Phase-3 enhancement.
 
 ### ✦ Checkpoint 1: Data spine review
 Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's recommendation; adjust Phase 2 for anything 1.1 revealed (especially draft-results visibility and settings fidelity); record decisions in the Update blocks and amend this plan.

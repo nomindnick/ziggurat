@@ -36,13 +36,27 @@ two explicit views: safe-default `historical` gates both knowledge and retrieval
 time; `latest_truth` intentionally allows later corrections for final grading or
 accepted immutable bulk history. The deprecated `nfl_data_py` dependency was
 replaced by the maintained `nflreadpy` client behind a tested adapter, source
-schema drift fails loudly, and ordered SQLite migrations/indexes are live. The
-suite is green. Forward items remain intraday knowledge time, historical injury
-trajectory coverage, and D/ST team-defense stats.
+schema drift fails loudly, and ordered SQLite migrations/indexes are live.
 
-Next: **1.5 projections/ADP/odds/weather ingestion**, then Checkpoint 1. Calendar
-anchors: draft expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL
-Week 1 ~Sept 10 (Phase 3 must precede it).
+**1.5 projections/ADP/odds/weather + D/ST team-defense ingestion — done
+2026-07-20.** Five sources land behind migration `003_market_context.sql`
+(`schema_version` 3), each with the item-1.4 as-of pattern + leakage/fixture
+tests: **team_defense** (`load_team_stats` + schedules scores → a D/ST line that
+prices directly through `score_dst`; ESPN charge semantics deferred to 3.8),
+**game_odds** (closing lines, `knowable=gameday`), **game_weather** (Open-Meteo
+forecast + ERA5 archive, two-regime `forecast_source`; context only), **projections**
+(Sleeper `sleeper_rotowire`, current-season-forward + `latest_truth`-only bulk
+backfill — free historical point-in-time stat-line projections proved infeasible,
+operator-confirmed), **adp_rankings** (FantasyPros ECR). The **ESPN-vs-market
+divergence report** (`core/divergence.py`, `ziggurat divergence` CLI) runs and
+prints a readable table (done-when met). Built via three verified workflows
+(recon → build → adversarial audit); the audit found no leakage bugs and 4
+correctness findings, all fixed. Suite green (212 passed). Design +
+deferrals in `IMPLEMENTATION_PLAN.md` 1.5 and `intel/research/ingestion-1.5-design.md`.
+
+Next: **Checkpoint 1 (data spine review)**, then Phase 2. Calendar anchors: draft
+expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL Week 1 ~Sept 10
+(Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 

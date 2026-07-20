@@ -158,6 +158,7 @@ TEAM_ALIASES: dict[str, str] = {
     "SD": "LAC",   # Chargers (legacy)
     "WSH": "WAS",  # Washington (variant)
     "LVR": "LV",   # Raiders (variant)
+    "JAC": "JAX",  # Jaguars (FantasyPros uses JAC; schedules use JAX)
 }
 
 
@@ -221,6 +222,35 @@ def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
                            pfr, out[pfr], gsis)
             continue
         out[pfr] = gsis
+    return out
+
+
+def ids_by_fantasypros(conn: sqlite3.Connection) -> dict[str, tuple[str | None, str | None]]:
+    """fantasypros_id -> (gsis_id, espn_id) from the latest players snapshot.
+
+    The crosswalk resolution for FantasyPros-keyed sources (ECR rankings). Reads
+    the newest retrieved row per gsis_id (mirrors ``gsis_by_pfr``); a fantasypros
+    id should map to exactly one player, so a collision is logged (not silently
+    last-write-wins) and the first mapping kept. players.py already normalizes
+    espn_id/fantasypros_id to bare digit strings, so no per-row coercion here.
+    """
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for r in conn.execute(
+        """
+        SELECT fantasypros_id, gsis_id, espn_id FROM players p
+        WHERE fantasypros_id IS NOT NULL AND retrieved_as_of = (
+            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
+        )
+        """
+    ):
+        fp, gsis, espn = r["fantasypros_id"], r["gsis_id"], r["espn_id"]
+        if fp in out and out[fp] != (gsis, espn):
+            logger.warning(
+                "crosswalk: fantasypros_id %s maps to multiple players (%s, %s); keeping first",
+                fp, out[fp], (gsis, espn),
+            )
+            continue
+        out[fp] = (gsis, espn)
     return out
 
 
