@@ -7,9 +7,8 @@ deliberately excluded here (odds + weather are item 1.5; storing post-game
 actuals would leak). Structural facts are knowable at preseason release.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 # Schedule columns we persist (each maps 1:1 to the import_schedules frame).
 _COLUMNS = (
@@ -37,6 +36,7 @@ def _knowable(src) -> str | None:
 
 
 def ingest_schedules(conn, df, *, retrieved_as_of: str) -> int:
+    base.require_columns(df, _COLUMNS, source="schedules")
     rows = base.frame_to_rows(
         df,
         {c: c for c in _COLUMNS},
@@ -55,7 +55,7 @@ def pull_schedules(conn, years, *, retrieved_as_of: str) -> int:
     return ingest_schedules(conn, df, retrieved_as_of=retrieved_as_of)
 
 
-def get_schedule(conn, *, as_of, season=None, week=None):
+def get_schedule(conn, *, as_of, season=None, week=None, view: base.AsOfView = "historical"):
     """Games knowable on or before ``as_of`` (keyword-only; no implicit now)."""
     clauses, params = [], {}
     if season is not None:
@@ -66,5 +66,5 @@ def get_schedule(conn, *, as_of, season=None, week=None):
         params["week"] = week
     return base.select_as_of(
         conn, "schedules", as_of=as_of, key_cols=["game_id"],
-        extra_where=" AND ".join(clauses), params=params,
+        extra_where=" AND ".join(clauses), params=params, view=view,
     )

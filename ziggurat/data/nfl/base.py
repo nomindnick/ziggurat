@@ -7,21 +7,36 @@ Two knowledge-time columns on every fact table (see db/schema.sql):
     schedules use a preseason anchor.
   * ``retrieved_as_of`` — when we pulled it (provenance + revision key).
 
-``select_as_of`` is the one query every accessor routes through: it returns the
-latest ``retrieved_as_of`` snapshot per natural key among rows both *knowable*
-and *retrieved* on or before ``as_of`` — the leakage-safe read.
+``select_as_of`` is the one query every accessor routes through. It supports
+two deliberately distinct views:
+
+* ``historical`` (the default) reconstructs what this system had retrieved by
+  ``as_of``. Both timestamps gate the read.
+* ``latest_truth`` ignores retrieval time and uses the newest correction for a
+  fact that was already knowable by ``as_of``. This is useful for outcome
+  grading and bulk-loaded immutable history, but must be requested explicitly.
 """
 
 import logging
-import math
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from typing import Literal
 
 import pandas as pd
 
 from ziggurat.data.asof import normalize_as_of
 
 logger = logging.getLogger("ziggurat.data.nfl")
+
+AsOfView = Literal["historical", "latest_truth"]
+AS_OF_VIEWS = ("historical", "latest_truth")
+
+
+def require_columns(df: pd.DataFrame, required: Sequence[str], *, source: str) -> None:
+    """Fail loudly when an upstream release changes the persisted schema."""
+    missing = sorted(set(required) - set(df.columns))
+    if missing:
+        raise ValueError(f"{source}: source schema missing required columns {missing}")
 
 
 def note_drops(source: str, dropped: int, total: int, *, why: str = "unresolved knowledge time") -> None:
@@ -186,17 +201,16 @@ def select_as_of(
     columns: str = "*",
     extra_where: str = "",
     params: Mapping | None = None,
+    view: AsOfView = "historical",
 ) -> list[sqlite3.Row]:
-    """The leakage-safe read every accessor uses.
+    """The temporal read every accessor uses.
 
-    ``knowable_as_of`` is the SOLE leakage gate: a row is visible iff the fact
-    became knowable on or before ``as_of`` (SPEC key decision 4 — "returns only
-    what was knowable at that moment"). This is what makes a backtest correct:
-    nflverse history is bulk-pulled *now* (retrieved_as_of = today), yet a replay
-    as-of 2023 must still see 2023-knowable facts. ``retrieved_as_of`` therefore
-    does NOT gate visibility — it only selects the latest *version* per key
-    (handling corrections/re-pulls): among rows for a key that are knowable by
-    ``as_of``, the one with the greatest ``retrieved_as_of`` wins.
+    ``historical`` is safe-by-default: a row is visible only when both the fact
+    and this system's copy of that version existed by ``as_of``. ``latest_truth``
+    keeps the fact-time gate but intentionally selects the newest retrieved
+    correction even when that version arrived later. The latter is appropriate
+    for final outcome grading and explicitly accepted bulk-history use; it is
+    not a reconstruction of the information set available at the time.
 
     ``as_of`` is validated by ``normalize_as_of`` (no implicit "now").
     ``extra_where`` is appended with AND (trusted, code-authored SQL + bound
@@ -211,9 +225,13 @@ def select_as_of(
     enhancement, tracked in IMPLEMENTATION_PLAN 1.4. Until then, a same-day
     pre-kickoff caller must pass ``D-1``.
     """
+    if view not in AS_OF_VIEWS:
+        raise ValueError(f"unknown as-of view {view!r} (known: {AS_OF_VIEWS})")
+
     cutoff = normalize_as_of(as_of).isoformat()
     key_match = " AND ".join(f"t2.{k} = t.{k}" for k in key_cols)
     where_extra = f" AND ({extra_where})" if extra_where else ""
+    retrieval_gate = "AND t2.retrieved_as_of <= :as_of" if view == "historical" else ""
     sql = f"""
         SELECT {columns}
         FROM {table} t
@@ -222,6 +240,7 @@ def select_as_of(
               SELECT MAX(t2.retrieved_as_of) FROM {table} t2
               WHERE {key_match}
                 AND t2.knowable_as_of <= :as_of
+                {retrieval_gate}
           ){where_extra}
     """
     bound = {"as_of": cutoff, **(dict(params) if params else {})}

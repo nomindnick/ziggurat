@@ -1,4 +1,4 @@
-"""nfl_data_py / nflverse ingestion (item 1.4).
+"""nflreadpy / nflverse ingestion (item 1.4).
 
 Each source has a thin client that wraps exactly one `nfl.import_*` call (the
 patch seam cached-fixture tests replace) and upserts into SQLite with two

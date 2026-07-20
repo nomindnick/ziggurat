@@ -29,15 +29,16 @@ complete: full PPR (+2-pt, nflverse fumble components), distance kicker with
 −1/miss (missed XP scores 0), and D/ST with BOTH points- and yards-allowed
 brackets incl. the explicit implicit-zero bands — locked to the ESPN fixture.
 
-**1.4 NFL data ingestion — done 2026-07-16.** nflverse sources (players
-crosswalk, schedules, weekly stats, snaps, NGS, depth charts, injuries) land in
-SQLite under `ziggurat/data/nfl/` with the as-of leakage model: **`knowable_as_of`
-is the sole leakage gate; `retrieved_as_of` never gates** (so backtests bulk-pulled
-now read only what was knowable then) — `base.select_as_of` is the one read path.
-Done-when met: `usage.usage_deltas` (leakage-tested RB usage trends). `nfl_data_py`
-installs `--no-deps` (see dev workflow). 154 tests green; adversarial leakage audit
-resolved (see the 1.4 Update block). Two forward items recorded there: intraday
-knowledge time (Phase 3) and the D/ST team-defense-stats gap (before Phase 4).
+**1.4 NFL data ingestion — done 2026-07-16; foundation stabilized 2026-07-20.**
+nflverse sources (players, schedules, weekly stats, snaps, NGS, depth charts,
+injuries) land in SQLite under `ziggurat/data/nfl/`. `base.select_as_of` now has
+two explicit views: safe-default `historical` gates both knowledge and retrieval
+time; `latest_truth` intentionally allows later corrections for final grading or
+accepted immutable bulk history. The deprecated `nfl_data_py` dependency was
+replaced by the maintained `nflreadpy` client behind a tested adapter, source
+schema drift fails loudly, and ordered SQLite migrations/indexes are live. The
+suite is green. Forward items remain intraday knowledge time, historical injury
+trajectory coverage, and D/ST team-defense stats.
 
 Next: **1.5 projections/ADP/odds/weather ingestion**, then Checkpoint 1. Calendar
 anchors: draft expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL
@@ -48,9 +49,12 @@ Update this section whenever a phase or checkpoint closes.
 ## Standing rules (non-negotiable, from the SPEC)
 
 1. **`as_of` on every data read.** Every read accessor takes a keyword-only
-   `as_of` (no default, no implicit "now") and returns only what was knowable
-   at that moment. Every accessor ships with a leakage test. Convention:
-   `ziggurat/data/asof.py`; exemplar to copy: `tests/test_asof_pattern.py`.
+   `as_of` (no default, no implicit "now") and defaults to the `historical` view,
+   which gates both `knowable_as_of` and `retrieved_as_of`. `latest_truth` is an
+   explicit opt-in for corrected outcomes or deliberately accepted immutable
+   bulk history; never use it for mutable decision inputs. Every accessor ships
+   with a leakage test. Convention: `ziggurat/data/asof.py` and
+   `ziggurat/data/nfl/base.py`.
 2. **House scoring rules live ONLY in `ziggurat/core/scoring.py`.** No other
    module hard-codes a scoring value. As of item 1.3 the numbers are the real
    league settings (transcribed from spike 1.1, locked to the ESPN fixture) and
@@ -95,7 +99,7 @@ ziggurat/            the Python package (deterministic tools)
   repo_guard.py      public-repo boundary patterns (shared by hook + tests)
   scaffold.py        recreates gitignored intel/ skeleton from templates/
 backtest/            Phase 4 experiments; imports ziggurat/ directly
-db/schema.sql        public schema; the .sqlite file itself is gitignored
+db/schema.sql        initial public schema; ordered upgrades in db/migrations/
 config/llm.toml      task-tag -> backend/tier routing table
 templates/intel/     committed starter skeleton for the private intel/ tree
 intel/               (gitignored) opponents/, weekly/, research/, heuristics.md
@@ -109,7 +113,7 @@ tests/               pytest suite; patterns established here get copied
 ```bash
 # fresh clone, once:
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/pip install --no-deps nfl_data_py   # see note below (item 1.4)
+# nflreadpy is a declared dependency; no manual second install step.
 git config core.hooksPath scripts/hooks   # per clone, required
 .venv/bin/ziggurat intel init             # recreate private intel/ skeleton
 .venv/bin/ziggurat db init                # create db/ziggurat.sqlite
@@ -124,14 +128,12 @@ golden-master cases for scoring, leakage tests for accessors, the mock-draft
 sim as the draft engine's harness, unit tests for pure logic, thin
 cached-fixture integration tests for ingestion.
 
-**`nfl_data_py` install (item 1.4).** It must be installed with `--no-deps`: its
-released metadata pins `pandas<2` / `numpy<2`, which have no cp312 wheels (pip
-would try to source-build pandas 1.x and fail), yet the library runs fine on
-modern pandas. Its real runtime deps (pandas/numpy/pyarrow/appdirs/dateutil/
-requests) are declared in `pyproject.toml`, so `pip install -e '.[dev]'` then
-`pip install --no-deps nfl_data_py` gives a working env. Ingestion clients wrap
-each `nfl.import_*` call at a single seam so cached-fixture tests patch there
-(no network in the test suite).
+**NFL source client (item 1.4).** `nfl_data_py` is deprecated upstream and its
+metadata conflicts with modern pandas/NumPy. Ziggurat uses the maintained
+`nflreadpy` package through `ziggurat/data/nfl/source.py`, which converts Polars
+frames to pandas at one seam. Cached-fixture and adapter-contract tests remain
+offline; ingesters validate required columns so upstream schema changes fail
+loudly rather than storing partial rows.
 
 Phase 1 prep: ESPN private-league auth needs `SWID` and `ESPN_S2` cookie
 values in a local `.env` (gitignored; never committed, never echoed into

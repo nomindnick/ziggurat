@@ -82,13 +82,17 @@ def test_receiving_leakage_gates_by_gameday(db, nfl_fixture):
     assert later == {5, 6}
 
 
-def test_backtest_sees_knowable_facts_despite_later_retrieval(db, nfl_fixture):
-    # Bulk-pulled "now" (2026); a replay as-of 2023-10-11 must still see week 5
-    # (knowable then) and hide week 6 (future gameday). retrieved_as_of must NOT
-    # gate — this is the property the whole backtest program rests on.
+def test_latest_truth_sees_immutable_bulk_history(db, nfl_fixture):
+    # Bulk-pulled immutable outcomes can opt into latest_truth: week 5 is
+    # visible by its gameday while future week 6 remains hidden.
     _load_schedules(db, nfl_fixture)
     ngs.ingest_ngs_receiving(db, nfl_fixture("ngs_receiving"), retrieved_as_of="2026-07-16")
-    seen = {r["week"] for r in ngs.get_ngs_receiving(db, as_of="2023-10-11", season=2023)}
+    seen = {
+        r["week"]
+        for r in ngs.get_ngs_receiving(
+            db, as_of="2023-10-11", season=2023, view="latest_truth"
+        )
+    }
     assert seen == {5}
 
 

@@ -13,9 +13,8 @@ Anatomy each source repeats: a `ingest_*` (frame -> cleaned rows -> upsert), a
 route through base.select_as_of. Ships with a leakage test.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 _COLMAP = {
     "gsis_id": "gsis_id",
@@ -50,6 +49,7 @@ def _norm_id(value):
 
 
 def ingest_players(conn, df, *, retrieved_as_of: str) -> int:
+    base.require_columns(df, list(_COLMAP.values()), source="players")
     df = df.dropna(subset=["gsis_id"]).drop_duplicates(subset=["gsis_id"])
     rows = base.frame_to_rows(
         df, _COLMAP,
@@ -69,12 +69,19 @@ def pull_players(conn, *, retrieved_as_of: str) -> int:
     return ingest_players(conn, df, retrieved_as_of=retrieved_as_of)
 
 
-def get_players(conn, *, as_of):
+def get_players(conn, *, as_of, view: base.AsOfView = "historical"):
     """Crosswalk rows knowable on or before ``as_of`` (latest snapshot per gsis)."""
-    return base.select_as_of(conn, "players", as_of=as_of, key_cols=["gsis_id"])
+    return base.select_as_of(conn, "players", as_of=as_of, key_cols=["gsis_id"], view=view)
 
 
-def id_crosswalk(conn, *, as_of, id_from: str = "gsis_id", id_to: str = "espn_id") -> dict:
+def id_crosswalk(
+    conn,
+    *,
+    as_of,
+    id_from: str = "gsis_id",
+    id_to: str = "espn_id",
+    view: base.AsOfView = "historical",
+) -> dict:
     """Map one id space to another as of ``as_of`` (e.g. espn_id -> gsis_id)."""
-    rows = get_players(conn, as_of=as_of)
+    rows = get_players(conn, as_of=as_of, view=view)
     return {r[id_from]: r[id_to] for r in rows if r[id_from] is not None and r[id_to] is not None}

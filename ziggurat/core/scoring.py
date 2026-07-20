@@ -31,7 +31,7 @@ pass silently.
 
 Conventions:
   * Stat lines are plain mappings (actual or projected interchangeably), with
-    keys following nflverse/nfl_data_py naming so ingested rows score directly.
+    keys following nflverse naming so ingested rows score directly.
     Where nflverse splits a stat into components (lost fumbles → sack_/rushing_/
     receiving_fumbles_lost), each component key is scored; pre-summed projection
     aliases (fumbles_lost) are accepted too — supply one representation, not both.

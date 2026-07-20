@@ -17,6 +17,7 @@ pfr->gsis crosswalk or a week's snap row is missing (so "unknown" is
 distinguishable from a real 0.0 change).
 """
 
+from ziggurat.data.nfl import base
 from ziggurat.data.nfl.snap_counts import get_snap_counts
 from ziggurat.data.nfl.weekly_stats import get_weekly_stats
 
@@ -31,7 +32,15 @@ def _f(value) -> float:
     return 0.0 if value is None else float(value)
 
 
-def usage_deltas(conn, *, as_of, season: int, week: int, position: str | None = "RB") -> list[dict]:
+def usage_deltas(
+    conn,
+    *,
+    as_of,
+    season: int,
+    week: int,
+    position: str | None = "RB",
+    view: base.AsOfView = "historical",
+) -> list[dict]:
     """Week-over-week usage deltas for `week` vs each player's most recent prior
     knowable week, as of `as_of`.
 
@@ -44,11 +53,13 @@ def usage_deltas(conn, *, as_of, season: int, week: int, position: str | None = 
     """
     # All knowable weeks this season (position-filtered), grouped per player.
     by_player: dict[str, dict[int, dict]] = {}
-    for r in get_weekly_stats(conn, as_of=as_of, season=season, position=position):
+    for r in get_weekly_stats(
+        conn, as_of=as_of, season=season, position=position, view=view
+    ):
         by_player.setdefault(r["player_id"], {})[r["week"]] = r
 
     snaps: dict[tuple[str, int], dict] = {}
-    for s in get_snap_counts(conn, as_of=as_of, season=season):
+    for s in get_snap_counts(conn, as_of=as_of, season=season, view=view):
         if s["gsis_id"] is not None:
             snaps[(s["gsis_id"], s["week"])] = s
 

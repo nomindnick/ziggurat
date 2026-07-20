@@ -1,12 +1,14 @@
 """The as-of read (base.select_as_of) — leakage exemplar for every nflverse
 accessor.
 
-`knowable_as_of` is the SOLE leakage gate (SPEC: "returns only what was knowable
-at that moment"). `retrieved_as_of` does NOT gate visibility — history is
-bulk-pulled now, yet a backtest as-of a past date must still see facts knowable
-then; retrieved_as_of only selects the latest VERSION of a key (corrections).
-This is the two-column extension of tests/test_asof_pattern.py.
+Two explicit views prevent outcome corrections from silently entering decision
+features. The default `historical` view gates both fact and retrieval time;
+`latest_truth` gates fact time only and intentionally selects later corrections
+for outcome grading or explicitly accepted immutable bulk history.
 """
+
+import pandas as pd
+import pytest
 
 from ziggurat.data.nfl import base
 from ziggurat.data.store import connect
@@ -56,19 +58,41 @@ def test_knowable_gate_reveals_facts_as_they_become_knowable():
     assert _read(_syn(), "2025-09-05")["a"] == 12.0            # a's update now knowable
 
 
-def test_correction_uses_latest_version_even_if_retrieved_after_as_of():
-    # b is knowable 09-10; the 09-20 correction is the best version. A backtest
-    # as-of 09-15 should use the corrected 22.0 (retrieved_as_of does not gate).
-    seen = _read(_syn(), "2025-09-15")
+def test_historical_view_excludes_corrections_retrieved_after_as_of():
+    # b was known on 09-10, but its correction arrived 09-20. Historical replay
+    # as-of 09-15 must preserve the original value that was available then.
+    assert _read(_syn(), "2025-09-15")["b"] == 20.0
+
+
+def test_latest_truth_view_intentionally_uses_later_correction():
+    rows = base.select_as_of(
+        _syn(), "syn", as_of="2025-09-15", key_cols=["k"], view="latest_truth"
+    )
+    seen = {row["k"]: row["v"] for row in rows}
     assert seen["b"] == 22.0
-    # ...but before b is knowable at all, it is absent regardless of the pull.
-    assert "b" not in _read(_syn(), "2025-09-09")
+    # Fact time still gates latest-truth reads.
+    assert "b" not in {
+        row["k"]
+        for row in base.select_as_of(
+            _syn(), "syn", as_of="2025-09-09", key_cols=["k"], view="latest_truth"
+        )
+    }
 
 
 def test_knowable_gate_hides_future_fact_even_though_already_retrieved():
     # c was pulled 09-01 but is not knowable until 09-25 — must stay hidden.
     assert "c" not in _read(_syn(), "2025-09-24")
     assert _read(_syn(), "2025-09-25")["c"] == 30.0
+
+
+def test_unknown_view_is_rejected():
+    with pytest.raises(ValueError, match="unknown as-of view"):
+        base.select_as_of(_syn(), "syn", as_of="2025-09-30", key_cols=["k"], view="future")
+
+
+def test_source_schema_drift_is_loud():
+    with pytest.raises(ValueError, match="missing required columns.*week"):
+        base.require_columns(pd.DataFrame({"season": [2023]}), ["season", "week"], source="fixture")
 
 
 def test_extra_where_is_applied():

@@ -12,9 +12,8 @@ the day their team played, so it is stamped with the team gameday from
 inserted with a NULL knowledge time — dropping is the leakage-safe default.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 # Columns we persist; each maps 1:1 to the import_weekly_data frame by name.
 # (player_id is the gsis id.) Excludes base's retrieved_as_of/knowable_as_of.
@@ -45,6 +44,7 @@ def ingest_weekly_stats(conn, df, *, retrieved_as_of: str) -> int:
     Rows whose (season, week, recent_team) has no gameday are dropped (counted
     via the difference between the frame length and the return value).
     """
+    base.require_columns(df, _COLUMNS, source="weekly_stats")
     gdm = base.game_date_map(conn)
 
     def _knowable(r):
@@ -68,7 +68,16 @@ def pull_weekly_stats(conn, years, *, retrieved_as_of: str) -> int:
     return ingest_weekly_stats(conn, df, retrieved_as_of=retrieved_as_of)
 
 
-def get_weekly_stats(conn, *, as_of, season=None, week=None, player_id=None, position=None):
+def get_weekly_stats(
+    conn,
+    *,
+    as_of,
+    season=None,
+    week=None,
+    player_id=None,
+    position=None,
+    view: base.AsOfView = "historical",
+):
     """Weekly stat rows knowable on or before ``as_of`` (keyword-only; no implicit
     now). Latest snapshot per (player_id, season, week)."""
     clauses, params = [], {}
@@ -87,5 +96,5 @@ def get_weekly_stats(conn, *, as_of, season=None, week=None, player_id=None, pos
     return base.select_as_of(
         conn, "weekly_stats", as_of=as_of,
         key_cols=["player_id", "season", "week"],
-        extra_where=" AND ".join(clauses), params=params,
+        extra_where=" AND ".join(clauses), params=params, view=view,
     )

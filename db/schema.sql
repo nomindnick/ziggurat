@@ -3,17 +3,12 @@
 -- Conventions (see CLAUDE.md and ziggurat/data/asof.py):
 --   * Knowledge time: every fact table carries TWO ISO-8601 TEXT columns
 --     (lexicographic order == chronological order):
---       - knowable_as_of : when the fact became TRUE/PUBLIC — the primary
---         leakage filter (a week-N game stat is knowable on that game's date; an
---         injury report on its date_modified; a schedule at preseason release).
---       - retrieved_as_of: when WE pulled it — provenance, and it selects the
---         latest VERSION of a key (corrections/re-pulls). It does NOT gate
---         visibility: history is bulk-pulled now but a backtest as-of 2023 must
---         still see 2023-knowable facts.
---     Accessors filter on `knowable_as_of <= :as_of` (the sole leakage gate) and
---     take the greatest `retrieved_as_of` among a key's knowable rows. See
---     ziggurat/data/nfl/base.py::select_as_of (and test_asof_pattern.py for the
---     single-column projection variant where retrieval *is* the knowledge time).
+--       - knowable_as_of : when the fact became TRUE/PUBLIC.
+--       - retrieved_as_of: when this system obtained that version.
+--     Safe-default historical reads gate both timestamps. Explicit latest-truth
+--     reads gate knowledge time only and may use a later correction for outcome
+--     grading or accepted immutable bulk history. See
+--     ziggurat/data/nfl/base.py::select_as_of.
 --   * Every read accessor filters on an `as_of` argument and ships a leakage test.
 --   * The .sqlite file itself is gitignored; only this schema is public.
 
@@ -25,10 +20,10 @@ CREATE TABLE IF NOT EXISTS meta (
 INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');
 
 -- ===================================================================
--- NFL data ingestion (item 1.4). Source: nfl_data_py / nflverse.
+-- NFL data ingestion (item 1.4). Source: nflreadpy / nflverse.
 -- ===================================================================
 
--- Player cross-ID crosswalk (nfl_data_py.import_ids / DynastyProcess).
+-- Player cross-ID crosswalk (nflreadpy.load_ff_playerids / DynastyProcess).
 -- STABLE IDENTITY MAPPING ONLY (gsis <-> pfr <-> espn <-> sleeper <-> ...);
 -- time-varying attributes (team, depth, status) live in the per-week tables.
 -- D/STs and some rookies are absent here — that gap is asserted by a test and
