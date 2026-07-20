@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DB_DIR = REPO_ROOT / "db"
 SCHEMA_PATH = DB_DIR / "schema.sql"
+MIGRATIONS_DIR = DB_DIR / "migrations"
 DEFAULT_DB_PATH = DB_DIR / "ziggurat.sqlite"
 
 CONFIG_DIR = REPO_ROOT / "config"

@@ -18,9 +18,8 @@ pull_* (wraps the one nfl.import_snap_counts seam tests patch), keyword-only
 ``as_of`` accessor through base.select_as_of. Ships a leakage test.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 # db_column -> source_column. 1:1 by name for every persisted column EXCEPT
 # gsis_id, which is absent from the frame and resolved from the crosswalk below.
@@ -50,6 +49,7 @@ def ingest_snap_counts(conn, df, *, retrieved_as_of: str) -> int:
     ``gsis_id`` is resolved from the players crosswalk (NULL if absent).
     Returns the number of rows written.
     """
+    base.require_columns(df, list(_COLMAP.values()), source="snap_counts")
     game_dates = base.game_date_map(conn)   # (season, week, team) -> gameday
     gsis_map = base.gsis_by_pfr(conn)       # pfr_id -> gsis_id
 
@@ -79,7 +79,15 @@ def pull_snap_counts(conn, years, *, retrieved_as_of: str) -> int:
     return ingest_snap_counts(conn, df, retrieved_as_of=retrieved_as_of)
 
 
-def get_snap_counts(conn, *, as_of, season=None, week=None, pfr_player_id=None):
+def get_snap_counts(
+    conn,
+    *,
+    as_of,
+    season=None,
+    week=None,
+    pfr_player_id=None,
+    view: base.AsOfView = "historical",
+):
     """Snap-count rows knowable on or before ``as_of`` (keyword-only; no implicit
     now). Latest ``retrieved_as_of`` snapshot per (pfr_player_id, season, week)."""
     clauses, params = [], {}
@@ -95,5 +103,5 @@ def get_snap_counts(conn, *, as_of, season=None, week=None, pfr_player_id=None):
     return base.select_as_of(
         conn, "snap_counts", as_of=as_of,
         key_cols=["pfr_player_id", "season", "week"],
-        extra_where=" AND ".join(clauses), params=params,
+        extra_where=" AND ".join(clauses), params=params, view=view,
     )

@@ -18,6 +18,7 @@ in `scoring.py` / item 3.8).
 import json
 import math
 import re
+from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from pathlib import Path
 
@@ -362,7 +363,7 @@ def test_rules_are_swappable_without_touching_callers():
 
 def test_house_rules_is_frozen_and_hashable():
     # Frozen so it is a safe default arg / cache key; the bracket tables are tuples.
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         HOUSE_RULES.points_per_reception = 0.5  # type: ignore[misc]
     assert hash(HOUSE_RULES)  # hashable => usable as a memoization key
 

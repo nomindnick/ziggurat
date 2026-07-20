@@ -7,12 +7,12 @@ retrofitting this is prohibitively painful, so it is load-bearing from day one):
        def get_projections(conn, *, as_of, ...) -> ...
    Callers must state the knowledge instant explicitly; there is no "now".
 
-2. **Knowledge time lives in the schema.** Tables carry an ISO-8601 TEXT column
-   (`retrieved_as_of` for snapshots we pulled, `report_date`/`published_at` for
-   externally timestamped facts). ISO-8601 TEXT compares lexicographically in
-   time order, so `WHERE retrieved_as_of <= :as_of` is the standard filter.
-   Semantics are inclusive end-of-day: `as_of=2025-09-05` sees facts that became
-   knowable on 2025-09-05.
+2. **Knowledge and retrieval time are distinct.** NFL fact tables carry
+   `knowable_as_of` (when the source fact was public) and `retrieved_as_of` (when
+   this system obtained that version). Historical reads gate both. Explicit
+   `latest_truth` reads gate knowledge time only so final corrected outcomes can
+   grade decisions without pretending the correction was available at the time.
+   Semantics are inclusive end-of-day until Phase 3 adds intraday timestamps.
 
 3. **Every accessor ships with a leakage test.** Insert facts on both sides of a
    knowledge-time boundary, query as-of the boundary, assert the later facts are

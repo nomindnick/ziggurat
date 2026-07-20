@@ -14,9 +14,8 @@ keyword-only ``as_of`` accessor routing through ``base.select_as_of``. Ships a
 leakage test.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 # Depth-chart columns we persist (each maps 1:1 to the import_depth_charts frame;
 # base stamps retrieved_as_of / knowable_as_of).
@@ -45,6 +44,7 @@ def ingest_depth_charts(conn, df, *, retrieved_as_of: str) -> int:
     resolves). Rows whose (season, week) has no schedule -> no gameday are
     dropped rather than stored with a NULL ``knowable_as_of``. Returns rows
     written."""
+    base.require_columns(df, _COLUMNS, source="depth_charts")
     week_first = base.week_first_gameday_map(conn)
 
     def knowable(src) -> str | None:
@@ -78,7 +78,10 @@ def pull_depth_charts(conn, years, *, retrieved_as_of: str) -> int:
     return ingest_depth_charts(conn, df, retrieved_as_of=retrieved_as_of)
 
 
-def get_depth_chart(conn, *, as_of, season=None, week=None, team=None):
+def get_depth_chart(
+    conn, *, as_of, season=None, week=None, team=None,
+    view: base.AsOfView = "historical",
+):
     """Depth-chart rows knowable on or before ``as_of`` (keyword-only; no implicit
     now). ``team`` filters ``club_code``. Returns the latest ``retrieved_as_of``
     snapshot per natural key among rows both knowable and retrieved by ``as_of``."""
@@ -94,5 +97,5 @@ def get_depth_chart(conn, *, as_of, season=None, week=None, team=None):
         params["team"] = team
     return base.select_as_of(
         conn, "depth_charts", as_of=as_of, key_cols=list(_KEY_COLS),
-        extra_where=" AND ".join(clauses), params=params,
+        extra_where=" AND ".join(clauses), params=params, view=view,
     )

@@ -21,9 +21,8 @@ import_injuries frame EXCEPT ``date_modified``, which is stored as its ISO date
 as-is) — the same normalization that derives ``knowable_as_of``.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 # Injury columns we persist (each maps 1:1 to the import_injuries frame).
 _COLUMNS = (
@@ -39,6 +38,7 @@ def ingest_injuries(conn, df, *, retrieved_as_of: str) -> int:
     the week's first gameday), normalize date_modified to its ISO date, and
     upsert. Rows whose knowledge time can't be resolved are dropped, never
     inserted with a NULL ``knowable_as_of``."""
+    base.require_columns(df, _COLUMNS, source="injuries")
     df = df.dropna(subset=["gsis_id"])
     # Fallback knowledge time when a row has no date_modified: the report's own
     # TEAM gameday (needs schedules). NOT the week's first gameday, which would
@@ -82,7 +82,10 @@ def pull_injuries(conn, years, *, retrieved_as_of: str) -> int:
     return ingest_injuries(conn, df, retrieved_as_of=retrieved_as_of)
 
 
-def get_injuries(conn, *, as_of, season=None, week=None, gsis_id=None):
+def get_injuries(
+    conn, *, as_of, season=None, week=None, gsis_id=None,
+    view: base.AsOfView = "historical",
+):
     """Injury reports knowable on or before ``as_of`` (latest snapshot per
     gsis/season/week). Keyword-only ``as_of`` — no implicit now."""
     clauses, params = [], {}
@@ -98,5 +101,5 @@ def get_injuries(conn, *, as_of, season=None, week=None, gsis_id=None):
     return base.select_as_of(
         conn, "injuries", as_of=as_of,
         key_cols=["gsis_id", "season", "week"],
-        extra_where=" AND ".join(clauses), params=params,
+        extra_where=" AND ".join(clauses), params=params, view=view,
     )

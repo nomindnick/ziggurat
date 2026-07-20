@@ -15,9 +15,8 @@ The three tables differ only in their metric columns, so ingest/pull/get are one
 shared internal helper each, wrapped by three thin public functions apiece.
 """
 
-import nfl_data_py as nfl
-
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl import source as nfl
 
 # Persisted columns per table (each maps 1:1 to the import_ngs_data frame by
 # name). key + team_abbr are shared; the rest are the table's metrics.
@@ -58,6 +57,7 @@ def _ingest(conn, df, *, table: str, retrieved_as_of: str) -> int:
     game. Rows with ``week == 0`` (season aggregates) or an unresolvable game date
     are dropped (and counted) instead of persisted with a leaky knowledge time.
     """
+    base.require_columns(df, _COLUMNS[table], source=table)
     df = df[df["week"] > 0]
     game_dates = base.game_date_map(conn)
 
@@ -82,7 +82,16 @@ def _pull(conn, years, *, table: str, retrieved_as_of: str) -> int:
     return _ingest(conn, df, table=table, retrieved_as_of=retrieved_as_of)
 
 
-def _get(conn, *, table: str, as_of, season=None, week=None, player_gsis_id=None):
+def _get(
+    conn,
+    *,
+    table: str,
+    as_of,
+    season=None,
+    week=None,
+    player_gsis_id=None,
+    view: base.AsOfView = "historical",
+):
     """NGS lines knowable on or before ``as_of`` (keyword-only; no implicit now)."""
     clauses, params = [], {}
     if season is not None:
@@ -96,7 +105,7 @@ def _get(conn, *, table: str, as_of, season=None, week=None, player_gsis_id=None
         params["player_gsis_id"] = player_gsis_id
     return base.select_as_of(
         conn, table, as_of=as_of, key_cols=_NATURAL_KEY,
-        extra_where=" AND ".join(clauses), params=params,
+        extra_where=" AND ".join(clauses), params=params, view=view,
     )
 
 
@@ -109,9 +118,12 @@ def pull_ngs_receiving(conn, years, *, retrieved_as_of: str) -> int:
     return _pull(conn, years, table="ngs_receiving", retrieved_as_of=retrieved_as_of)
 
 
-def get_ngs_receiving(conn, *, as_of, season=None, week=None, player_gsis_id=None):
+def get_ngs_receiving(
+    conn, *, as_of, season=None, week=None, player_gsis_id=None,
+    view: base.AsOfView = "historical",
+):
     return _get(conn, table="ngs_receiving", as_of=as_of, season=season,
-                week=week, player_gsis_id=player_gsis_id)
+                week=week, player_gsis_id=player_gsis_id, view=view)
 
 
 # --- rushing -----------------------------------------------------------------
@@ -123,9 +135,12 @@ def pull_ngs_rushing(conn, years, *, retrieved_as_of: str) -> int:
     return _pull(conn, years, table="ngs_rushing", retrieved_as_of=retrieved_as_of)
 
 
-def get_ngs_rushing(conn, *, as_of, season=None, week=None, player_gsis_id=None):
+def get_ngs_rushing(
+    conn, *, as_of, season=None, week=None, player_gsis_id=None,
+    view: base.AsOfView = "historical",
+):
     return _get(conn, table="ngs_rushing", as_of=as_of, season=season,
-                week=week, player_gsis_id=player_gsis_id)
+                week=week, player_gsis_id=player_gsis_id, view=view)
 
 
 # --- passing -----------------------------------------------------------------
@@ -137,6 +152,9 @@ def pull_ngs_passing(conn, years, *, retrieved_as_of: str) -> int:
     return _pull(conn, years, table="ngs_passing", retrieved_as_of=retrieved_as_of)
 
 
-def get_ngs_passing(conn, *, as_of, season=None, week=None, player_gsis_id=None):
+def get_ngs_passing(
+    conn, *, as_of, season=None, week=None, player_gsis_id=None,
+    view: base.AsOfView = "historical",
+):
     return _get(conn, table="ngs_passing", as_of=as_of, season=season,
-                week=week, player_gsis_id=player_gsis_id)
+                week=week, player_gsis_id=player_gsis_id, view=view)
