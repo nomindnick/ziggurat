@@ -166,7 +166,78 @@ This plan is deliberately looser than a conventional sprint plan, because this p
 ### ✦ Checkpoint 1: Data spine review
 Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's recommendation; adjust Phase 2 for anything 1.1 revealed (especially draft-results visibility and settings fidelity); record decisions in the Update blocks and amend this plan.
 **Checkpoint notes:**
-> _[To be completed]_
+> **Held 2026-07-20. Phase 1 is closed (1.1–1.5 done).** The two scheduled-first
+> spikes retired the project's two biggest unknowns — historical market archives
+> (1.2 → `full_backtest`) and ESPN access/scoring fidelity (1.1 → full custom
+> scoring machine-readable) — so **no plan-structural surprises**; the phases stand
+> as written and this checkpoint is refinement, not redirection. Decisions:
+>
+> **A. State of the data spine.** In SQLite now (schema v3, strict as-of): players
+> crosswalk, schedules, weekly stats, snaps, NGS, depth charts, injuries (1.4);
+> team_defense, game_odds, game_weather, projections, adp_rankings (1.5); scoring.py
+> locked to the ESPN fixture (1.3). ESPN access proven for settings + rankings +
+> (in-season) rosters/matchups/transactions (1.1). **The one Phase-1-scoped-but-
+> unbuilt piece is the historical market PANEL** — 1.5 deferred the db_fpecr weekly-
+> ECR backfill and the Sleeper ownership series to Phase 4; that ingester is now the
+> first deliverable of item 4.1 (below), not a gap in the live spine.
+>
+> **B. Phase 4 backtest program — scoped per 1.2 (`full_backtest`).** The benchmark
+> is a **frozen local weekly market panel, 2021-2025**: (1) **PRIMARY expectation** =
+> DynastyProcess `db_fpecr` weekly PPR ECR (`ecr_type='wp'`, carries `ecr/best/worst/sd`
+> incl. K/DST), ingested under the **`latest_truth`** view (immutable accepted bulk
+> history — empirically zero in-place revisions over a 2-yr diff), NFL week inferred
+> from `scrape_date`, the in-progress edge week dropped, off-cadence scrapes deduped,
+> **our own copy pinned/mirrored** for durable provenance; (2) **CORROBORATING
+> attention** = Sleeper `/research` ownership **week-over-week deltas** (frozen weekly
+> snapshots; use deltas, not absolute levels — population is Sleeper's base, not our
+> 10-team ESPN room); (3) **optional HARD tier** = The Odds API player props for the
+> **2023-05+** window only, reported separately so a "lead over ECR" is never
+> overclaimed as a lead over sharp money. **Lead metric:** weeks from a Ziggurat
+> usage/opportunity flag at T to the ECR re-rank at T+1/T+2, plus hit-rate;
+> **precision@k, k≤3** (the real weekly claim budget). **Discipline:** train 2021-23 /
+> holdout 2024-25, grade decisions not outcomes, all reads through `latest_truth`
+> accessors. **Honest limits recorded:** ECR is usage-influenced (a softer bar than
+> Vegas money); weekly (not intraday) resolution; **K/DST lead grading is weaker**
+> (ECR-only, coarse dispersion) than skill positions. Team_defense (1.5) enables D/ST
+> decision replay. **Historical stat-line projections are infeasible** (1.5 decision) —
+> a projection-driven backtest series is exploratory only until Phase 4 verifies or
+> reconstructs one; the verified point-in-time market signal is `db_fpecr`, not
+> projections. Items 4.1/4.2 amended below.
+>
+> **C. Phase 2 adjustments — per 1.1.** (1) **Settings fidelity is excellent**, so
+> **2.1 replacement levels use the exact decoded roster structure** (10 teams ×
+> QB/2RB/2WR/TE/FLEX/D-ST/K, 7 bench, 1 IR; `TOTAL_POINTS_SCORED` seeding) with **no
+> hand-maintenance**. (2) **ESPN's own PPR draft ranks / ADP are reachable via the
+> same auth**, so **2.1's ESPN-vs-market divergence** (the 1.5 `core/divergence.py`
+> report is the foundation) wires live ESPN ranks for draft day (the report currently
+> reads the ESPN side from JSON; live ESPN rank pull lands with 2.1, ahead of the 3.1
+> scheduled sync). (3) **Prior-season draft results + final rosters are available via
+> the `leagueHistory` endpoint** — a concrete enrichment 1.1 unlocks: **calibrate the
+> 2.2 mock-sim opponent model and 2.3 opponent-need modeling on the room's ACTUAL past
+> behavior**, not solely the ESPN-rank+noise assumption. (4) **Draft date still unset**
+> (SNAKE, 60s/pick) → that 60s clock is Checkpoint 2's rehearsal target; monitor ESPN
+> for the schedule. Items 2.1/2.2/2.3 amended below.
+>
+> **D. Open confirmations carried forward (non-blocking).** `acquisitionBudget=100`
+> semantics — season transaction-count cap vs inert default — verify against the ESPN
+> UI (→ 3.4). Cookie (SWID/espn_s2) expiry must fail loud on 401/403 (→ 3.1). Trade
+> deadline (epoch ≈ early-Dec 2026) localized precisely (→ schedule module). Post-Week-1
+> box-score reconciliation of scoring.py D/ST charge semantics stays anchored at 3.8.
+>
+> **E. Housekeeping.** SPEC.md's tech-stack/data-model still name `nfl_data_py` /
+> `import_ids()`; that dependency was replaced by `nflreadpy` in 1.4 (recorded in
+> CLAUDE.md + item 1.4). The SPEC is the descriptive "what & why"; the operative
+> record is this plan — noting the drift here rather than rewriting the SPEC.
+>
+> **F. Sequencing decision.** **Nothing in Phase 4 blocks draft day.** Phase 2
+> (valuation core + draft weapon) is the sole draft-critical path, and with the draft
+> expected mid-to-late Aug and unscheduled, the ~4–6-week window is the binding
+> constraint — **Phase 2 begins next**; Phase 4 rolls alongside/after per its rolling
+> design. Phase-1 exit criteria (all Tier-1 data time-aware in SQLite; house rules
+> encoded and verified) are met.
+>
+> **G. Amendments applied at this checkpoint:** items 2.1, 2.2, 2.3, 4.1, 4.2 (inline
+> **Checkpoint-1 amendment** notes below).
 
 ---
 
@@ -177,18 +248,21 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 ### 2.1 [Build] Global valuation (VOR)
 **Goal:** Re-score consensus projections through `scoring.py`; compute replacement levels from league size/roster structure; produce ranked global values with the house-rules delta vs. ESPN default rankings surfaced explicitly (the "what the room can't see" report).
 **Done when:** valuation runs end-to-end from ingested data; spot-checks on known league quirks behave (e.g., pass-catching RBs and league-scored D/STs move the right direction vs. default ranks).
+**Checkpoint-1 amendment (2026-07-20):** replacement levels use the exact decoded roster structure from 1.1 (10×[QB/2RB/2WR/TE/FLEX/D-ST/K, 7 bench, 1 IR]) — no hand-maintenance. The "what the room can't see" report **builds on the shipped `core/divergence.py`** (item 1.5) — wire live ESPN PPR draft ranks/ADP (reachable via `espn_api`, same auth) as the ESPN side here, ahead of the 3.1 scheduled sync. Projections re-score through `scoring.py` via the 1.5 `projections` table + strict key validator.
 **Update:**
 > _[To be completed]_
 
 ### 2.2 [Build] Mock draft simulator
 **Goal:** Snake-draft sim with bot opponents drafting off ESPN default rank + noise (the room's actual behavior model), configurable to blend market ADP. This is both the strategy laboratory and the draft engine's test harness — build it *before* the engine it tests.
 **Done when:** 1,000 mock drafts run headlessly from any slot and output roster + projected-points distributions per strategy.
+**Checkpoint-1 amendment (2026-07-20):** the bot opponent model can be **calibrated on the room's ACTUAL past behavior** — pull prior-season draft results via the ESPN `leagueHistory` endpoint (1.1) and fit reach/ADP-adherence tendencies, rather than assuming pure ESPN-rank+noise. Keep ESPN-rank+noise as the fallback when history is thin. Draft is SNAKE @ 60s/pick (1.1); date still unset — the 60s clock is the Checkpoint-2 rehearsal target.
 **Update:**
 > _[To be completed]_
 
 ### 2.3 [Build] Draft pick engine
 **Goal:** Pick logic in the Fry–Ohlmann tradition (player value × board state × positional need), with survival probabilities keyed primarily on ESPN default rank, market/ESPN divergence exploitation, opponent-roster need modeling, and round-appropriate risk posture (floor early, ceiling late; bench picks as options). Validated by tournament runs in the 2.2 sim against naive strategies; distill the academic holdings into `intel/research/draft-strategy.md` as part of this item.
 **Done when:** the engine beats ESPN-rank-following bots in sim by a stable margin across slots, and its recommendations come with legible reasons.
+**Checkpoint-1 amendment (2026-07-20):** survival probabilities key primarily on ESPN default rank (1.1 confirms it drives the room); opponent-roster-need modeling can **seed from prior-season `leagueHistory` rosters** where available. The market/ESPN divergence the engine exploits is exactly the 1.5 divergence signal (via 2.1).
 **Update:**
 > _[To be completed]_
 
@@ -265,12 +339,14 @@ Operate the full loop through NFL Week 1 for real. Journal every friction, wrong
 ### 4.1 [Build] Backtest harness & decision grading
 **Goal:** Replay engine over the historical spine: step week-by-week through past seasons, exercising production code paths; scorecards for lead-time-vs-market (using the 1.2 proxy) and precision@k (k ≤ 3, the realistic claim budget).
 **Done when:** a trivial baseline strategy replays through 2023 producing graded weekly decisions.
+**Checkpoint-1 amendment (2026-07-20):** the **first deliverable is the historical market-panel ingester** deferred from 1.5 — DynastyProcess `db_fpecr` weekly PPR ECR (`ecr_type='wp'`, with `ecr/best/worst/sd`) into a new panel table read under **`latest_truth`** (immutable accepted bulk history), NFL week inferred from `scrape_date`, edge week dropped, off-cadence scrapes deduped, **our copy pinned/mirrored**; plus the Sleeper `/research` weekly ownership series (frozen snapshots; use w/w deltas). Scorecards: **lead-time-vs-market** (weeks from a Ziggurat flag at T to the ECR re-rank at T+1/T+2, + hit-rate) and **precision@k, k≤3**. The replay steps week-by-week exercising production code paths, all reads through `latest_truth` accessors (a bulk DB reads empty under the default `historical` view — by design).
 **Update:**
 > _[To be completed]_
 
 ### 4.2 [Experiment] Breakout detection
 **Goal:** Tune the 3.3 candidate generator's thresholds on train seasons; measure lead time and precision@k on holdout. Distinguish preseason breakouts (out of scope) from in-season opportunity shocks (the target). Fade detection as a secondary run if results warrant.
 **Done when:** findings in `intel/research/breakout-backtest.md`: tuned thresholds, honest holdout numbers, deployed defaults updated.
+**Checkpoint-1 amendment (2026-07-20):** tune on the `db_fpecr` lead metric, corroborated by Sleeper ownership deltas; train 2021-23 / hold out 2024-25. **State honestly** that the ECR bar is softer than sharp money and that **K/DST lead grading is weaker** (ECR-only, coarse dispersion). Optional hard-tier cross-check: The Odds API player props for the **2023-05+** window only, reported separately. A projection-driven variant is exploratory (no trustworthy historical stat-line projections — 1.5 decision).
 **Update:**
 > _[To be completed]_
 

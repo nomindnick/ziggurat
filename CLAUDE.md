@@ -12,8 +12,9 @@ facts, markdown under `intel/` holds judgment.
 
 ## Current status
 
-**Phase 1 (Ground Truth & Data Spine) — in progress.** Phase 0 complete
-2026-07-16. Both scheduled-first spikes closed 2026-07-16:
+**Phase 1 (Ground Truth & Data Spine) — COMPLETE (Checkpoint 1 held
+2026-07-20).** Phase 0 complete 2026-07-16. Both scheduled-first spikes closed
+2026-07-16:
 - **1.1 ESPN access** — `espn_api` authenticates (SWID/ESPN_S2 in local `.env`)
   and the full custom scoring (PPR, distance kicker incl. −1/miss, D/ST
   points-and-yards brackets) is machine-readable, so **no hand-transcription of
@@ -54,9 +55,19 @@ prints a readable table (done-when met). Built via three verified workflows
 correctness findings, all fixed. Suite green (212 passed). Design +
 deferrals in `IMPLEMENTATION_PLAN.md` 1.5 and `intel/research/ingestion-1.5-design.md`.
 
-Next: **Checkpoint 1 (data spine review)**, then Phase 2. Calendar anchors: draft
-expected mid-to-late August 2026 (Phases 0–2 must precede it); NFL Week 1 ~Sept 10
-(Phase 3 must precede it).
+**Checkpoint 1 (data spine review) — held 2026-07-20.** Re-plan recorded in
+IMPLEMENTATION_PLAN.md (Checkpoint 1 notes + inline amendments to 2.1/2.2/2.3 and
+4.1/4.2). Headline decisions: no plan-structural surprises (both spikes de-risked
+their unknowns); Phase 4 backtest scoped on the `db_fpecr` weekly-ECR panel +
+Sleeper ownership deltas (the panel ingester is 4.1's first deliverable, read under
+`latest_truth`); Phase 2 uses the exact decoded roster structure and can calibrate
+the mock-sim opponent model on prior-season `leagueHistory` drafts; **nothing in
+Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins next.**
+
+Next: **Phase 2 — Valuation Core & Draft Weapon** (2.1 global VOR → 2.2 mock sim →
+2.3 draft engine → 2.4 board TUI → Checkpoint 2 rehearsals). Calendar anchors: draft
+expected mid-to-late August 2026, still unscheduled (Phases 0–2 must precede it — the
+binding ~4–6-week constraint); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 
