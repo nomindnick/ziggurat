@@ -346,7 +346,66 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Done when:** 1,000 mock drafts run headlessly from any slot and output roster + projected-points distributions per strategy.
 **Checkpoint-1 amendment (2026-07-20):** the bot opponent model can be **calibrated on the room's ACTUAL past behavior** — pull prior-season draft results via the ESPN `leagueHistory` endpoint (1.1) and fit reach/ADP-adherence tendencies, rather than assuming pure ESPN-rank+noise. Keep ESPN-rank+noise as the fallback when history is thin. Draft is SNAKE @ 60s/pick (1.1); date still unset — the 60s clock is the Checkpoint-2 rehearsal target.
 **Update:**
-> _[To be completed]_
+> **Done 2026-07-21.** Snake mock-draft simulator with a 2025-calibrated
+> opponent model, entirely in the deletable `ziggurat/draft/` package (Rule 8):
+> `priors.py` (frozen `RoomPriors`, fitted 2025 values with per-number artifact
+> citations), `bots.py` (`Picker` seam — the 2.3 engine's plug-in point;
+> `RankNoiseBot` ESPN-rank+Gaussian-reach backbone honoring roster legality,
+> positional need, position-run nudges and a K/DST round-window; `AutodraftBot`;
+> `FollowVor`/`FollowEspnRank` operator baselines), `simulator.py` (snake loop,
+> post-draft legality/cap assertions, `run_many` distributions, `load_board` as
+> the ONLY DB seam — explicit keyword `as_of`, leakage-tested), `calibration.py`
+> (pure re-fit from the raw 2025 artifacts), and a thin `ziggurat mock-draft`
+> CLI. Import-time Rule-8 boundary test included. Built via the established
+> three verified workflows (recon → parallel build → 5-skeptic adversarial
+> audit with independent refuters), all agents Opus/xhigh.
+>
+> **Recon reality vs the amendment (full detail in gitignored
+> `intel/research/mocksim-2.2-recon.md`):** exactly ONE prior draft exists —
+> the league was founded 2025 (2015–2024 return 404). 2 of its 10 seats
+> autodrafted 100% of picks, leaving 8 human seats / 125 human picks (6 of
+> those drafters return in 2026). So per-manager calibration is off the table
+> and **ESPN-rank+noise is the primary model, not a fallback**, seeded with
+> AGGREGATE room priors fit from 2025: `reach_sigma=17.78` (human skill-only
+> reach spread vs the IDP-filtered draft-day db_fpecr board; editorial-board
+> fit also shipped), `autodraft_fraction=0.2`, `kdst_earliest_round=9`,
+> 16-round position-run curve, empirical board-adherence Pearson 0.907
+> (recorded, held neutral in the noise model to avoid double-counting).
+> Surprises: a real board-at-draft-time signal exists in TWO forms (2025 ESPN
+> editorial board joins 160/160 picks; db_fpecr scraped on the literal draft
+> day), but ESPN's own historical ADP is degenerate (flat 170.0) and the
+> fpecr redraft-overall board is IDP-contaminated (must filter+re-rank). No
+> per-pick timestamps exist; per-manager `position_lean` ships gated OFF.
+>
+> **Done-when met on real data:** `db/ziggurat.sqlite` was populated for real
+> this item (migrations→schema 4; 7,973 players / 57,892 projection rows /
+> 1,025 ESPN board rows @ 2026-07-21) and 1,000-draft headless runs work from
+> every slot: 10 slots × both strategies × 1,000 = 20,000 drafts in 87s with
+> per-strategy mean/p10/p50/p90 + roster-shape output. Follow-VOR beats
+> follow-ESPN in ALL 10 slots by ~+128 mean (seed-stable, pairing-unbiased) —
+> correctly framed as a HOUSE-PROJECTED-points gap (the grader shares VOR's
+> projection currency; on a non-divergent synthetic board naive VOR loses,
+> so board divergence sets the sign). Realized-points validation is Phase 4.
+>
+> **Audit:** leakage, mechanics, calibration math, standing rules, and
+> statistical validity all held under attack (every fitted number reproduced
+> independently; +128 stable across seeds; FLEX optimizer brute-force-verified).
+> 7 findings survived refutation, ALL minor; 5 fixed same-day (load_board
+> leakage test; up-front board-supply validation + loud post-draft
+> legality/cap failure with cap-aware fallback; CLI `--slot` bounds-check;
+> clean CLI empty-board error; if/try-aware Rule-8 scanner exempting
+> `TYPE_CHECKING`), 2 recorded as interpretive (reach-sigma board
+> commensurability — measured impact ~5%, a 2.3 tuning seam; the +128 framing
+> caveat above). Suite green: **292 passed**; repo-boundary + Rule-5 scans
+> clean (no colleague names/GUIDs/abbrevs in committed files).
+>
+> **Forward items:** (1) 2.1 deferral closed — `ESPN_LEAGUE_ID` now in local
+> `.env`. (2) 3 of 10 2026 seats are still unclaimed and the draft is
+> unscheduled — re-snapshot `mTeam`/`mMembers` near draft day to freeze the
+> bot roster (fold into 3.1/Checkpoint 2). (3) Reach-reference
+> commensurability + `board_adherence` are explicit 2.3 tuning levers (both
+> fits in the gitignored `priors_fit_2025.json`). (4) `position_lean` stays
+> OFF until a second season of history exists (2027).
 
 ### 2.3 [Build] Draft pick engine
 **Goal:** Pick logic in the Fry–Ohlmann tradition (player value × board state × positional need), with survival probabilities keyed primarily on ESPN default rank, market/ESPN divergence exploitation, opponent-roster need modeling, and round-appropriate risk posture (floor early, ceiling late; bench picks as options). Validated by tournament runs in the 2.2 sim against naive strategies; distill the academic holdings into `intel/research/draft-strategy.md` as part of this item.

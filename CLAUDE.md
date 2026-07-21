@@ -78,10 +78,25 @@ Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins 
   audit; leakage/scoring/VOR clean, 4 value-view findings fixed). Suite green (243).
   Design + deferrals in `IMPLEMENTATION_PLAN.md` 2.1 and `intel/research/valuation-2.1-design.md`.
 
-Next: **2.2 mock draft simulator** → 2.3 draft engine → 2.4 board TUI → Checkpoint 2
-rehearsals. Calendar anchors: draft expected mid-to-late August 2026, still
-unscheduled (Phases 0–2 must precede it — the binding ~4–6-week constraint); NFL
-Week 1 ~Sept 10 (Phase 3 must precede it).
+- **2.2 mock draft simulator — done 2026-07-21.** Deletable `ziggurat/draft/`
+  package: snake sim + calibrated opponent model + `ziggurat mock-draft` CLI.
+  `leagueHistory` recon found exactly ONE prior draft (league founded 2025; 2 of
+  10 seats fully autodrafted), so ESPN-rank+noise is the PRIMARY bot model,
+  seeded with aggregate 2025 priors (reach σ=17.78, autodraft 20%, K/DST
+  round-window R9+, position-run curve) fit against a real board-at-draft-time
+  signal (2025 ESPN editorial board + draft-day db_fpecr ECR). The `Picker` seam
+  is where 2.3 plugs in. Done-when met on real data (`db/ziggurat.sqlite` now
+  actually populated, schema 4): 20,000 drafts (10 slots × 2 strategies × 1,000)
+  in 87s; follow-VOR beats follow-ESPN in all 10 slots (~+128 — a
+  house-projected-points gap, not a validated realized edge; Phase 4 grades
+  that). Three verified workflows (recon → build → 5-skeptic audit); 7 minor
+  findings, 5 fixed, 2 recorded. Suite green (292). Details:
+  `IMPLEMENTATION_PLAN.md` 2.2 + gitignored `intel/research/mocksim-2.2-*.md`.
+
+Next: **2.3 draft pick engine** → 2.4 board TUI → Checkpoint 2 rehearsals.
+Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
+(monitor ESPN — 3 of 10 seats also still unclaimed; re-snapshot the room near
+draft day); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 

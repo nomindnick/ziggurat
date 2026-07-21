@@ -110,6 +110,64 @@ def test_valuation_espn_value_view(tmp_path, monkeypatch):
     assert "flag" in result.output and "delta" in result.output
 
 
+def test_mock_draft_runs_with_a_monkeypatched_loader(tmp_path, monkeypatch):
+    """The mock-draft command parses, loads a board (patched), runs, and prints.
+
+    Patches the DB-edge loader so no facts DB is required — exercises the thin
+    CLI wiring around the deletable draft package.
+    """
+    from ziggurat.draft import simulator
+    from ziggurat.draft.bots import BoardEntry
+
+    def _fake_board():
+        specs = {"QB": 32, "RB": 80, "WR": 90, "TE": 32, "DST": 32, "K": 32}
+        board, rank = [], 1
+        for pos, count in specs.items():
+            for i in range(count):
+                board.append(BoardEntry(f"{pos}-{i}", f"{pos}{i}", pos, rank, 200 - i, 100 - i))
+                rank += 1
+        return tuple(board)
+
+    called = {}
+
+    def fake_load_board(conn, *, as_of, season, source="sleeper_rotowire", weeks=None):
+        called["as_of"] = as_of
+        called["season"] = season
+        return _fake_board()
+
+    monkeypatch.setattr(simulator, "load_board", fake_load_board)
+    db_path = tmp_path / "mock.sqlite"
+    result = runner.invoke(
+        app,
+        ["mock-draft", "--season", "2026", "--as-of", "2026-08-15", "--path", str(db_path),
+         "--n", "5", "--slot", "3", "--strategy", "vor", "--seed", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert called == {"as_of": "2026-08-15", "season": 2026}
+    assert "starting-lineup points" in result.output
+    assert "draft slot 3" in result.output
+
+
+def test_mock_draft_rejects_unknown_strategy(tmp_path):
+    db_path = tmp_path / "mock.sqlite"
+    result = runner.invoke(
+        app, ["mock-draft", "--season", "2026", "--path", str(db_path), "--strategy", "bogus"]
+    )
+    assert result.exit_code != 0
+
+
+def test_mock_draft_rejects_out_of_range_slot(tmp_path):
+    # A fumbled --slot gets a legible message at the parse edge (Rule 6), never a
+    # traceback from deep inside run_many.
+    db_path = tmp_path / "mock.sqlite"
+    for slot in ("0", "11"):
+        result = runner.invoke(
+            app, ["mock-draft", "--season", "2026", "--path", str(db_path), "--slot", slot]
+        )
+        assert result.exit_code != 0
+        assert "slot must be 1..10" in result.output
+
+
 def test_smoke_exercises_the_three_spines():
     result = runner.invoke(app, ["smoke"])
     assert result.exit_code == 0

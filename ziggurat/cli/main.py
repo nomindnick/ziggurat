@@ -5,6 +5,7 @@ parses arguments, calls a package function, and prints the result.
 """
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -140,6 +141,69 @@ def valuation(
     else:
         conn.close()
         typer.echo(format_valuation(rows, top=top))
+
+
+@app.command("mock-draft")
+def mock_draft(
+    season: Annotated[int, typer.Option(help="Season whose board to draft from.")],
+    as_of: Annotated[Optional[str], typer.Option(
+        help="Knowledge-time cutoff (YYYY-MM-DD); defaults to today.")] = None,
+    n: Annotated[int, typer.Option(help="How many mock drafts to run.")] = 1000,
+    slot: Annotated[int, typer.Option(help="Your draft slot, 1..teams.")] = 1,
+    strategy: Annotated[str, typer.Option(help="Operator strategy: 'vor' or 'espn'.")] = "vor",
+    seed: Annotated[int, typer.Option(help="RNG seed (reproducible).")] = 42,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+) -> None:
+    """Run headless mock drafts and print a strategy's outcome distribution (item 2.2).
+
+    All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8), imported
+    lazily here so nothing outside it couples statically. Parse, load the board,
+    run, print (Rule 3).
+    """
+    # Lazy (in-body) import: keeps the deletable draft package off every other
+    # module's import graph — Rule 8. Deleting ziggurat/draft/ only breaks this
+    # one command, not the rest of the CLI.
+    from ziggurat.draft.bots import FollowEspnRank, FollowVor
+    from ziggurat.draft.priors import ROOM_PRIORS_2025
+    from ziggurat.draft.simulator import (
+        DEFAULT_ROSTER,
+        format_strategy_summary,
+        load_board,
+        run_many,
+    )
+
+    strategies = {"vor": (FollowVor(), "follow-VOR"), "espn": (FollowEspnRank(), "follow-ESPN-rank")}
+    if strategy not in strategies:
+        raise typer.BadParameter("strategy must be 'vor' or 'espn'")
+    strat, strat_name = strategies[strategy]
+    if not 1 <= slot <= DEFAULT_ROSTER.teams:
+        raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
+
+    # The CLI edge is where "now" is allowed to materialize; library functions
+    # still require an explicit as_of (Rule 1).
+    resolved_as_of = as_of or date.today().isoformat()
+
+    conn = connect(path)
+    board = load_board(
+        conn, as_of=resolved_as_of, season=season, source=source, weeks=_parse_weeks(weeks)
+    )
+    conn.close()
+    if not board:
+        typer.echo(
+            f"No draftable board for season {season} as of {resolved_as_of}: the "
+            "database has no projections/ESPN ranks visible at that date. Check the "
+            "season and --as-of, and that this season's data has been pulled.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    summary = run_many(
+        board, n=n, operator_slot=slot - 1, strategy=strat, strategy_name=strat_name,
+        priors=ROOM_PRIORS_2025, seed=seed,
+    )
+    typer.echo(format_strategy_summary(summary))
 
 
 @app.command()
