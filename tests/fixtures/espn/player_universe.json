@@ -1,0 +1,534 @@
+[
+  {
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 22,
+        "published": false,
+        "rank": 36,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Josh Allen",
+    "id": 3918298,
+    "ownership": {
+      "averageDraftPosition": 23.68
+    },
+    "proTeamId": 2
+  },
+  {
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 10,
+        "published": false,
+        "rank": 87,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jayden Daniels",
+    "id": 4426348,
+    "ownership": {
+      "averageDraftPosition": 53.06
+    },
+    "proTeamId": 28
+  },
+  {
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 10,
+        "published": false,
+        "rank": 88,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Lamar Jackson",
+    "id": 3916387,
+    "ownership": {
+      "averageDraftPosition": 37.01
+    },
+    "proTeamId": 33
+  },
+  {
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 10,
+        "published": false,
+        "rank": 89,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Drake Maye",
+    "id": 4431452,
+    "ownership": {
+      "averageDraftPosition": 49.99
+    },
+    "proTeamId": 17
+  },
+  {
+    "defaultPositionId": 1,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 9,
+        "published": false,
+        "rank": 90,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jalen Hurts",
+    "id": 4040715,
+    "ownership": {
+      "averageDraftPosition": 59.24
+    },
+    "proTeamId": 21
+  },
+  {
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 57,
+        "published": false,
+        "rank": 1,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jahmyr Gibbs",
+    "id": 4429795,
+    "ownership": {
+      "averageDraftPosition": 1.93
+    },
+    "proTeamId": 8
+  },
+  {
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 56,
+        "published": false,
+        "rank": 2,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Bijan Robinson",
+    "id": 4430807,
+    "ownership": {
+      "averageDraftPosition": 2.28
+    },
+    "proTeamId": 1
+  },
+  {
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 53,
+        "published": false,
+        "rank": 6,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Christian McCaffrey",
+    "id": 3117251,
+    "ownership": {
+      "averageDraftPosition": 5.52
+    },
+    "proTeamId": 25
+  },
+  {
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 52,
+        "published": false,
+        "rank": 7,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jonathan Taylor",
+    "id": 4242335,
+    "ownership": {
+      "averageDraftPosition": 8.5
+    },
+    "proTeamId": 11
+  },
+  {
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 50,
+        "published": false,
+        "rank": 10,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "De'Von Achane",
+    "id": 4429160,
+    "ownership": {
+      "averageDraftPosition": 12.3
+    },
+    "proTeamId": 15
+  },
+  {
+    "defaultPositionId": 2,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 46,
+        "published": false,
+        "rank": 12,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jeremiyah Love",
+    "id": 4870808,
+    "ownership": {
+      "averageDraftPosition": 18.65
+    },
+    "proTeamId": 22
+  },
+  {
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 56,
+        "published": false,
+        "rank": 3,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Puka Nacua",
+    "id": 4426515,
+    "ownership": {
+      "averageDraftPosition": 3.69
+    },
+    "proTeamId": 14
+  },
+  {
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 55,
+        "published": false,
+        "rank": 4,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Ja'Marr Chase",
+    "id": 4362628,
+    "ownership": {
+      "averageDraftPosition": 4.66
+    },
+    "proTeamId": 4
+  },
+  {
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 54,
+        "published": false,
+        "rank": 5,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jaxon Smith-Njigba",
+    "id": 4430878,
+    "ownership": {
+      "averageDraftPosition": 6.29
+    },
+    "proTeamId": 26
+  },
+  {
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 52,
+        "published": false,
+        "rank": 8,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Amon-Ra St. Brown",
+    "id": 4374302,
+    "ownership": {
+      "averageDraftPosition": 7.79
+    },
+    "proTeamId": 8
+  },
+  {
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 51,
+        "published": false,
+        "rank": 9,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "CeeDee Lamb",
+    "id": 4241389,
+    "ownership": {
+      "averageDraftPosition": 11.2
+    },
+    "proTeamId": 6
+  },
+  {
+    "defaultPositionId": 3,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 48,
+        "published": false,
+        "rank": 11,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Justin Jefferson",
+    "id": 4262921,
+    "ownership": {
+      "averageDraftPosition": 12.55
+    },
+    "proTeamId": 16
+  },
+  {
+    "defaultPositionId": 4,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 40,
+        "published": false,
+        "rank": 16,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Trey McBride",
+    "id": 4361307,
+    "ownership": {
+      "averageDraftPosition": 21.01
+    },
+    "proTeamId": 22
+  },
+  {
+    "defaultPositionId": 4,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 32,
+        "published": false,
+        "rank": 24,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Brock Bowers",
+    "id": 4432665,
+    "ownership": {
+      "averageDraftPosition": 23.59
+    },
+    "proTeamId": 13
+  },
+  {
+    "defaultPositionId": 4,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 13,
+        "published": false,
+        "rank": 81,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Colston Loveland",
+    "id": 4723086,
+    "ownership": {
+      "averageDraftPosition": 43.56
+    },
+    "proTeamId": 3
+  },
+  {
+    "defaultPositionId": 4,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 13,
+        "published": false,
+        "rank": 82,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Tyler Warren",
+    "id": 4431459,
+    "ownership": {
+      "averageDraftPosition": 46.85
+    },
+    "proTeamId": 11
+  },
+  {
+    "defaultPositionId": 5,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 251,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Brandon Aubrey",
+    "id": 3953687,
+    "ownership": {
+      "averageDraftPosition": 83.88
+    },
+    "proTeamId": 6
+  },
+  {
+    "defaultPositionId": 5,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 252,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Cameron Dicker",
+    "id": 4362081,
+    "ownership": {
+      "averageDraftPosition": 108.42
+    },
+    "proTeamId": 24
+  },
+  {
+    "defaultPositionId": 5,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 253,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Jason Myers",
+    "id": 2473037,
+    "ownership": {
+      "averageDraftPosition": 122.07
+    },
+    "proTeamId": 26
+  },
+  {
+    "defaultPositionId": 16,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 234,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Broncos D/ST",
+    "id": -16007,
+    "ownership": {
+      "averageDraftPosition": 91.76
+    },
+    "proTeamId": 7
+  },
+  {
+    "defaultPositionId": 16,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 236,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Texans D/ST",
+    "id": -16034,
+    "ownership": {
+      "averageDraftPosition": 86.09
+    },
+    "proTeamId": 34
+  },
+  {
+    "defaultPositionId": 16,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 238,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Steelers D/ST",
+    "id": -16023,
+    "ownership": {
+      "averageDraftPosition": 122.64
+    },
+    "proTeamId": 23
+  },
+  {
+    "defaultPositionId": 16,
+    "draftRanksByRankType": {
+      "PPR": {
+        "auctionValue": 0,
+        "published": false,
+        "rank": 239,
+        "rankSourceId": 0,
+        "rankType": "PPR",
+        "slotId": 0
+      }
+    },
+    "fullName": "Seahawks D/ST",
+    "id": -16026,
+    "ownership": {
+      "averageDraftPosition": 100.29
+    },
+    "proTeamId": 26
+  }
+]

@@ -12,8 +12,17 @@ import typer
 
 from ziggurat.core.divergence import build_divergence, format_report
 from ziggurat.core.scoring import score
+from ziggurat.core.valuation import (
+    build_valuation,
+    build_value_view,
+    format_valuation,
+    format_value_view,
+    _canon_position,
+)
 from ziggurat.data.asof import normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
+from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks, pull_espn_ranks
+from ziggurat.data.nfl.espn_source import load_espn_credentials
 from ziggurat.data.store import apply_schema, connect
 from ziggurat.llm import Router
 from ziggurat.paths import DEFAULT_DB_PATH, REPO_ROOT
@@ -79,6 +88,58 @@ def divergence(
     report = build_divergence(market_rows, espn_rows, gate_multiplier=gate)
     conn.close()
     typer.echo(format_report(report))
+
+
+def _parse_weeks(weeks: Optional[str]):
+    """Parse a ``"1-17"`` or ``"1"`` week spec into a range, or None (accessor
+    default). Pure argument parsing — the valuation logic lives in the package."""
+    if weeks is None:
+        return None
+    spec = weeks.strip()
+    if "-" in spec:
+        lo, hi = spec.split("-", 1)
+        return range(int(lo), int(hi) + 1)
+    w = int(spec)
+    return range(w, w + 1)
+
+
+@app.command()
+def valuation(
+    as_of: Annotated[str, typer.Option(help="Knowledge-time cutoff (YYYY-MM-DD).")],
+    season: Annotated[int, typer.Option(help="Season to value.")],
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    position: Annotated[Optional[str], typer.Option(help="Filter to one position (QB/RB/…/DST/K).")] = None,
+    top: Annotated[Optional[int], typer.Option(help="Show only the top N rows.")] = None,
+    weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    espn: Annotated[bool, typer.Option("--espn", help="Live-pull the ESPN board and print the value view.")] = False,
+    league_id: Annotated[Optional[int], typer.Option(help="ESPN leagueId (else ESPN_LEAGUE_ID env).")] = None,
+) -> None:
+    """Print the global static VOR valuation board (item 2.1).
+
+    Default: the house VOR board. With ``--espn``, live-pull the ESPN default
+    board and print the "what the room can't see" value view instead. All
+    computation lives in ``core/valuation.py`` / ``data/nfl/espn_ranks.py``; this
+    command only parses, calls, and prints (rule 3).
+    """
+    canon = _canon_position(position) if position is not None else None
+    conn = connect(path)
+    rows = build_valuation(
+        conn, as_of=as_of, season=season, weeks=_parse_weeks(weeks), source=source
+    )
+    if canon is not None:
+        rows = [r for r in rows if r.position == canon]
+
+    if espn:
+        creds = load_espn_credentials(league_id=league_id)
+        pull_espn_ranks(conn, season=season, retrieved_as_of=as_of, **creds)
+        espn_rows = get_espn_draft_ranks(conn, as_of=as_of, season=season)
+        view = build_value_view(rows, espn_rows)
+        conn.close()
+        typer.echo(format_value_view(view, top=top))
+    else:
+        conn.close()
+        typer.echo(format_valuation(rows, top=top))
 
 
 @app.command()

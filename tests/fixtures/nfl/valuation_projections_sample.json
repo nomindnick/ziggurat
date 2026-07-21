@@ -1,0 +1,55 @@
+[
+  {"player_id": "100", "season": "2026", "week": 1, "season_type": "regular", "team": "DET", "opponent": "CHI",
+   "player": {"position": "QB", "team": "DET"}, "stats": {"pass_yd": 250, "pass_td": 2, "pass_int": 1, "pts_ppr": 16.0}},
+  {"player_id": "100", "season": "2026", "week": 2, "season_type": "regular", "team": "DET", "opponent": "GB",
+   "player": {"position": "QB", "team": "DET"}, "stats": {"pass_yd": 250, "pass_td": 2, "pass_int": 1, "pts_ppr": 16.0}},
+  {"player_id": "100", "season": "2026", "week": 3, "season_type": "regular", "team": "DET", "opponent": "MIN",
+   "player": {"position": "QB", "team": "DET"}, "stats": {"pass_yd": 250, "pass_td": 2, "pass_int": 1, "pts_ppr": 16.0}},
+
+  {"player_id": "201", "season": "2026", "week": 1, "season_type": "regular", "team": "DAL", "opponent": "NYG",
+   "player": {"position": "RB", "team": "DAL"}, "stats": {"rush_yd": 100, "rush_td": 1, "rec": 4, "rec_yd": 40, "pts_ppr": 24.0}},
+  {"player_id": "201", "season": "2026", "week": 2, "season_type": "regular", "team": "DAL", "opponent": "PHI",
+   "player": {"position": "RB", "team": "DAL"}, "stats": {"rush_yd": 100, "rush_td": 1, "rec": 4, "rec_yd": 40, "pts_ppr": 24.0}},
+  {"player_id": "201", "season": "2026", "week": 3, "season_type": "regular", "team": "DAL", "opponent": "WAS",
+   "player": {"position": "RB", "team": "DAL"}, "stats": {"rush_yd": 100, "rush_td": 1, "rec": 4, "rec_yd": 40, "pts_ppr": 24.0}},
+
+  {"player_id": "202", "season": "2026", "week": 1, "season_type": "regular", "team": "SF", "opponent": "SEA",
+   "player": {"position": "RB", "team": "SF"}, "stats": {"rush_yd": 80, "rush_td": 1, "rec": 2, "rec_yd": 20, "pts_ppr": 18.0}},
+  {"player_id": "202", "season": "2026", "week": 2, "season_type": "regular", "team": "SF", "opponent": "LA",
+   "player": {"position": "RB", "team": "SF"}, "stats": {"rush_yd": 80, "rush_td": 1, "rec": 2, "rec_yd": 20, "pts_ppr": 18.0}},
+
+  {"player_id": "301", "season": "2026", "week": 1, "season_type": "regular", "team": "MIA", "opponent": "BUF",
+   "player": {"position": "WR", "team": "MIA"}, "stats": {"rec": 6, "rec_yd": 80, "rec_td": 1, "pts_ppr": 20.0}},
+  {"player_id": "301", "season": "2026", "week": 2, "season_type": "regular", "team": "MIA", "opponent": "NE",
+   "player": {"position": "WR", "team": "MIA"}, "stats": {"rec": 6, "rec_yd": 80, "rec_td": 1, "pts_ppr": 20.0}},
+  {"player_id": "301", "season": "2026", "week": 3, "season_type": "regular", "team": "MIA", "opponent": "NYJ",
+   "player": {"position": "WR", "team": "MIA"}, "stats": {"rec": 6, "rec_yd": 80, "rec_td": 1, "pts_ppr": 20.0}},
+
+  {"player_id": "302", "season": "2026", "week": 1, "season_type": "regular", "team": "KC", "opponent": "LAC",
+   "player": {"position": "TE", "team": "KC"}, "stats": {"rec": 4, "rec_yd": 40, "pts_ppr": 8.0}},
+  {"player_id": "302", "season": "2026", "week": 2, "season_type": "regular", "team": "KC", "opponent": "DEN",
+   "player": {"position": "TE", "team": "KC"}, "stats": {"rec": 4, "rec_yd": 40, "pts_ppr": 8.0}},
+  {"player_id": "302", "season": "2026", "week": 3, "season_type": "regular", "team": "KC", "opponent": "LV",
+   "player": {"position": "TE", "team": "KC"}, "stats": {"rec": 4, "rec_yd": 40, "pts_ppr": 8.0}},
+
+  {"player_id": "401", "season": "2026", "week": 1, "season_type": "regular", "team": "BAL", "opponent": "CIN",
+   "player": {"position": "K", "team": "BAL"}, "stats": {"fgm_20_29": 1, "fgm_40_49": 1, "xpm": 2, "fga": 2, "fgm": 2, "pts_ppr": 9.0}},
+  {"player_id": "401", "season": "2026", "week": 2, "season_type": "regular", "team": "BAL", "opponent": "PIT",
+   "player": {"position": "K", "team": "BAL"}, "stats": {"fgm_20_29": 1, "fgm_40_49": 1, "xpm": 2, "fga": 2, "fgm": 2, "pts_ppr": 9.0}},
+  {"player_id": "401", "season": "2026", "week": 3, "season_type": "regular", "team": "BAL", "opponent": "CLE",
+   "player": {"position": "K", "team": "BAL"}, "stats": {"fgm_20_29": 1, "fgm_40_49": 1, "xpm": 2, "fga": 2, "fgm": 2, "pts_ppr": 9.0}},
+
+  {"player_id": "DET", "season": "2026", "week": 1, "season_type": "regular", "team": "DET", "opponent": "CHI",
+   "player": {"position": "DEF", "team": "DET"}, "stats": {"sack": 3, "int": 1, "pts_allow": 17, "yds_allow": 250, "pts_ppr": 8.0}},
+  {"player_id": "DET", "season": "2026", "week": 2, "season_type": "regular", "team": "DET", "opponent": "GB",
+   "player": {"position": "DEF", "team": "DET"}, "stats": {"sack": 3, "int": 1, "pts_allow": 17, "yds_allow": 250, "pts_ppr": 8.0}},
+  {"player_id": "DET", "season": "2026", "week": 3, "season_type": "regular", "team": "DET", "opponent": "MIN",
+   "player": {"position": "DEF", "team": "DET"}, "stats": {"sack": 3, "int": 1, "pts_allow": 17, "yds_allow": 250, "pts_ppr": 8.0}},
+
+  {"player_id": "SF", "season": "2026", "week": 1, "season_type": "regular", "team": "SF", "opponent": "SEA",
+   "player": {"position": "DEF", "team": "SF"}, "stats": {"sack": 2, "int": 0, "pts_allow": 10, "yds_allow": 150, "pts_ppr": 8.0}},
+  {"player_id": "SF", "season": "2026", "week": 2, "season_type": "regular", "team": "SF", "opponent": "LA",
+   "player": {"position": "DEF", "team": "SF"}, "stats": {"sack": 2, "int": 0, "pts_allow": 10, "yds_allow": 150, "pts_ppr": 8.0}},
+  {"player_id": "SF", "season": "2026", "week": 3, "season_type": "regular", "team": "SF", "opponent": "ARI",
+   "player": {"position": "DEF", "team": "SF"}, "stats": {"sack": 2, "int": 0, "pts_allow": 10, "yds_allow": 150, "pts_ppr": 8.0}}
+]

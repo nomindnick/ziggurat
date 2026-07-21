@@ -250,7 +250,96 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Done when:** valuation runs end-to-end from ingested data; spot-checks on known league quirks behave (e.g., pass-catching RBs and league-scored D/STs move the right direction vs. default ranks).
 **Checkpoint-1 amendment (2026-07-20):** replacement levels use the exact decoded roster structure from 1.1 (10×[QB/2RB/2WR/TE/FLEX/D-ST/K, 7 bench, 1 IR]) — no hand-maintenance. The "what the room can't see" report **builds on the shipped `core/divergence.py`** (item 1.5) — wire live ESPN PPR draft ranks/ADP (reachable via `espn_api`, same auth) as the ESPN side here, ahead of the 3.1 scheduled sync. Projections re-score through `scoring.py` via the 1.5 `projections` table + strict key validator.
 **Update:**
-> _[To be completed]_
+> **Done 2026-07-20.** Global static VOR/VBD board + the "what the room can't
+> see" value view. **Landed:** `core/valuation.py` (RosterStructure,
+> ValuationRow, `build_valuation`, `replacement_levels`, `build_value_view`,
+> formatters), the live ESPN board client (`data/nfl/espn_source.py` raw
+> `kona_player_info` seam + `data/nfl/espn_ranks.py` mapper/ingest/accessor),
+> migration `004_espn_ranks.sql` (`espn_draft_ranks`, `schema_version` 4),
+> `base.espn_by_gsis` crosswalk, and a thin `ziggurat valuation [--espn]` CLI.
+> Built via three verified workflows (recon → parallel build → adversarial
+> audit); locked design in `intel/research/valuation-2.1-design.md`.
+>
+> **Key decisions:**
+> - **Per-week-then-sum (D1) — the load-bearing correctness call.** Score EACH
+>   weekly projection row through `scoring.py`, THEN sum; never sum a stat line
+>   then score once. `score_dst`'s yards-allowed brackets are non-linear, so a
+>   summed season of yards (~3500) buckets into the worst band every week (−7 vs
+>   +2), erasing the whole house D/ST edge. Verified on real data + a regression
+>   test that doubles as the proof.
+> - **Source = the 1.5 weekly `projections` table summed over NFL weeks 1..17**
+>   (fantasy window; wk18 rest week excluded — tunable via `weeks`). The Sleeper
+>   *season* endpoint is spec'd as an OFFENSE-ONLY fallback (it silently drops
+>   both D/ST brackets, every sub-40 FG make, and the miss penalty for K/DST) —
+>   **not needed**: 2026 weekly offense+K+DST are fully populated wk1..17.
+> - **Replacement = first-non-starter with EMPIRICAL flex allocation** (pool the
+>   best RB/WR/TE leftovers beyond dedicated starters into the 10 flex slots),
+>   superflex-guarded (no QB in flex; QB started stays 10), K/DST baselines
+>   rank-window-denoised. All tunable via the frozen `RosterStructure` for 2.2/2.3
+>   calibration. VOR = house season points − positional replacement.
+> - **ESPN side wired live (Checkpoint-1 amendment).** Raw `kona_player_info`
+>   request via `espn_api` (NOT `free_agents()`), editorial PPR board rank
+>   (`draftRanksByRankType["PPR"]["rank"]`, `rankSourceId=0`) as the PRIMARY
+>   `espn_pos_rank`, native `averageDraftPosition` stored as a secondary ADP lens;
+>   persisted to `espn_draft_ranks`, as-of-gated + leakage-tested, stamped
+>   knowable=retrieved=pull day (live board). Two real catches: the pool is **1025
+>   players, not 1000** (the recon's own probe was truncating; default `limit`
+>   raised to 2000 behind a fail-loud `len>=limit` guard, add pagination past
+>   ~2000), and DST rows carry a NULL `espn_id` that breaks `select_as_of`'s
+>   per-key equijoin → a non-null `board_key` (str(espn_id) skill / team DST) is
+>   the temporal+PK key so no DST silently vanishes from an as-of read.
+> - **The house edge is K and D/ST, not offense** (D10). In full PPR, house
+>   offense scoring ≈ Sleeper PPR default (only QB shows a real offense delta), so
+>   the value view is house VALUE (scarcity-priced VOR) vs ESPN positional RANK —
+>   the distinctive divergence surfaces precisely at the distance kicker and the
+>   dual D/ST brackets. `divergence.py` stays frozen (D11); its scarcity/VBD
+>   refinement is superseded by the VOR-point value view.
+>
+> **Done-when met (real 2026 data, end to end):** a scratch DB of 7,973 players +
+> 54,674 weekly projections + 1,025 ESPN board rows drives `build_valuation` →
+> ranked board. Spot-checks behave: pass-catching RBs (Bijan/Gibbs/CMC) + Chase
+> lead the full-PPR board; **QB1 Josh Allen is correctly muted to overall #19**
+> despite 338 proj pts (deep QB replacement — VBD scarcity working); MIN/LA/SEA
+> D/ST rise on strong yards-allowed brackets; the distance-K edge (McPherson)
+> surfaces. ESPN↔house skill join is **95.6%** (949/993) — the unmatched 44 are
+> long-tail/rookies with no Sleeper projection, no systematic id-space mismatch
+> (design §4 residual risk closed).
+>
+> **Verification (multi-agent, ultracode).** Recon (4 probes → adversarial verify
+> → synthesis) locked the design; a parallel build (ESPN data side ‖ valuation
+> core, disjoint files) then an integration pass; a 5-skeptic adversarial audit
+> re-derived every claim against the real DB. **Leakage, scoring-aggregation, and
+> VOR/flex dimensions came back CLEAN**; all 4 confirmed findings were in the
+> *value view* only (the primary board was clean), all fixed here: (1)+(2) a
+> draftable filter (`min_vor`, default 0.0) — without it the house board (every
+> projected player, incl. ~1,200 WRs tied at the replacement floor with a
+> meaningless tiebreak rank) is 3–4× deeper than ESPN's, so a raw `|delta|` sort
+> floated undraftable practice-squad players to the top and **buried the actual
+> K/D-ST edge under 573 noise rows**; the filter makes the boards comparable and
+> the report now leads with real targets (Tee Higgins, MIN D/ST, pass-catching
+> RBs, McPherson). (3) a cross-position join guard (a player Sleeper calls TE but
+> ESPN tags RB is skipped, not cross-pool subtracted). (4) report-specific flags
+> `HOUSE_HIGHER`/`ESPN_HIGHER`/`ALIGNED` (a house-vs-ESPN report must never ship
+> the word "MARKET" to a novice — rule 6). Suite green: **243 passed** (from 212),
+> `ziggurat smoke` + repo-boundary clean; the committed ESPN fixture is public
+> player-rank data only (no manager/roster identity — rule 5 verified by hand).
+>
+> **Operator-question resolutions (all tunable):** week window 1..17; first-
+> non-starter baseline; K/DST denoise on; ESPN editorial board primary + ADP
+> secondary; `week=0` season sentinel moot (weekly-sum path).
+>
+> **Forward items / deferrals.** (1) `ESPN_LEAGUE_ID` is not in `.env` —
+> `ziggurat valuation --espn` needs `--league-id` or that env var (add it, or
+> fold into the 3.7 cadence). (2) `base.espn_by_gsis` is crosswalk-at-now (reads
+> `players` at MAX(retrieved) with no as-of gate) — fine for draft use; a past-
+> as_of backtest would get today's identity map. (3) Preseason weekly coverage
+> non-uniformity distorts a naive week-sum (a 14-wk player looks worse than a
+> 17-wk one for non-football reasons) — `weeks_counted` is surfaced per row; a
+> normalize-by-weeks option is a 2.2/2.3 calibration knob if the tail matters.
+> (4) Positional-scale (`ecr_type='rp'`) gate refinement inside `divergence.py`
+> deferred (superseded by the value view — D11). (5) 2.2 (mock sim) and 2.3
+> (pick engine) consume this board; the `RosterStructure`/baseline knobs exist
+> for their calibration.
 
 ### 2.2 [Build] Mock draft simulator
 **Goal:** Snake-draft sim with bot opponents drafting off ESPN default rank + noise (the room's actual behavior model), configurable to blend market ADP. This is both the strategy laboratory and the draft engine's test harness — build it *before* the engine it tests.

@@ -254,6 +254,38 @@ def ids_by_fantasypros(conn: sqlite3.Connection) -> dict[str, tuple[str | None, 
     return out
 
 
+def espn_by_gsis(conn: sqlite3.Connection) -> dict[str, str]:
+    """gsis_id -> espn_id from the latest players snapshot (crosswalk resolution
+    for the ESPN-side join key used by valuation / the value view).
+
+    Mirrors ``ids_by_fantasypros`` / ``gsis_by_pfr``: reads the newest retrieved
+    row per gsis_id, logs (never silently last-write-wins) a collision, and keeps
+    the first mapping. players.py already normalizes espn_id to a bare digit
+    string, so no per-row coercion here.
+
+    Crosswalk-at-now: like the sibling crosswalks this reads ``players`` at
+    ``MAX(retrieved_as_of)`` with NO as-of gate — fine for immutable gsis<->espn
+    identity and current draft use; if valuation is ever run at a past as_of for
+    backtest, the id mapping is today's, not as-of.
+    """
+    out: dict[str, str] = {}
+    for r in conn.execute(
+        """
+        SELECT gsis_id, espn_id FROM players p
+        WHERE espn_id IS NOT NULL AND retrieved_as_of = (
+            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
+        )
+        """
+    ):
+        gsis, espn = r["gsis_id"], r["espn_id"]
+        if gsis in out and out[gsis] != espn:
+            logger.warning("crosswalk: gsis_id %s maps to multiple espn (%s, %s); keeping first",
+                           gsis, out[gsis], espn)
+            continue
+        out[gsis] = espn
+    return out
+
+
 def select_as_of(
     conn: sqlite3.Connection,
     table: str,

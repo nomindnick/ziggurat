@@ -64,10 +64,24 @@ Sleeper ownership deltas (the panel ingester is 4.1's first deliverable, read un
 the mock-sim opponent model on prior-season `leagueHistory` drafts; **nothing in
 Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins next.**
 
-Next: **Phase 2 — Valuation Core & Draft Weapon** (2.1 global VOR → 2.2 mock sim →
-2.3 draft engine → 2.4 board TUI → Checkpoint 2 rehearsals). Calendar anchors: draft
-expected mid-to-late August 2026, still unscheduled (Phases 0–2 must precede it — the
-binding ~4–6-week constraint); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
+**Phase 2 — Valuation Core & Draft Weapon — IN PROGRESS.**
+- **2.1 global valuation (VOR) — done 2026-07-20.** `core/valuation.py` re-scores
+  the 1.5 weekly projections through `scoring.py` **per-week-then-sum** (non-linear
+  D/ST brackets make sum-then-score wrong), computes replacement levels from the
+  exact roster (empirical flex allocation, superflex-guarded, K/DST denoised), and
+  ranks a global VOR board. The "what the room can't see" value view diffs that
+  scarcity-priced board against a **live ESPN default board** (`espn_source.py` raw
+  `kona_player_info` + `espn_ranks.py` + migration `004`, `schema_version` 4;
+  as-of-gated, leakage-tested) — the house edge surfaces at the distance kicker and
+  dual D/ST brackets (offense house scoring ≈ Sleeper PPR). Thin `ziggurat valuation
+  [--espn]` CLI. Built via three verified workflows (recon → build → adversarial
+  audit; leakage/scoring/VOR clean, 4 value-view findings fixed). Suite green (243).
+  Design + deferrals in `IMPLEMENTATION_PLAN.md` 2.1 and `intel/research/valuation-2.1-design.md`.
+
+Next: **2.2 mock draft simulator** → 2.3 draft engine → 2.4 board TUI → Checkpoint 2
+rehearsals. Calendar anchors: draft expected mid-to-late August 2026, still
+unscheduled (Phases 0–2 must precede it — the binding ~4–6-week constraint); NFL
+Week 1 ~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
 
