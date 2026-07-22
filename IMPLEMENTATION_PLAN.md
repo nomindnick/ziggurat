@@ -412,7 +412,53 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Done when:** the engine beats ESPN-rank-following bots in sim by a stable margin across slots, and its recommendations come with legible reasons.
 **Checkpoint-1 amendment (2026-07-20):** survival probabilities key primarily on ESPN default rank (1.1 confirms it drives the room); opponent-roster-need modeling can **seed from prior-season `leagueHistory` rosters** where available. The market/ESPN divergence the engine exploits is exactly the 1.5 divergence signal (via 2.1).
 **Update:**
-> _[To be completed]_
+> **Done 2026-07-22.** Fry–Ohlmann pick engine in the deletable `ziggurat/draft/`
+> package: `engine.py` (`PickEngine`, a `Picker`; additive one-ply score
+> `vor + b_need·need_fill + b_vona·urgency + b_risk·risk_sign(round)·dispersion`,
+> with `urgency = max(0,VONA)·(1−S_next)` — survival-timed scarcity) and
+> `survival.py` (Monte-Carlo rollouts of the calibrated 2.2 room over a CLONED
+> board state; analytic sigmoid fallback re-fit on the real board:
+> center ≈ 2.67 + 0.704·rank, R²=0.985; live-recalibration utility that refits
+> reach spread from an observed pick log, threshold-gated). `PickContext` gained
+> one trailing defaulted `opponent_rosters` field (2.2 pickers untouched).
+> `recommend(ctx, top)` returns `PickRec`s with novice-legible reasons — the 2.4
+> TUI contract. Weights (b_need=25, b_vona=2.0, b_risk=5.0, balanced schedule)
+> selected by tournament sweep; archetype schedules (zero/hero/robust-RB) ship
+> as data, none dominates balanced on our board (the board already prices
+> scarcity). Deterministic bit-for-bit (D2); ~0.2s/decision at R=512 vs the 60s
+> clock. Literature distilled to gitignored `intel/research/draft-strategy.md`
+> (H1–H12, verifier-corrected citations); locked design + audit addenda in
+> `intel/research/pick-engine-2.3-design.md`.
+>
+> **Done-when met (real 2026 board, self-graded house points — Phase 4 grades
+> realized):** 60/60 cells positive — 3 seeds × 10 slots × paired n=120 vs BOTH
+> baselines, every 95% CI > 0. Margin vs FollowEspnRank +135…+197 (the plan's
+> literal bar), vs FollowVor +22…+53 (the honest bar). Min-over-slots: +135.4 /
+> +22.1. The K/DST divergence play EMERGES from urgency (engine takes the
+> divergent DST/K at R9–10, room waits to R15) — no special-case rule.
+>
+> **Audit (5 skeptics + refuters, 18 agents).** The margin survived every
+> statistical attack: bit-identical reproduction, fresh seeds 7/11 all CI>0,
+> unbiased pairing confirmed, harness bit-identical to `run_many`, and the
+> selection-overfit probe showed even non-winning weight configs beat both
+> baselines at held-out seeds (margin is structural, not tuned). Candidate-set
+> truncation PROVEN safe (2,000 adversarial boards, 0 argmax mismatches).
+> Robustness: margin stays CI>0 under hostile rooms (all-autodraft, reach
+> halved/doubled, adherence off). 13 findings, all minor, all fixed 2026-07-22
+> except recorded doc-notes: R/kappa/priors seam added to `PickEngine` (the
+> "R=512 live" budget + live-recalibration priors are now actually reachable);
+> wait-gate docs corrected (phrasing-only, score uses continuous urgency);
+> Rule-6 reason fixes (unranked "~9955 spots later" suppressed, final-pick
+> wording, no take-now/no-rush contradiction — regression-tested); CLI engine
+> arm default n=100 + time notice (was a silent ~10-min hang); recalibrate
+> degenerate-sigma honesty; dead `next_overall_pick` removed; harness pairing
+> docstring + t-vs-z CI multiplier corrected (no verdict changed).
+>
+> **Deferrals:** posture_check (operator addendum #2) → 2.4 with the hysteresis
+> requirement; live-recalibration WIRING into the TUI loop → 2.4 (the priors
+> seam now exists); per-player dispersion upgrade gated on `adp_rankings`
+> population (4.1 or a live pull); realized-points validation → Phase 4.
+> Suite green: **334 passed** (from 292).
 
 ### 2.4 [Build] Draft board TUI
 **Goal:** Terminal draft-day interface: fuzzy/alias pick entry (RapidFuzz-style; 'cmc' resolves instantly), continuous background recompute between picks, tier view, ESPN-rank view (the room's screen), contingency prompts at snake turns. Manual entry is the primary path per SPEC; if 1.1 found any live-sync affordance, it's a bonus assist only.

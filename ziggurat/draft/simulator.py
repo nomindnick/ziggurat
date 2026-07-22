@@ -21,6 +21,7 @@ from __future__ import annotations
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ziggurat.core.valuation import DEFAULT_ROSTER, RosterStructure
 from ziggurat.draft.bots import (
@@ -138,6 +139,14 @@ def run_draft(
             own_roster=rosters[team],  # live list; pickers read it, never mutate
             state=state,
             rng=rng,
+            # team_slot -> rival's live roster, excluding the team on the clock
+            # (item 2.3). A read-only proxy over live references — no deep copy;
+            # the values grow as the draft proceeds and each is read synchronously
+            # within this pick. The 2.2 pickers ignore it; the 2.3 engine's survival
+            # rollout reads it to advance each rival from its real current roster.
+            opponent_rosters=MappingProxyType(
+                {t: rosters[t] for t in range(teams) if t != team}
+            ),
         )
         pid = pickers[team].pick(ctx)
         entry = by_id[pid]

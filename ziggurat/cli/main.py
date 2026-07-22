@@ -14,11 +14,11 @@ import typer
 from ziggurat.core.divergence import build_divergence, format_report
 from ziggurat.core.scoring import score
 from ziggurat.core.valuation import (
+    _canon_position,
     build_valuation,
     build_value_view,
     format_valuation,
     format_value_view,
-    _canon_position,
 )
 from ziggurat.data.asof import normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
@@ -148,9 +148,12 @@ def mock_draft(
     season: Annotated[int, typer.Option(help="Season whose board to draft from.")],
     as_of: Annotated[Optional[str], typer.Option(
         help="Knowledge-time cutoff (YYYY-MM-DD); defaults to today.")] = None,
-    n: Annotated[int, typer.Option(help="How many mock drafts to run.")] = 1000,
+    n: Annotated[Optional[int], typer.Option(
+        help="How many mock drafts to run (default 1000; 100 for --strategy engine).")] = None,
     slot: Annotated[int, typer.Option(help="Your draft slot, 1..teams.")] = 1,
-    strategy: Annotated[str, typer.Option(help="Operator strategy: 'vor' or 'espn'.")] = "vor",
+    strategy: Annotated[str, typer.Option(help="Operator strategy: 'vor', 'espn', or "
+                                               "'engine' (the item-2.3 pick engine; compute-heavy — "
+                                               "use a small --n).")] = "vor",
     seed: Annotated[int, typer.Option(help="RNG seed (reproducible).")] = 42,
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
     source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
@@ -166,6 +169,7 @@ def mock_draft(
     # module's import graph — Rule 8. Deleting ziggurat/draft/ only breaks this
     # one command, not the rest of the CLI.
     from ziggurat.draft.bots import FollowEspnRank, FollowVor
+    from ziggurat.draft.engine import PickEngine
     from ziggurat.draft.priors import ROOM_PRIORS_2025
     from ziggurat.draft.simulator import (
         DEFAULT_ROSTER,
@@ -174,12 +178,27 @@ def mock_draft(
         run_many,
     )
 
-    strategies = {"vor": (FollowVor(), "follow-VOR"), "espn": (FollowEspnRank(), "follow-ESPN-rank")}
+    strategies = {
+        "vor": (FollowVor(), "follow-VOR"),
+        "espn": (FollowEspnRank(), "follow-ESPN-rank"),
+        "engine": (PickEngine(), "pick-engine"),
+    }
     if strategy not in strategies:
-        raise typer.BadParameter("strategy must be 'vor' or 'espn'")
+        raise typer.BadParameter("strategy must be 'vor', 'espn', or 'engine'")
     strat, strat_name = strategies[strategy]
     if not 1 <= slot <= DEFAULT_ROSTER.teams:
         raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
+    # The engine's survival rollouts cost ~0.5-1s per draft vs milliseconds for
+    # the baselines, so it gets a smaller default and an up-front time notice
+    # instead of a silent multi-minute hang (Rule 6).
+    resolved_n = n if n is not None else (100 if strategy == "engine" else 1000)
+    if strategy == "engine" and resolved_n > 20:
+        typer.echo(
+            f"pick-engine strategy: running {resolved_n} drafts at roughly a "
+            f"second each — expect ~{max(1, round(resolved_n / 90))} min "
+            f"(use --n to shrink)...",
+            err=True,
+        )
 
     # The CLI edge is where "now" is allowed to materialize; library functions
     # still require an explicit as_of (Rule 1).
@@ -200,7 +219,7 @@ def mock_draft(
         raise typer.Exit(code=1)
 
     summary = run_many(
-        board, n=n, operator_slot=slot - 1, strategy=strat, strategy_name=strat_name,
+        board, n=resolved_n, operator_slot=slot - 1, strategy=strat, strategy_name=strat_name,
         priors=ROOM_PRIORS_2025, seed=seed,
     )
     typer.echo(format_strategy_summary(summary))

@@ -16,6 +16,7 @@ from ziggurat.data.store import apply_schema, connect
 from ziggurat.draft.bots import (
     FollowEspnRank,
     FollowVor,
+    PickContext,
     RankNoiseBot,
     min_to_complete,
     position_counts,
@@ -157,6 +158,40 @@ def test_strategies_diverge_but_both_stay_legal(make_draft_board):
     assert espn.position_counts_mean["K"] == pytest.approx(1.0)
     # different signals -> different roster shape or point profile
     assert vor.position_counts_mean != espn.position_counts_mean
+
+
+# -------------------------------------------- opponent_rosters population (2.3)
+
+
+class _OppRosterProbe:
+    """Records that ``run_draft`` populates ``opponent_rosters`` correctly on every
+    pick: the own seat is excluded, all rivals are present, and the drafted-so-far
+    invariant holds (own + all rivals == overall_pick - 1). Delegates the actual
+    pick to FollowEspnRank so the draft still completes."""
+
+    def __init__(self):
+        self.checks = 0
+        self._delegate = FollowEspnRank()
+
+    def pick(self, ctx: PickContext) -> str:
+        teams = ctx.roster.teams
+        assert ctx.team_slot not in ctx.opponent_rosters, "own seat must be excluded"
+        assert set(ctx.opponent_rosters) == set(range(teams)) - {ctx.team_slot}
+        opp_total = sum(len(r) for r in ctx.opponent_rosters.values())
+        assert opp_total + len(ctx.own_roster) == ctx.overall_pick - 1
+        # read-only view (same convention as own_roster)
+        with pytest.raises(TypeError):
+            ctx.opponent_rosters[ctx.team_slot] = ()
+        self.checks += 1
+        return self._delegate.pick(ctx)
+
+
+def test_run_draft_populates_opponent_rosters(make_draft_board):
+    board = make_draft_board()
+    probe = _OppRosterProbe()
+    pickers = [probe] + [RankNoiseBot() for _ in range(ROSTER.teams - 1)]
+    run_draft(board, pickers, rng=random.Random(5))
+    assert probe.checks == ROUNDS  # the probe seat was on the clock every round
 
 
 # --------------------------------------------------------------- DB edge loader

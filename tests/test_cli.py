@@ -148,6 +148,36 @@ def test_mock_draft_runs_with_a_monkeypatched_loader(tmp_path, monkeypatch):
     assert "draft slot 3" in result.output
 
 
+def test_mock_draft_engine_strategy_runs(tmp_path, monkeypatch):
+    """The 'engine' arm wires the item-2.3 PickEngine through the same thin command.
+
+    Uses a small board + n=1 so the real survival rollout stays fast; asserts the
+    command parses, runs the engine in the operator seat, and prints the summary.
+    """
+    from ziggurat.draft import simulator
+    from ziggurat.draft.bots import BoardEntry
+
+    def _fake_board():
+        specs = {"QB": 24, "RB": 60, "WR": 64, "TE": 24, "DST": 16, "K": 16}
+        board, rank = [], 1
+        for pos, count in specs.items():
+            for i in range(count):
+                board.append(BoardEntry(f"{pos}-{i}", f"{pos}{i}", pos, rank, 200 - i, 100 - i))
+                rank += 1
+        return tuple(board)
+
+    monkeypatch.setattr(simulator, "load_board", lambda conn, **kw: _fake_board())
+    db_path = tmp_path / "mock.sqlite"
+    result = runner.invoke(
+        app,
+        ["mock-draft", "--season", "2026", "--as-of", "2026-08-15", "--path", str(db_path),
+         "--n", "1", "--slot", "5", "--strategy", "engine", "--seed", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "pick-engine" in result.output
+    assert "draft slot 5" in result.output
+
+
 def test_mock_draft_rejects_unknown_strategy(tmp_path):
     db_path = tmp_path / "mock.sqlite"
     result = runner.invoke(

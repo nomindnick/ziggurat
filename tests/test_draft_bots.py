@@ -13,6 +13,7 @@ from ziggurat.core.valuation import DEFAULT_ROSTER as ROSTER
 from ziggurat.draft.bots import (
     AutodraftBot,
     BoardEntry,
+    BoardState,
     FollowEspnRank,
     FollowVor,
     PickContext,
@@ -207,3 +208,98 @@ def test_optimal_starting_points_greedy_flex():
 def test_position_counts():
     board = [_entry("a", "RB", 1), _entry("b", "RB", 2), _entry("c", "WR", 3)]
     assert position_counts(board) == {"RB": 2, "WR": 1}
+
+
+# ------------------------------------------------- BoardState.clone (item 2.3)
+
+
+def test_boardstate_clone_shares_lists_but_isolates_bookkeeping(make_draft_board):
+    """A clone SHARES the immutable pre-sorted lists (identity) but COPIES the
+    taken-set and head pointers, so a rollout over a clone can never leak into the
+    live draft's BoardState (the design flags this as a build risk)."""
+    board = make_draft_board()
+    orig = BoardState(board)
+    clone = orig.clone()
+    # the expensive sorted structures are shared by reference (memory-cheap clone)
+    assert clone._rank is orig._rank
+    assert clone._vor is orig._vor
+    # ...but the mutable bookkeeping is independent copies
+    assert clone.taken is not orig.taken
+    assert clone._rank_head is not orig._rank_head
+    assert clone._vor_head is not orig._vor_head
+
+
+def test_boardstate_clone_isolation_adversarial_interleave(make_draft_board):
+    """Adversarially interleave takes on BOTH the clone and the original: neither's
+    picks ever appear in the other, and their advancing front pointers move apart."""
+    board = make_draft_board()
+    orig = BoardState(board)
+    clone = orig.clone()
+    positions = ("QB", "RB", "WR", "TE")
+
+    a = board[0].player_id  # taken on the clone only
+    b = board[1].player_id  # taken on the original only
+    clone.take(a)
+    orig.take(b)
+    assert a in clone.taken and a not in orig.taken
+    assert b in orig.taken and b not in clone.taken
+
+    # Drain 6 fronts on the clone; the original's taken-set and advancing front
+    # pointer must be entirely unaffected (clone bookkeeping never leaks back).
+    orig_taken_before = set(orig.taken)
+    orig_front = orig.best_by_rank(positions).player_id
+    for _ in range(6):
+        clone.take(clone.best_by_rank(positions).player_id)
+    assert orig.taken == orig_taken_before
+    assert orig.best_by_rank(positions).player_id == orig_front
+
+    # ...and symmetrically, a take on the original never disturbs the clone.
+    clone_taken_before = set(clone.taken)
+    clone_front = clone.best_by_rank(positions).player_id
+    orig.take(orig.best_by_rank(positions).player_id)
+    assert clone.taken == clone_taken_before
+    assert clone.best_by_rank(positions).player_id == clone_front
+
+
+# --------------------------------------------- opponent_rosters field (item 2.3)
+
+
+def test_pickcontext_opponent_rosters_defaults_empty_and_readonly(make_draft_board):
+    """The new trailing field defaults to an empty, READ-ONLY mapping so every 2.2
+    picker and construction site stays byte-identical."""
+    board = make_draft_board()
+    ctx = PickContext.from_board(board, round=1, overall_pick=1)
+    assert dict(ctx.opponent_rosters) == {}
+    with pytest.raises(TypeError):
+        ctx.opponent_rosters[0] = ()  # MappingProxyType is read-only
+
+
+def test_pickcontext_from_board_marks_opponent_players_taken(make_draft_board):
+    """When ``from_board`` is given opponent rosters, those players are also marked
+    taken on the fresh BoardState (mid-draft consistency for survival tests)."""
+    board = make_draft_board()
+    rivals = {1: (board[3], board[4]), 2: (board[5],)}
+    ctx = PickContext.from_board(board, team_slot=0, round=1, overall_pick=7,
+                                 opponent_rosters=rivals)
+    assert set(ctx.opponent_rosters) == {1, 2}
+    for e in (board[3], board[4], board[5]):
+        assert e.player_id in ctx.state.taken
+
+
+def test_2_2_pickers_ignore_opponent_rosters(make_draft_board):
+    """Populating opponent_rosters must not change any 2.2 picker's choice — they
+    read only own_roster/state/round/rng (source-compat evidence, design Part III).
+
+    Both contexts mark the SAME players taken (so the available board is identical);
+    the only difference is whether the ``opponent_rosters`` field is populated.
+    """
+    board = make_draft_board()
+    rivals = {t: (board[t],) for t in range(1, 5)}
+    rival_ids = [board[t].player_id for t in range(1, 5)]
+    for bot in (AutodraftBot(), RankNoiseBot(), FollowEspnRank(), FollowVor()):
+        blind = PickContext.from_board(board, team_slot=0, round=3, overall_pick=25,
+                                       rng=random.Random(4), taken=rival_ids)
+        withopp = PickContext.from_board(board, team_slot=0, round=3, overall_pick=25,
+                                         rng=random.Random(4), opponent_rosters=rivals)
+        assert blind.state.taken == withopp.state.taken  # identical available board
+        assert bot.pick(blind) == bot.pick(withopp)

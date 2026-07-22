@@ -31,6 +31,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Protocol
 
 from ziggurat.core.valuation import DEFAULT_ROSTER, RosterStructure
@@ -293,8 +294,42 @@ class BoardState:
         gathered.sort(key=lambda t: t[0])
         return [e for _, e in gathered[:w]]
 
+    def all_entries(self) -> Iterable[BoardEntry]:
+        """Iterate every board entry once (read-only; any order).
+
+        The pre-sorted per-position lists partition the board, so yielding from
+        the rank index visits each player exactly once. Used by the 2.3 survival
+        rollout to build a ``player_id -> BoardEntry`` map without re-touching the
+        DB or the raw board tuple.
+        """
+        for entries in self._rank.values():
+            yield from entries
+
+    def clone(self) -> "BoardState":
+        """A cheap independent copy for survival rollouts (item 2.3).
+
+        COPIES the mutable bookkeeping — the ``taken`` set and the two per-position
+        head pointers — so a rollout's ``take``/``front_*`` advances never touch the
+        shared draft's state. SHARES the immutable pre-sorted ``_rank``/``_vor``
+        lists by reference (they are built once in ``__init__`` and never mutated),
+        so a clone is O(taken + positions), not O(board). A rollout MUST draft over
+        a clone, never the live ``BoardState`` threaded through ``run_draft``.
+        """
+        new = BoardState.__new__(BoardState)
+        new.taken = set(self.taken)          # independent taken-set
+        new._rank = self._rank               # SHARED immutable sorted lists
+        new._vor = self._vor                 # SHARED immutable sorted lists
+        new._rank_head = dict(self._rank_head)  # independent head pointers
+        new._vor_head = dict(self._vor_head)
+        return new
+
 
 # --------------------------------------------------------------- pick context
+
+# Read-only empty default for PickContext.opponent_rosters (item 2.3). A shared
+# frozen proxy so the frozen dataclass default is immutable and never aliased to a
+# mutable dict a picker could reach through.
+_NO_OPPONENTS: Mapping[int, Sequence["BoardEntry"]] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -315,6 +350,13 @@ class PickContext:
     own_roster: Sequence[BoardEntry]   # READ-ONLY for pickers (may be a live list)
     state: BoardState
     rng: random.Random
+    # NEW (item 2.3): team_slot -> that rival's drafted entries (EXCLUDES the team
+    # on the clock; read-only, may be live lists). Defaulted to an empty read-only
+    # mapping so every 2.2 picker and construction site is byte-identical untouched
+    # (a trailing defaulted field). The survival rollout reads it to advance each
+    # rival as a needs-aware bot from its real current roster; an empty mapping runs
+    # the rollout need-blind (fine for unit tests / the analytic fallback).
+    opponent_rosters: Mapping[int, Sequence[BoardEntry]] = _NO_OPPONENTS
 
     @property
     def picks_after(self) -> int:
@@ -334,13 +376,25 @@ class PickContext:
         rounds_total: int = 16,
         roster: RosterStructure = DEFAULT_ROSTER,
         rng: random.Random | None = None,
+        opponent_rosters: Mapping[int, Sequence[BoardEntry]] | None = None,
     ) -> "PickContext":
-        """Build a context straight from a plain board (test/edge ergonomics)."""
+        """Build a context straight from a plain board (test/edge ergonomics).
+
+        ``opponent_rosters`` (item 2.3) is optional; when given, its entries are
+        also marked taken on the fresh :class:`BoardState` so the board reflects a
+        mid-draft state consistent with the rivals' rosters.
+        """
         state = BoardState(board)
         for pid in taken:
             state.take(pid)
         for e in own_roster:
             state.take(e.player_id)
+        opp: Mapping[int, Sequence[BoardEntry]] = _NO_OPPONENTS
+        if opponent_rosters:
+            for entries in opponent_rosters.values():
+                for e in entries:
+                    state.take(e.player_id)
+            opp = MappingProxyType({t: tuple(v) for t, v in opponent_rosters.items()})
         return cls(
             team_slot=team_slot,
             round=round,
@@ -350,6 +404,7 @@ class PickContext:
             own_roster=tuple(own_roster),
             state=state,
             rng=rng if rng is not None else random.Random(0),
+            opponent_rosters=opp,
         )
 
 

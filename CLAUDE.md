@@ -93,9 +93,24 @@ Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins 
   findings, 5 fixed, 2 recorded. Suite green (292). Details:
   `IMPLEMENTATION_PLAN.md` 2.2 + gitignored `intel/research/mocksim-2.2-*.md`.
 
-Next: **2.3 draft pick engine** → 2.4 board TUI → Checkpoint 2 rehearsals.
-Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
-(monitor ESPN — 3 of 10 seats also still unclaimed; re-snapshot the room near
+- **2.3 draft pick engine — done 2026-07-22.** `ziggurat/draft/engine.py` +
+  `survival.py`: Fry–Ohlmann additive score (VOR + need + survival-timed VONA
+  urgency + round-signed risk prior), survival via Monte-Carlo rollouts of the
+  calibrated 2.2 room (cloned board state; analytic sigmoid fallback), one new
+  trailing `PickContext.opponent_rosters` field, `recommend()` → novice-legible
+  `PickRec` reasons (the 2.4 TUI contract), live-recalibration utility (priors
+  seam on `PickEngine`; TUI wiring is 2.4's). Done-when met: 60/60 tournament
+  cells positive (3 seeds × 10 slots × both baselines, all CI>0; +135…+197 vs
+  follow-ESPN, +22…+53 vs follow-VOR — house-projected, self-graded; Phase 4
+  grades realized). K/DST divergence play emerges from urgency (R9–10 vs the
+  room's R15), no special case. 18-agent audit: margin structural (survives
+  held-out seeds, non-winning weights, hostile rooms); 13 minor findings all
+  fixed/recorded. Suite green (334). Details: `IMPLEMENTATION_PLAN.md` 2.3 +
+  gitignored `intel/research/pick-engine-2.3-design.md` & `draft-strategy.md`.
+
+Next: **2.4 draft board TUI** → Checkpoint 2 rehearsals. Calendar anchors:
+draft expected mid-to-late August 2026, still unscheduled (monitor ESPN —
+2 of 10 seats still invite-pending as of 2026-07-21; re-snapshot the room near
 draft day); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
 
 Update this section whenever a phase or checkpoint closes.
