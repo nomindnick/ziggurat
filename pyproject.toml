@@ -10,6 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
+    # Draft-board TUI (item 2.4) render layer. Declared directly rather than leaning
+    # on typer's transitive pull; DELETABLE with ziggurat/draft/ — remove this one
+    # line when the draft package is deleted after draft day (Rule 8).
+    "rich>=13",
     "espn_api>=0.46",  # ESPN private-league access (spike 1.1)
     # Maintained nflverse client; replaces deprecated nfl_data_py.
     "nflreadpy>=0.1.5,<0.2",

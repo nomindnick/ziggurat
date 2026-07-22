@@ -79,6 +79,7 @@ class BoardEntry:
     espn_overall_rank: int        # lower = better
     house_points: float
     vor: float
+    team: str | None = None       # normalized NFL abbr; resolver tiebreak + DST entry
 
 
 # --------------------------------------------------------------- roster legality

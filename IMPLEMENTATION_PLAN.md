@@ -464,7 +464,66 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Goal:** Terminal draft-day interface: fuzzy/alias pick entry (RapidFuzz-style; 'cmc' resolves instantly), continuous background recompute between picks, tier view, ESPN-rank view (the room's screen), contingency prompts at snake turns. Manual entry is the primary path per SPEC; if 1.1 found any live-sync affordance, it's a bonus assist only.
 **Done when:** a full mock draft can be driven through the TUI without touching documentation, and no single interaction takes more than ~5 seconds.
 **Update:**
-> _[To be completed]_
+> **Done 2026-07-22.** Standard three-workflow pattern (recon → 4-builder+
+> integrator build → 5-skeptic × 5-refuter audit) plus a 3-fixer+verifier fix
+> round; all agents Opus/xhigh. New modules, all in deletable `ziggurat/draft/`
+> (Rule 8): `resolver.py` (stdlib tiered fuzzy name resolver + alias/DST maps,
+> confirm-on-tie), `session.py` (headless `DraftSession` controller: snake
+> bookkeeping, append-only fsync-before-ack JSONL journal + resume-by-replay,
+> fresh state-seeded ctx per compute, live-recalibration wiring with honesty
+> fields, snake-turn contingencies, legality-aware autodraft suggestion),
+> `posture.py` (archetype comparison + hysteresis/cooldown monitor — the two
+> carried 2.3 deferrals are LANDED), `board_view.py` (pure Rich renderables:
+> rec panel with verbatim `PickRec.reasons`, tier/VOR cliffs, ESPN room view,
+> roster/needs, honesty status), `app.py` (the only I/O module; scroll-on-enter
+> Rich REPL), thin `ziggurat draft-board` CLI (lazy in-body imports).
+> `BoardEntry.team` added (defaulted trailing field). `rich>=13` declared as a
+> direct dep (recon said optional group; main-deps is safer for the shipped CLI
+> and stays a one-line delete — recorded deviation).
+>
+> **Recon decisions (note: `intel/research/tui-2.4-recon.md`):** measured
+> recommend() ≤243 ms @ R=512 on the real 3,218-entry board (~20× under the
+> 5 s bar) → SYNCHRONOUS recompute after every entered pick (the background-
+> thread design was refuted as over-engineered; multiprocessing dropped —
+> engine dataclasses don't pickle). Verifiers overturned two probe claims:
+> recommend() is NOT idempotent on a held ctx (mutates `ctx.rng` — now a hard
+> rule + honest regression test), and fuzzy accuracy was downgraded 97.8%→~90%
+> adversarial (drove the elite-safety/empty-guard/err-toward-confirm MUSTs).
+> Rich-REPL-vs-Textual and rapidfuzz both deferred to Checkpoint-2 rehearsal
+> evidence (headless controller contains a flip). League has no keepers.
+>
+> **Done-when met:** `tests/test_draft_app.py` + `test_draft_session.py` drive
+> scripted full drafts through the real loop (resolve→confirm→enter, undo,
+> edit, autodraft seat, crash-kill-resume bit-identical, non-identity
+> `pick_order`, ctx-reseed determinism, <5 s latency guard); real-board
+> verifier drive: recommend() 157 ms max @ R=512, wheel contingencies 3
+> legible branches, zero tracebacks, resume bit-identical.
+>
+> **Audit (10 agents, every finding refuter-reproduced): 1 critical, 5 major,
+> ~10 minor, 8 notes — all fixed 2026-07-22 except recorded notes.** Critical:
+> same-path relaunch without `--resume` truncated the journal (silent total
+> pick loss on the likeliest panic action) → O_EXCL + `JournalExistsError`,
+> timestamped journal names, `--resume` discovers newest journal and loads the
+> board at the JOURNALLED as_of (also fixes midnight rollover). Majors: torn
+> tail bricked resume (now final-line-tolerant + warnings); first-launch
+> missing-dir crash; app autodraft was legality-blind raw-ESPN (rewired to
+> `suggest_autodraft`, blind path deleted, refuses on operator's own turn);
+> resolver elite floor 780→300 (typo sweep residual 957→265, ALL residuals
+> visible-confirm; silent wrong-pick autos = 0 across every adversarial
+> sweep); posture banner flash-then-permanent-latch (now held until p/x accept/
+> dismiss, snake-turn cadence, guard before compute); ctx-reseed test provably
+> couldn't fail (wheel short-circuit) — rewritten and bug-injection-verified.
+> Held clean under attack: verbatim reasons, empty-query guard, snake geometry
+> under non-identity orders, Rule-8 deletability, fsync ordering. Recorded
+> notes: over-cap rival entry is by design; kappa asymmetry cancels in paired
+> posture comparison; wheel survival 1.0 is literally correct; `jt` alias
+> stays auto (buried rival #104 outranked by target #7 — no invariant hit).
+>
+> **Deferrals → Checkpoint 2:** 60-s-clock rehearsals; TUI-shape + rapidfuzz
+> revisits on rehearsal evidence; alias-map growth from real misses; posture
+> margin/consecutive tuning; re-measure on the draft-day machine; near draft
+> day re-snapshot the room + fix operator slot/`pick_order` + refresh board.
+> Suite green: **460 passed** (from 334; 126 new). Ruff clean.
 
 ### ✦ Checkpoint 2: Draft dress rehearsal (gate for draft day)
 At least two full-speed rehearsals against the sim under a real 60-second clock — operator at the keyboard, tool recommending, picks entered by hand. Fix what breaks; rehearse again if the fixes were structural. Also: strategy selection from the actual draft slot once the league schedules the draft.

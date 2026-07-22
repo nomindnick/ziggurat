@@ -5,7 +5,7 @@ parses arguments, calls a package function, and prints the result.
 """
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -223,6 +223,110 @@ def mock_draft(
         priors=ROOM_PRIORS_2025, seed=seed,
     )
     typer.echo(format_strategy_summary(summary))
+
+
+@app.command("draft-board")
+def draft_board(
+    season: Annotated[Optional[int], typer.Option(
+        help="Season whose board to draft from (required to START a new draft; on "
+             "--resume it is read from the journal header).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(
+        help="Knowledge-time cutoff (YYYY-MM-DD); defaults to today. Ignored on "
+             "--resume (the journalled as_of is used).")] = None,
+    slot: Annotated[int, typer.Option(help="Your draft slot / seat id, 1..teams.")] = 1,
+    pick_order: Annotated[Optional[str], typer.Option(
+        help="Real draft order as a CSV of 0-based seat ids "
+             "(draft position -> seat id); defaults to identity 0,1,2,...")] = None,
+    journal: Annotated[Optional[Path], typer.Option(
+        help="Crash-recovery journal file; a new draft defaults to a timestamped "
+             "data/draft/session-<YYYYMMDD>-<HHMMSS>.jsonl, and --resume without "
+             "--journal recovers the newest session in data/draft.")] = None,
+    resume: Annotated[bool, typer.Option("--resume", help="Resume from the journal (replay).")] = False,
+    rollouts: Annotated[int, typer.Option(help="Survival rollouts per recommendation.")] = 512,
+    seed: Annotated[int, typer.Option(help="RNG seed (reproducible).")] = 42,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+) -> None:
+    """Launch the live draft-board TUI (item 2.4).
+
+    All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8), imported
+    lazily here so nothing outside it couples statically. Parse, resolve the journal
+    (discovering the newest on --resume), load the board at the right as_of, hand off
+    to the app loop (Rule 3 — the discovery/header helpers live in session.py).
+    """
+    # Lazy (in-body) import: keeps the deletable draft package off every other
+    # module's import graph — Rule 8 (same pattern as mock-draft above).
+    from ziggurat.draft import app as draft_app
+    from ziggurat.draft.session import find_latest_journal, read_journal_header
+    from ziggurat.draft.simulator import DEFAULT_ROSTER, load_board
+
+    if not 1 <= slot <= DEFAULT_ROSTER.teams:
+        raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
+
+    draft_dir = REPO_ROOT / "data" / "draft"
+
+    if resume:
+        # Recover an interrupted draft. The journal HEADER — not today's clock — is
+        # the source of truth for the board snapshot, so the replay runs on the
+        # original board and a midnight rollover cannot orphan it (recon §crash
+        # NEW-1 / §arch NEW-1). Discovery + header parse are loud in session.py.
+        if journal is not None:
+            resolved_journal = journal
+        else:
+            found = find_latest_journal(draft_dir)
+            if found is None:
+                typer.echo(
+                    f"No draft journal found under {draft_dir} to resume. Start a new "
+                    "draft (omit --resume), or point --journal at the session file.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            resolved_journal = found
+        header = read_journal_header(resolved_journal)
+        resolved_as_of = header["as_of"]
+        resolved_season = header["season"]
+    else:
+        if season is None:
+            raise typer.BadParameter("--season is required to start a new draft")
+        # The CLI edge is where "now" materializes (Rule 1). A timestamped default
+        # name means a re-launch never lands on a live journal (no clobber, and a
+        # midnight rollover cannot orphan it — --resume discovers the newest).
+        resolved_as_of = as_of or date.today().isoformat()
+        resolved_season = season
+        resolved_journal = journal or (
+            draft_dir / f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}.jsonl"
+        )
+
+    order = [int(x) for x in pick_order.split(",")] if pick_order else None
+
+    conn = connect(path)
+    board = load_board(
+        conn, as_of=resolved_as_of, season=resolved_season, source=source,
+        weeks=_parse_weeks(weeks),
+    )
+    conn.close()
+    if not board:
+        typer.echo(
+            f"No draftable board for season {resolved_season} as of {resolved_as_of}: "
+            "the database has no projections/ESPN ranks visible at that date. Check "
+            "the season and --as-of, and that this season's data has been pulled.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    draft_app.launch(
+        board,
+        operator_slot=slot - 1,
+        pick_order=order,
+        season=resolved_season,
+        as_of=resolved_as_of,
+        journal_path=resolved_journal,
+        resume=resume,
+        rollouts=rollouts,
+        seed=seed,
+        roster=DEFAULT_ROSTER,
+    )
 
 
 @app.command()

@@ -411,8 +411,8 @@ def load_board(
     _FALLBACK_BASE = 10_000  # unranked players sort after every ESPN-ranked one
     board: list[BoardEntry] = []
     for v in val_rows:
+        team = base.TEAM_ALIASES.get(str(v.team).upper(), str(v.team).upper()) if v.team else None
         if v.position == "DST":
-            team = base.TEAM_ALIASES.get(str(v.team).upper(), str(v.team).upper()) if v.team else None
             rank = rank_by_dst_team.get(team)
             pid = v.espn_id or v.gsis_id or f"DST:{team}"
         else:
@@ -428,6 +428,7 @@ def load_board(
                 espn_overall_rank=int(rank),
                 house_points=float(v.proj_points),
                 vor=float(v.vor),
+                team=team,
             )
         )
     return tuple(board)

@@ -162,7 +162,7 @@ def replacement_levels(
         for pts in by_pos.get(pos, [])[started.get(pos, 0):]:
             pool.append((pts, pos))
     pool.sort(reverse=True)  # best leftovers first
-    for pts, pos in pool[:flex_total]:
+    for _pts, pos in pool[:flex_total]:
         started[pos] += 1
 
     replacement: dict[str, float] = {}

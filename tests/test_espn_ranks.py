@@ -71,8 +71,6 @@ def test_dst_negative_id_resolves_team_not_espn_id():
 
 def test_team_normalizes_through_aliases():
     # PRO_TEAM_MAP emits WSH/LAR/JAC variants; base.TEAM_ALIASES normalizes them.
-    from espn_api.football.constant import PRO_TEAM_MAP
-
     for raw in _raw_players():
         mapped = espn_ranks.map_espn_player(raw)
         team = mapped["team"]

@@ -39,7 +39,6 @@ import re
 from collections import Counter, defaultdict
 from importlib import import_module
 from pathlib import Path
-from statistics import median
 
 import numpy as np
 
@@ -281,7 +280,7 @@ def _robust_spread(values: list[float]) -> dict:
         "robust_sigma": float(1.4826 * mad),
         "min": float(arr.min()),
         "max": float(arr.max()),
-        "percentiles": {f"p{lvl:02d}": float(v) for lvl, v in zip(pct_levels, pcts)},
+        "percentiles": {f"p{lvl:02d}": float(v) for lvl, v in zip(pct_levels, pcts, strict=True)},
     }
 
 

@@ -108,7 +108,25 @@ Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins 
   fixed/recorded. Suite green (334). Details: `IMPLEMENTATION_PLAN.md` 2.3 +
   gitignored `intel/research/pick-engine-2.3-design.md` & `draft-strategy.md`.
 
-Next: **2.4 draft board TUI** → Checkpoint 2 rehearsals. Calendar anchors:
+- **2.4 draft board TUI — done 2026-07-22.** Draft-day cockpit in deletable
+  `ziggurat/draft/`: `resolver.py` (stdlib tiered fuzzy entry, confirm-on-tie,
+  elite-safety — silent wrong-pick autos measured 0), `session.py` (headless
+  controller; fsync-before-ack JSONL journal, resume-by-replay bit-identical,
+  fresh state-seeded ctx per compute, live-recalibration + honesty display,
+  snake-turn contingencies), `posture.py` (hysteresis monitor — both 2.3
+  deferrals landed), `board_view.py`/`app.py` (Rich scroll-on-enter REPL;
+  verbatim `PickRec.reasons`), thin `ziggurat draft-board` CLI. Measured:
+  recommend() ≤243 ms @ R=512 on the real board → synchronous recompute (no
+  threads). Three verified workflows + fix round; audit (10 agents) found 1
+  critical (journal clobber on relaunch-without---resume — fixed with O_EXCL +
+  timestamped names + header-driven resume) and 5 majors, all fixed; recorded
+  notes in `IMPLEMENTATION_PLAN.md` 2.4 + gitignored
+  `intel/research/tui-2.4-recon.md`. Suite green (460). Rich REPL vs Textual
+  and rapidfuzz deliberately deferred to Checkpoint-2 rehearsal evidence.
+
+Next: **Checkpoint 2 draft dress rehearsals** (two full-speed runs under a
+real 60-s clock; strategy-from-slot once ESPN schedules the draft), then
+Phase 3 in-season operations. Calendar anchors:
 draft expected mid-to-late August 2026, still unscheduled (monitor ESPN —
 2 of 10 seats still invite-pending as of 2026-07-21; re-snapshot the room near
 draft day); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
