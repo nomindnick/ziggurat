@@ -51,29 +51,24 @@ def _norm_team(abbr):
     return base.TEAM_ALIASES.get(abbr, abbr)
 
 
-def _editorial_rank(raw) -> int | None:
-    """Read the PRIMARY editorial PPR board rank, failing LOUD on schema drift.
+# Minimum fraction of mapped rows that must carry an editorial PPR rank. The
+# live pool runs ~99.9% (a lone fringe rookie shipped only an ELIMINATION block,
+# 2026-07-24); wholesale schema drift (ESPN renames the PPR key) drops coverage
+# to ~0, so the gap between the two regimes is wide.
+_MIN_EDITORIAL_COVERAGE = 0.5
 
-    The board rank lives at ``draftRanksByRankType["PPR"]["rank"]``. Every player
-    in the live pool carries it; if the ``draftRanksByRankType`` container is
-    present but has lost its ``PPR`` block or that block has lost ``rank``, ESPN
-    changed the payload shape and every downstream rank would silently corrupt —
-    so we raise rather than coerce to None."""
+
+def _editorial_rank(raw) -> int | None:
+    """Read the PRIMARY editorial PPR board rank, or None when this ROW carries
+    no readable PPR signal (container absent, ``PPR`` block missing, or ``rank``
+    missing). Individual sparse rows are real — ESPN ships the odd fringe player
+    with only an ELIMINATION rank — so the loud wholesale-drift guard lives at
+    the snapshot level in ``ingest_espn_ranks``, not here."""
     ranks = raw.get("draftRanksByRankType")
     if ranks is None:
-        return None  # container absent entirely -> no editorial signal for this row
-    if "PPR" not in ranks:
-        raise ValueError(
-            "ESPN payload schema drift: draftRanksByRankType present but missing "
-            f"'PPR' block (keys={sorted(ranks)})"
-        )
-    ppr = ranks["PPR"] or {}
-    if "rank" not in ppr:
-        raise ValueError(
-            "ESPN payload schema drift: draftRanksByRankType['PPR'] missing 'rank' "
-            f"(keys={sorted(ppr)})"
-        )
-    return ppr["rank"]
+        return None
+    ppr = ranks.get("PPR") or {}
+    return ppr.get("rank")
 
 
 def map_espn_player(raw) -> dict | None:
@@ -83,8 +78,8 @@ def map_espn_player(raw) -> dict | None:
     Emits ``{espn_id, player, position, team, overall_rank, adp}`` (the derived
     ``espn_pos_rank``/``espn_adp_pos_rank``/``season`` are added by the ingest).
     ``espn_id`` is ``str(id)`` for skill players and None for DST (synthetic
-    negative id). Raises on ``draftRanksByRankType`` schema drift (see
-    ``_editorial_rank``)."""
+    negative id). A row with no readable PPR rank maps with ``overall_rank``
+    None; wholesale drift is caught in ``ingest_espn_ranks``."""
     pos_id = raw.get("defaultPositionId")
     position = DEFPOS.get(pos_id)
     if position is None:
@@ -156,6 +151,18 @@ def ingest_espn_ranks(conn, raw_players, *, retrieved_as_of: str, season: int) -
         # it, so a would-be all-null row (e.g. a teamless DST) fails loud.
         mapped["board_key"] = mapped["espn_id"] or mapped["team"]
         rows.append(mapped)
+
+    # Wholesale-drift guard: individual rows may lack a PPR rank (fringe players
+    # with only an ELIMINATION block), but if MOST of the snapshot has none, ESPN
+    # changed the payload shape and every downstream rank would silently corrupt.
+    if rows:
+        covered = sum(1 for r in rows if r["overall_rank"] is not None)
+        if covered / len(rows) < _MIN_EDITORIAL_COVERAGE:
+            raise ValueError(
+                "ESPN payload schema drift: only "
+                f"{covered}/{len(rows)} mapped rows carry a PPR editorial rank "
+                f"(min coverage {_MIN_EDITORIAL_COVERAGE:.0%})"
+            )
 
     _assign_pos_ranks(rows)
 

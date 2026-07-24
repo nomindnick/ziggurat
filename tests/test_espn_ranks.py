@@ -85,18 +85,47 @@ def test_non_league_position_maps_to_none():
     assert espn_ranks.map_espn_player(fake) is None
 
 
-def test_schema_drift_on_draft_ranks_fails_loud():
-    # draftRanksByRankType present but PPR block gone -> raise (not silent None).
-    drifted = {"id": 1, "defaultPositionId": 2, "proTeamId": 8, "fullName": "X",
-               "draftRanksByRankType": {"STANDARD": {"rank": 5}}, "ownership": {}}
-    with pytest.raises(ValueError, match="schema drift"):
-        espn_ranks.map_espn_player(drifted)
+def test_sparse_row_without_ppr_rank_maps_to_none():
+    # A lone row missing the PPR block (real: fringe rookies ship only an
+    # ELIMINATION rank, seen live 2026-07-24) is NO signal, not drift.
+    sparse = {"id": 1, "defaultPositionId": 2, "proTeamId": 8, "fullName": "X",
+              "draftRanksByRankType": {"ELIMINATION": {"rank": 5}}, "ownership": {}}
+    assert espn_ranks.map_espn_player(sparse)["overall_rank"] is None
 
-    # PPR block present but 'rank' key gone -> also raise.
-    drifted2 = {"id": 2, "defaultPositionId": 2, "proTeamId": 8, "fullName": "Y",
-                "draftRanksByRankType": {"PPR": {"auctionValue": 3}}, "ownership": {}}
+    # PPR block present but 'rank' key gone -> likewise None for that row.
+    sparse2 = {"id": 2, "defaultPositionId": 2, "proTeamId": 8, "fullName": "Y",
+               "draftRanksByRankType": {"PPR": {"auctionValue": 3}}, "ownership": {}}
+    assert espn_ranks.map_espn_player(sparse2)["overall_rank"] is None
+
+
+def test_wholesale_schema_drift_fails_loud_at_ingest(db):
+    # If MOST of the snapshot has lost its PPR rank, ESPN changed the payload
+    # shape -> the ingest raises instead of storing a corrupt board.
+    drifted = [
+        {"id": i, "defaultPositionId": 2, "proTeamId": 8, "fullName": f"P{i}",
+         "draftRanksByRankType": {"STANDARD": {"rank": i}}, "ownership": {}}
+        for i in range(1, 11)
+    ]
     with pytest.raises(ValueError, match="schema drift"):
-        espn_ranks.map_espn_player(drifted2)
+        espn_ranks.ingest_espn_ranks(db, drifted, retrieved_as_of="2026-07-24", season=2026)
+
+
+def test_minority_sparse_rows_ingest_and_rank_last(db):
+    # One sparse row in an otherwise-covered snapshot ingests, and its derived
+    # pos rank sorts LAST within its position (None never precedes a ranked row).
+    raws = _raw_players()
+    sparse = {"id": 999999, "defaultPositionId": 2, "proTeamId": 8,
+              "fullName": "Sparse Rookie",
+              "draftRanksByRankType": {"ELIMINATION": {"rank": 1}}, "ownership": {}}
+    n = espn_ranks.ingest_espn_ranks(
+        db, raws + [sparse], retrieved_as_of="2026-07-24", season=2026
+    )
+    assert n == len(raws) + 1
+    got = espn_ranks.get_espn_draft_ranks(db, as_of="2026-07-24", season=2026)
+    rbs = _by_pos(got, "RB")
+    sparse_row = next(r for r in rbs if r["player"] == "Sparse Rookie")
+    assert sparse_row["overall_rank"] is None
+    assert sparse_row["espn_pos_rank"] == len(rbs)
 
 
 # ----------------------------------------------------- pos-rank derivation
