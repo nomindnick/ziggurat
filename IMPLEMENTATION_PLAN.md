@@ -582,6 +582,18 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > operator pick in 1. Perspective for the gate: the CPU lobby (7 picks in
 > seconds) is beyond the real worst case (2/10 autodraft seats → bursts of
 > ~2-3); rehearsals in the mock lobby remain the stress test.
+>
+> **ESPN live-sync spike (2026-07-24) — NEGATIVE, architecture settled.**
+> Tested with a throwaway 4-team league + live autodraft: ESPN's REST views
+> (`mDraftDetail`/`mRoster`/`mTeam`) stay placeholder/empty for the ENTIRE
+> live draft and flush atomically at completion (all 64 picks in one poll,
+> 5 ms spread; the draft room's realtime feed is a private websocket — not
+> pursued: fragile, unverifiable, bad draft-day dependency). So manual entry
+> via the quick-pick strip IS the draft-day plan. Salvage: completed drafts
+> are auto-importable from the flush (Phase 3 roster init / rehearsal
+> grading), and a scratch test league is the ideal rehearsal venue — real
+> ESPN draft room, real 60 s clock, cockpit alongside. Full findings:
+> `intel/research/espn-live-draft-sync-spike.md`.
 
 ---
 
