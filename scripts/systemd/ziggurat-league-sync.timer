@@ -1,0 +1,36 @@
+# Ziggurat league-state sync schedule (item 3.1) — systemd USER timer.
+#
+# FOUR runs a day. The snapshot tables are day-granular (the last successful pull
+# of a day is that day's snapshot), so the extra runs do not add rows — they buy
+# two things that matter more:
+#
+#   1. RESILIENCE. One nightly run means one transient failure (flaky ESPN,
+#      asleep laptop, expired cookie noticed late) costs a day of history that
+#      can never be recovered. With four attempts, a day is lost only if all
+#      four fail.
+#   2. INTRADAY EVENTS. league_transactions is write-on-change and carries real
+#      ESPN timestamps, so extra runs DO capture state transitions the daily
+#      snapshot flattens — notably a waiver claim going PENDING -> EXECUTED in
+#      ESPN's overnight batch.
+#
+# Times are chosen around the league's rhythm (SPEC): ESPN processes waiver
+# claims ~03:00-04:30 ET Wednesday, so the 05:15 run lands just after the batch
+# and before the operator's breakfast read; 17:15 precedes Thursday kickoff;
+# 23:15 closes the day out.
+
+[Unit]
+Description=Ziggurat league-state snapshot schedule
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=*-*-* 05,11,17,23:15:00
+# Persistent: if the machine was asleep/off at the scheduled time, run at the
+# next opportunity rather than skipping the day (a laptop WILL miss slots).
+Persistent=true
+# Do not hit ESPN from every machine at exactly :15.
+RandomizedDelaySec=300
+AccuracySec=1m
+Unit=ziggurat-league-sync.service
+
+[Install]
+WantedBy=timers.target

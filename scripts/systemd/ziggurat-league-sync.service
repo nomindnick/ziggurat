@@ -1,0 +1,39 @@
+# Ziggurat league-state sync (item 3.1) — systemd USER service.
+#
+# Installed by scripts/install-league-sync.sh, which substitutes @REPO@ and
+# @SEASON@. Runs unattended: pulls one league-state snapshot and exits.
+#
+# Why this must keep running: ESPN serves NO historical league state (verified
+# 2026-07-24 — leagueHistory ignores scoringPeriodId on rosters, past-season
+# transactions are empty). League history exists ONLY because this fires. A day
+# it does not capture cannot be recovered later, by anyone, ever.
+#
+# Failures are visible three ways: a nonzero exit here (journal + `systemctl
+# --user status`), a `failed` row in league_sync_runs, and a gap in
+# `ziggurat league status`.
+
+[Unit]
+Description=Ziggurat league-state snapshot (ESPN rosters, standings, matchups, FA pool)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+# Do not fire on a cold boot before the network is up.
+After=network-online.target
+# Rate limit for the Restart= below. These live in [Unit], not [Service]
+# (systemd >= 229); putting them under [Service] is silently ignored.
+StartLimitBurst=3
+StartLimitIntervalSec=1800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# The season is PINNED rather than derived, so a January run cannot drift to the
+# wrong season number. Update it (or re-run the installer) each new season.
+ExecStart=@REPO@/.venv/bin/ziggurat league sync --season @SEASON@
+# ESPN is occasionally flaky; retry a couple of times (rate-limited by the
+# StartLimit* keys above) before conceding the run — a genuinely expired cookie
+# must surface as a failure rather than loop all day.
+Restart=on-failure
+RestartSec=180
+# The credentials live in the repo .env, which the package loads itself
+# (never echoed into logs — rule 5).
+StandardOutput=journal
+StandardError=journal

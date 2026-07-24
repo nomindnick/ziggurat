@@ -286,6 +286,35 @@ def espn_by_gsis(conn: sqlite3.Connection) -> dict[str, str]:
     return out
 
 
+def gsis_by_espn(conn: sqlite3.Connection) -> dict[str, str]:
+    """espn_id -> gsis_id from the latest players snapshot — the reverse of
+    ``espn_by_gsis``, used by league state (item 3.1) whose rows arrive keyed by
+    ESPN player id and must join the nflverse spine.
+
+    Same contract as its siblings: newest retrieved row per gsis_id, a collision
+    is logged (never silently last-write-wins) and the first mapping kept, and the
+    read is crosswalk-at-now (no as-of gate) because gsis<->espn identity is
+    immutable. D/ST never appears here — ESPN gives team defenses synthetic
+    negative ids and nflverse has no gsis for them; they join by team abbr.
+    """
+    out: dict[str, str] = {}
+    for r in conn.execute(
+        """
+        SELECT espn_id, gsis_id FROM players p
+        WHERE espn_id IS NOT NULL AND retrieved_as_of = (
+            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
+        )
+        """
+    ):
+        espn, gsis = r["espn_id"], r["gsis_id"]
+        if espn in out and out[espn] != gsis:
+            logger.warning("crosswalk: espn_id %s maps to multiple gsis (%s, %s); keeping first",
+                           espn, out[espn], gsis)
+            continue
+        out[espn] = gsis
+    return out
+
+
 def select_as_of(
     conn: sqlite3.Connection,
     table: str,

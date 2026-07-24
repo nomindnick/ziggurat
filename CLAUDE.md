@@ -141,10 +141,29 @@ completed — the second flawless, hands-free. Remaining before draft day
 near-day board refresh + room re-snapshot + a confidence run on the
 draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
 
-Next: **Phase 3 in-season operations** (begins now — hard deadline ~NFL Week 1,
-~Sept 10; weeks 1–3 are the richest waiver season). Calendar anchors: draft
-expected mid-to-late August 2026, still unscheduled (monitor ESPN — 2 of 10
-seats still invite-pending as of 2026-07-21).
+**Phase 3 — In-Season Operations — IN PROGRESS** (hard deadline ~NFL Week 1,
+~Sept 10; weeks 1–3 are the richest waiver season).
+
+- **3.1 league state sync & cadence — built & tested 2026-07-24.** Permanent
+  `ziggurat/league/` package (`source.py` network seam, `state.py` mappers +
+  as-of accessors, `sync.py` orchestration + run log), migration `005`
+  (`schema_version` 5), `ziggurat league {sync,status,roster,free-agents,holdings}`,
+  systemd user timer + installer. **The recon finding that shaped it: ESPN serves
+  league state as a CURRENT SNAPSHOT ONLY — no historical backfill exists**
+  (leagueHistory ignores `scoringPeriodId` on rosters; past-season box scores
+  carry no per-week roster; past-season transactions are empty/404). So league
+  history accumulates ONLY forward and a missed run is unrecoverable — hence
+  `league_sync_runs` + a gap report, and hence `league_player_state` snapshots
+  the WHOLE universe daily (a drop must be a positive `on_team_id IS NULL` fact,
+  which doubles as the FA pool). Validated live: 10 teams, 70 matchups, 1026
+  players all correctly free agents pre-draft, 98.9% espn→gsis coverage, leakage
+  clean. Suite green (604). Remaining is calendar-bound: real-data confirmation
+  of roster history needs the August draft, and the timer needs installing on the
+  machine that will run it. Details: `IMPLEMENTATION_PLAN.md` 3.1 + gitignored
+  `intel/research/league-sync-3.1-design.md`.
+
+Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
+(monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).
 
 Update this section whenever a phase or checkpoint closes.
 
@@ -197,7 +216,7 @@ Update this section whenever a phase or checkpoint closes.
 ziggurat/            the Python package (deterministic tools)
   data/              ingestion clients + as-of data access (asof.py, store.py)
   core/              scoring.py (single source of truth), valuation, signals
-  league/            league state, opponent layer, Monte Carlo (Phase 3+)
+  league/            league state sync (source/state/sync), opponent layer, Monte Carlo
   draft/             DELETABLE draft tool (Phase 2, deleted after draft day)
   llm/               the LLM routing interface (router.py, backends.py)
   cli/               thin Typer commands — no logic
@@ -226,7 +245,18 @@ git config core.hooksPath scripts/hooks   # per clone, required
 # routinely:
 .venv/bin/pytest                          # must stay green
 .venv/bin/ziggurat smoke                  # spine wiring sanity check
+
+# in-season, on the machine that runs the cadence (item 3.1), once:
+scripts/install-league-sync.sh            # systemd user timer, 4x/day
+.venv/bin/ziggurat league status          # last run + UNRECOVERABLE missing days
 ```
+
+**League history is perishable (item 3.1).** ESPN serves league state as a
+current snapshot only — there is no historical backfill for rosters, lineups, or
+transactions. Whatever the scheduled sync does not capture is gone permanently,
+so `ziggurat league status` reporting missing days is a real (unfixable) data
+loss, not a cosmetic warning. Check it whenever cookies are refreshed or the
+sync machine changes.
 
 Tests land **with** each item, not in a cleanup phase. Test conventions:
 golden-master cases for scoring, leakage tests for accessors, the mock-draft

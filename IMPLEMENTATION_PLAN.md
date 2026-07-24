@@ -681,7 +681,104 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 **Goal:** Scheduled sync of rosters (all 10 teams), standings, matchups, transactions, free agents into temporal tables; runs on the Strix Halo cron.
 **Done when:** the database answers "who held player X in week N" and "current FA pool" correctly after a scheduled run with no manual step.
 **Update:**
-> _[To be completed]_
+> **Built and tested 2026-07-24; two confirmations are calendar-bound (below).**
+> **Landed:** permanent `ziggurat/league/` package — `source.py` (the ONE network
+> seam: `fetch_league_state` / `fetch_player_pool` / `fetch_transactions` /
+> `fetch_activity`, reusing 2.1's request layer via the now-public
+> `espn_source.league_client`), `state.py` (pure mappers + ingest + as-of
+> accessors + formatters), `sync.py` (orchestration + run log + status report);
+> migration `005_league_state.sql` (`league_player_state`, `league_teams`,
+> `league_matchups`, `league_transactions`, `league_sync_runs`;
+> **`schema_version` 5**); `base.gsis_by_espn` crosswalk; `asof.nfl_season_of`;
+> a thin `ziggurat league {sync,status,roster,free-agents,holdings}` CLI; and a
+> systemd user timer + installer (`scripts/systemd/`,
+> `scripts/install-league-sync.sh`). Suite green (604). Design + raw probe
+> evidence: `intel/research/league-sync-3.1-design.md`, `data/recon-3.1/`.
+>
+> **THE RECON FINDING THAT SHAPED EVERYTHING (probed live, four independent
+> doors, all shut): ESPN serves league state as a CURRENT SNAPSHOT ONLY — there
+> is no historical league-state backfill of any kind.**
+> `leagueHistory?seasonId=2025&view=mRoster&scoringPeriodId=N` **ignores the
+> scoring period** (weeks 1/4/9/14/17 all return the identical 163-player
+> end-of-season roster, Jaccard 1.000); past-season box scores carry an EMPTY
+> `rosterForCurrentScoringPeriod`; `mTransactions2` has no `transactions` key
+> (confirming the 2.2 negative); and the activity feed **404s** for a past
+> season. Consequences, which are now permanent facts of this system:
+> 1. **League history is perishable and accumulates only forward.** A day the
+>    sync does not capture is gone for everyone, forever. The cadence is not a
+>    convenience — it is the only mechanism by which league history exists.
+> 2. **Silence cannot look like success**, hence `league_sync_runs` +
+>    `ziggurat league status`, which reports the exact unrecoverable missing days.
+> 3. **Snapshot diffing is the primary movement source**; the transaction/activity
+>    feed is a best-effort precision layer (exact timestamps, waiver-vs-FCFS
+>    provenance) that may never populate — nothing depends on it.
+>
+> **Key decisions:**
+> - **`league_player_state` stores the WHOLE universe every snapshot day
+>   (~1026 rows/day), not just rostered players.** This is the load-bearing call:
+>   `select_as_of` returns the newest row per key ≤ as_of, so if only rostered
+>   players were written, the last "team 4 holds X" row would stay newest forever
+>   after X was dropped and `who_held` would answer wrong for the rest of the
+>   season. Writing everyone makes a drop a positive fact (`on_team_id` NULL) —
+>   which is simultaneously the free-agent pool. One table answers both halves of
+>   the done-when. Cost ≈ 190k rows/season; trivial.
+> - **ESPN ownership percentages (`percentOwned`/`percentStarted`/`percentChange`)
+>   are captured on the same pull.** They are SPEC goal 3's own consensus proxy
+>   ("roster-percentage spikes"), they are point-in-time only (no history
+>   endpoint — Phase 4 has to buy the historical version from Sleeper), and they
+>   arrive in the same HTTP response as the FA pool. Not capturing them would
+>   destroy the live 2026 copy of the series 3.3/4.2 exist to beat.
+> - **Two independent roster views are reconciled, not silently merged.**
+>   `mRoster` (authoritative, carries lineup slot + acquisition) wins over the
+>   pool's entry-level `onTeamId`; every disagreement is counted into the run log
+>   — a nonzero count means ESPN's views are mid-flush (the failure mode
+>   Checkpoint 2 hit during live drafts). A rostered player missing from the pool
+>   response is still written, so a hiccup never reads as a phantom drop.
+> - **Day grain, deliberately.** Last pull of a day replaces earlier ones
+>   (2.1's delete-partition-then-insert, so a re-run is idempotent). Sub-day
+>   knowledge time stays a `base.select_as_of`-wide change (1.4 forward item 2):
+>   two same-day rows would BOTH match `MAX(retrieved_as_of)` and every accessor
+>   would silently return duplicates. The genuinely intraday question — who
+>   grabbed whom, exactly when — rides on `league_transactions`' real ESPN
+>   timestamps instead.
+> - **`league_transactions` is write-on-change**, because a claim is genuinely
+>   mutable before processing (PENDING → EXECUTED/FAILED in ESPN's overnight
+>   batch): first-seen-wins would freeze it, per-pull versioning would rewrite the
+>   feed daily. It is also the ONE table stamped `knowable_as_of` = the event's
+>   own date rather than the pull day.
+> - **Failure containment:** an optional-part failure downgrades the run to
+>   `partial` and keeps the snapshot; a snapshot failure is recorded AND raised so
+>   the timer exits nonzero. Truncated pools and auth rejections fail loud (a
+>   silently truncated pool would write false free-agent history).
+> - **`nfl_season_of`** replaces `date.today().year` defaults: a January run —
+>   mid-fantasy-playoffs — would otherwise silently sync the wrong season.
+>
+> **Validated on real data (live pull, 2026-07-24):** 10 teams with live
+> `waiverRank` 1–10 and full `transactionCounter`s, 70 matchups (the whole
+> regular season is knowable pre-season; unplayed weeks correctly read 0–0 with
+> no backwards leakage), 1026-player universe, **all 1026 free agents (correct
+> pre-draft)**, espn→gsis coverage 983/994 skill players (98.9%), as-of leakage
+> check clean (as_of = pull day − 1 → 0 rows).
+>
+> **Calendar-bound remainder (not code):** (1) **"who held X in week N" is proven
+> on a synthetic add→drop→re-add timeline** (the exact stale-holder case the
+> whole-universe design prevents) — real-data confirmation needs rosters, i.e.
+> the August draft; (2) the timer must be installed on the machine that will
+> actually run it (this dev box is a Ryzen 7 7840U laptop, not the Strix Halo)
+> and one unattended run observed. Both land before Checkpoint 3.
+>
+> **Plan-level consequence recorded (affects Phases 4 & 5):** because ESPN keeps
+> no league history, our own league's 2025 in-season decisions can NEVER be
+> replayed — Phase 4 backtests stay on the public panel (`db_fpecr` + Sleeper
+> ownership) as Checkpoint 1 scoped, and Phase 5 opponent behavioural profiles
+> can only be built from 2026-forward snapshots. The 2025 season yields exactly
+> one usable artifact (the draft + final standings/rosters), already harvested by 2.2.
+>
+> **Deferred:** ESPN `acquisitionBudget=100` semantics (the 1.1 open question)
+> now resolve themselves from observed in-season `transactionCounter`s;
+> matchup-period ↔ NFL-week 1:1 assumed, verify at Checkpoint 3; the
+> transaction/activity mappers follow espn_api's parsers and remain
+> **unverified against a non-empty feed** until real transactions exist.
 
 ### 3.2 [Build] Marginal valuation
 **Goal:** Roster-context value per SPEC: starting-lineup improvement over remaining season, positional depth, bye coverage, playoff-week schedules, and **conditional-distribution bench valuation** (handcuff contingent value; no median-only drops of lottery tickets). Drop candidates ranked by marginal value.

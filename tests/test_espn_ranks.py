@@ -242,7 +242,7 @@ def test_truncation_guard_fails_loud():
             def league_get(*, params, headers):
                 return fake_payload
 
-    with patch.object(espn_source, "_league", return_value=_FakeLeague()):
+    with patch.object(espn_source, "league_client", return_value=_FakeLeague()):
         with pytest.raises(RuntimeError, match="truncat"):
             espn_source.fetch_player_universe(
                 league_id=1, season=2026, espn_s2="x", swid="y", limit=50
@@ -258,7 +258,7 @@ def test_no_truncation_under_limit():
             def league_get(*, params, headers):
                 return fake_payload
 
-    with patch.object(espn_source, "_league", return_value=_FakeLeague()):
+    with patch.object(espn_source, "league_client", return_value=_FakeLeague()):
         out = espn_source.fetch_player_universe(
             league_id=1, season=2026, espn_s2="x", swid="y", limit=50
         )

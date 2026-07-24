@@ -1,0 +1,512 @@
+[
+ {
+  "id": 4429795,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4429795,
+   "fullName": "Jahmyr Gibbs",
+   "defaultPositionId": 2,
+   "proTeamId": 8,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.82,
+    "percentStarted": 99.51,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4426515,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4426515,
+   "fullName": "Puka Nacua",
+   "defaultPositionId": 3,
+   "proTeamId": 14,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.81,
+    "percentStarted": 99.42,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4374302,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4374302,
+   "fullName": "Amon-Ra St. Brown",
+   "defaultPositionId": 3,
+   "proTeamId": 8,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.8,
+    "percentStarted": 99.28,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4430807,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4430807,
+   "fullName": "Bijan Robinson",
+   "defaultPositionId": 2,
+   "proTeamId": 1,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.8,
+    "percentStarted": 99.42,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 3117251,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 3117251,
+   "fullName": "Christian McCaffrey",
+   "defaultPositionId": 2,
+   "proTeamId": 25,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.79,
+    "percentStarted": 99.34,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4362628,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4362628,
+   "fullName": "Ja'Marr Chase",
+   "defaultPositionId": 3,
+   "proTeamId": 4,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.79,
+    "percentStarted": 99.42,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4430878,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4430878,
+   "fullName": "Jaxon Smith-Njigba",
+   "defaultPositionId": 3,
+   "proTeamId": 26,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.79,
+    "percentStarted": 99.27,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4241389,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4241389,
+   "fullName": "CeeDee Lamb",
+   "defaultPositionId": 3,
+   "proTeamId": 6,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.78,
+    "percentStarted": 98.93,
+    "percentChange": 0.01
+   }
+  }
+ },
+ {
+  "id": 3918298,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 3918298,
+   "fullName": "Josh Allen",
+   "defaultPositionId": 1,
+   "proTeamId": 2,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.78,
+    "percentStarted": 97.19,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4242335,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4242335,
+   "fullName": "Jonathan Taylor",
+   "defaultPositionId": 2,
+   "proTeamId": 11,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.75,
+    "percentStarted": 98.9,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4379399,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4379399,
+   "fullName": "James Cook III",
+   "defaultPositionId": 2,
+   "proTeamId": 2,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.74,
+    "percentStarted": 96.89,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4361307,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4361307,
+   "fullName": "Trey McBride",
+   "defaultPositionId": 4,
+   "proTeamId": 22,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.74,
+    "percentStarted": 99.13,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4432665,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4432665,
+   "fullName": "Brock Bowers",
+   "defaultPositionId": 4,
+   "proTeamId": 13,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.72,
+    "percentStarted": 98.88,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 3953687,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 3953687,
+   "fullName": "Brandon Aubrey",
+   "defaultPositionId": 5,
+   "proTeamId": 6,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.69,
+    "percentStarted": 98.45,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 3916387,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 3916387,
+   "fullName": "Lamar Jackson",
+   "defaultPositionId": 1,
+   "proTeamId": 33,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.61,
+    "percentStarted": 91.79,
+    "percentChange": -0.01
+   }
+  }
+ },
+ {
+  "id": 4431452,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4431452,
+   "fullName": "Drake Maye",
+   "defaultPositionId": 1,
+   "proTeamId": 17,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.1,
+    "percentStarted": 80.7,
+    "percentChange": -0.01
+   }
+  }
+ },
+ {
+  "id": 4431459,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4431459,
+   "fullName": "Tyler Warren",
+   "defaultPositionId": 4,
+   "proTeamId": 11,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.07,
+    "percentStarted": 94.78,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4362081,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4362081,
+   "fullName": "Cameron Dicker",
+   "defaultPositionId": 5,
+   "proTeamId": 24,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.05,
+    "percentStarted": 95.09,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4723086,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4723086,
+   "fullName": "Colston Loveland",
+   "defaultPositionId": 4,
+   "proTeamId": 3,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 99.02,
+    "percentStarted": 95.23,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": -16034,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": -16034,
+   "fullName": "Texans D/ST",
+   "defaultPositionId": 16,
+   "proTeamId": 34,
+   "injuryStatus": null,
+   "ownership": {
+    "percentOwned": 99.0,
+    "percentStarted": 83.26,
+    "percentChange": -0.02
+   }
+  }
+ },
+ {
+  "id": 4426348,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4426348,
+   "fullName": "Jayden Daniels",
+   "defaultPositionId": 1,
+   "proTeamId": 28,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 98.66,
+    "percentStarted": 85.27,
+    "percentChange": 0.01
+   }
+  }
+ },
+ {
+  "id": -16007,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": -16007,
+   "fullName": "Broncos D/ST",
+   "defaultPositionId": 16,
+   "proTeamId": 7,
+   "injuryStatus": null,
+   "ownership": {
+    "percentOwned": 98.64,
+    "percentStarted": 82.53,
+    "percentChange": -0.01
+   }
+  }
+ },
+ {
+  "id": -16026,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": -16026,
+   "fullName": "Seahawks D/ST",
+   "defaultPositionId": 16,
+   "proTeamId": 26,
+   "injuryStatus": null,
+   "ownership": {
+    "percentOwned": 98.47,
+    "percentStarted": 86.23,
+    "percentChange": -0.05
+   }
+  }
+ },
+ {
+  "id": 2473037,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 2473037,
+   "fullName": "Jason Myers",
+   "defaultPositionId": 5,
+   "proTeamId": 26,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 97.34,
+    "percentStarted": 90.49,
+    "percentChange": 0.0
+   }
+  }
+ },
+ {
+  "id": 4040715,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4040715,
+   "fullName": "Jalen Hurts",
+   "defaultPositionId": 1,
+   "proTeamId": 21,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 97.24,
+    "percentStarted": 88.47,
+    "percentChange": 0.02
+   }
+  }
+ },
+ {
+  "id": 4360248,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4360248,
+   "fullName": "Kyle Pitts Sr.",
+   "defaultPositionId": 4,
+   "proTeamId": 1,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 94.97,
+    "percentStarted": 84.54,
+    "percentChange": 0.02
+   }
+  }
+ },
+ {
+  "id": 2971573,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 2971573,
+   "fullName": "Ka'imi Fairbairn",
+   "defaultPositionId": 5,
+   "proTeamId": 34,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 94.49,
+    "percentStarted": 88.02,
+    "percentChange": -0.1
+   }
+  }
+ },
+ {
+  "id": -16014,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": -16014,
+   "fullName": "Rams D/ST",
+   "defaultPositionId": 16,
+   "proTeamId": 14,
+   "injuryStatus": null,
+   "ownership": {
+    "percentOwned": 91.99,
+    "percentStarted": 76.23,
+    "percentChange": 0.13
+   }
+  }
+ },
+ {
+  "id": -16023,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": -16023,
+   "fullName": "Steelers D/ST",
+   "defaultPositionId": 16,
+   "proTeamId": 23,
+   "injuryStatus": null,
+   "ownership": {
+    "percentOwned": 91.94,
+    "percentStarted": 82.01,
+    "percentChange": 0.11
+   }
+  }
+ },
+ {
+  "id": 4574716,
+  "onTeamId": 0,
+  "status": "FREEAGENT",
+  "player": {
+   "id": 4574716,
+   "fullName": "Harrison Mevis",
+   "defaultPositionId": 5,
+   "proTeamId": 14,
+   "injuryStatus": "ACTIVE",
+   "ownership": {
+    "percentOwned": 91.21,
+    "percentStarted": 85.44,
+    "percentChange": 0.03
+   }
+  }
+ }
+]

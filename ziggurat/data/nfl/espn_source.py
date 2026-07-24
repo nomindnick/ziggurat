@@ -60,11 +60,15 @@ def load_espn_credentials(*, league_id: int | None = None) -> dict:
     return {"league_id": int(resolved_league), "espn_s2": espn_s2, "swid": swid}
 
 
-def _league(league_id: int, season: int, espn_s2, swid):
+def league_client(league_id: int, season: int, espn_s2, swid):
     """Instantiate an ``espn_api`` League for the raw request, importing the
     third-party client lazily (mirrors ``source._client``). ``fetch_league=False``
     skips the standings/roster fetch we do not need pre-draft; ``espn_request`` is
-    still constructed with the auth cookies."""
+    still constructed with the auth cookies.
+
+    Public because ``ziggurat.league.source`` (item 3.1) reuses this exact request
+    layer — one place that knows how ESPN auth and the ``lm-api-reads`` host are
+    wired, rather than two that can drift."""
     try:
         football = import_module("espn_api.football")
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
@@ -107,7 +111,7 @@ def fetch_player_universe(
     an expired cookie) propagate, re-wrapped with a refresh hint.
     """
     espn_requests = import_module("espn_api.requests.espn_requests")
-    league = _league(league_id, season, espn_s2, swid)
+    league = league_client(league_id, season, espn_s2, swid)
     filters = {
         "players": {
             "filterStatus": {"value": ["FREEAGENT", "WAIVERS", "ONTEAM"]},

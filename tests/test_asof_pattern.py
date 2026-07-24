@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 import pytest
 
-from ziggurat.data.asof import normalize_as_of
+from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.store import connect
 
 # A toy version of a snapshot table: one row per (player, week) per retrieval.
@@ -94,3 +94,22 @@ def test_normalize_rejects_none_and_junk():
         normalize_as_of(20250903)
     with pytest.raises(ValueError):
         normalize_as_of("not-a-date")
+
+
+# ── nfl_season_of: the season a calendar day belongs to ─────────────────────
+
+
+def test_nfl_season_of_keeps_january_in_the_previous_season():
+    """A bare date.today().year default would flip to the wrong season in
+    January — mid-fantasy-playoffs, with the league still live."""
+    assert nfl_season_of("2026-09-10") == 2026
+    assert nfl_season_of("2026-12-30") == 2026
+    assert nfl_season_of("2027-01-15") == 2026   # playoffs, still the 2026 season
+    assert nfl_season_of("2027-02-28") == 2026
+    assert nfl_season_of("2027-03-01") == 2027   # NFL league year turns over
+    assert nfl_season_of(date(2026, 7, 24)) == 2026
+
+
+def test_nfl_season_of_requires_an_explicit_day():
+    with pytest.raises(TypeError):
+        nfl_season_of(None)

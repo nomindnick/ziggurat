@@ -20,11 +20,20 @@ from ziggurat.core.valuation import (
     format_valuation,
     format_value_view,
 )
-from ziggurat.data.asof import normalize_as_of
+from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
 from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks, pull_espn_ranks
 from ziggurat.data.nfl.espn_source import load_espn_credentials
 from ziggurat.data.store import apply_schema, connect
+from ziggurat.league.state import (
+    format_free_agents,
+    format_roster,
+    format_timeline,
+    get_free_agents,
+    get_player_state,
+    holder_timeline,
+)
+from ziggurat.league.sync import format_run, format_status, run_sync
 from ziggurat.llm import Router
 from ziggurat.paths import DEFAULT_DB_PATH, REPO_ROOT
 from ziggurat.scaffold import ensure_intel_tree
@@ -404,6 +413,108 @@ def draft_web(
         roster=DEFAULT_ROSTER,
         port=port,
     )
+
+
+league_app = typer.Typer(help="League state sync + reads (item 3.1).", no_args_is_help=True)
+app.add_typer(league_app, name="league")
+
+
+def _today() -> str:
+    """Today, for CLI defaults only. The package layer never assumes 'now' —
+    every accessor takes an explicit as_of (rule 1); this is where the operator's
+    implicit "today" is made explicit before it crosses into the package."""
+    return date.today().isoformat()
+
+
+def _season(season):
+    """Resolve a --season default to the current NFL season (asof.nfl_season_of),
+    so January runs do not silently jump to the next season number."""
+    return season if season is not None else nfl_season_of(_today())
+
+
+@league_app.command("sync")
+def league_sync(
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(help="Snapshot day stamp (default today).")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    league_id: Annotated[Optional[int], typer.Option(help="ESPN league id (default $ESPN_LEAGUE_ID).")] = None,
+    transactions: Annotated[bool, typer.Option(help="Also pull the (best-effort) transaction feed.")] = True,
+) -> None:
+    """Pull one full league-state snapshot: rosters, standings, matchups, FA pool.
+
+    This is the scheduled command. ESPN serves NO historical league state, so a
+    day this does not capture is unrecoverable — run it on a timer, and check
+    `ziggurat league status`.
+    """
+    creds = load_espn_credentials(league_id=league_id)
+    conn = connect(path)
+    apply_schema(conn)
+    try:
+        summary = run_sync(
+            conn, season=_season(season), league_id=creds["league_id"],
+            espn_s2=creds["espn_s2"], swid=creds["swid"],
+            retrieved_as_of=as_of or _today(), include_transactions=transactions,
+        )
+    finally:
+        conn.close()
+    typer.echo(format_run(summary))
+
+
+@league_app.command("status")
+def league_status(
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    through: Annotated[Optional[str], typer.Option(help="Judge coverage through this day.")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Report sync health: last run, snapshot coverage, and permanently missing days."""
+    conn = connect(path)
+    typer.echo(format_status(conn, season=_season(season), through=through or _today()))
+    conn.close()
+
+
+@league_app.command("roster")
+def league_roster(
+    team: Annotated[int, typer.Option(help="League team id.")],
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Print a team's roster as of a date."""
+    conn = connect(path)
+    rows = get_player_state(conn, as_of=as_of or _today(), season=_season(season), on_team_id=team)
+    conn.close()
+    typer.echo(format_roster(rows))
+
+
+@league_app.command("free-agents")
+def league_free_agents(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    position: Annotated[Optional[str], typer.Option(help="Restrict to QB/RB/WR/TE/K/D-ST.")] = None,
+    limit: Annotated[int, typer.Option(help="Rows to print.")] = 40,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Print the free-agent pool as of a date, most-owned first."""
+    conn = connect(path)
+    rows = get_free_agents(conn, as_of=as_of or _today(), season=_season(season), position=position)
+    conn.close()
+    typer.echo(format_free_agents(rows, limit=limit))
+
+
+@league_app.command("holdings")
+def league_holdings(
+    player_id: Annotated[str, typer.Option("--player-id", help="ESPN player id.")],
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    since: Annotated[Optional[str], typer.Option(help="Only snapshots on/after this day.")] = None,
+    until: Annotated[Optional[str], typer.Option(help="Only snapshots on/before this day.")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Show who held a player over time (the observed snapshot history)."""
+    conn = connect(path)
+    segments = holder_timeline(conn, season=_season(season), espn_player_id=player_id,
+                               since=since, until=until)
+    conn.close()
+    typer.echo(format_timeline(segments, player_label=f"espn_id {player_id}"))
 
 
 @app.command()

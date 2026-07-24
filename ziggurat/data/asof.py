@@ -25,6 +25,21 @@ harness replays history through the same accessors production uses.
 from datetime import date, datetime
 
 
+def nfl_season_of(day: date | datetime | str) -> int:
+    """The NFL season a calendar day belongs to.
+
+    A season spans two calendar years — the 2026 season runs September 2026
+    through the January 2027 playoffs — so a bare ``date.today().year`` default
+    silently flips to the wrong season in January, exactly when the fantasy
+    playoffs are being graded. The NFL league year turns over in mid-March, so
+    January and February belong to the PREVIOUS season.
+
+    Takes the day explicitly (no implicit "now"), like everything else here.
+    """
+    resolved = normalize_as_of(day)
+    return resolved.year if resolved.month >= 3 else resolved.year - 1
+
+
 def normalize_as_of(as_of: date | datetime | str) -> date:
     """Validate and normalize an `as_of` argument to a date.
 
