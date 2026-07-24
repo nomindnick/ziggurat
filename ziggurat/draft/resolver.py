@@ -433,6 +433,62 @@ class NameResolver:
             return Resolution("auto", (top,))
         return Resolution("confirm", self._confirm(scored))
 
+    def suggest(
+        self, query: str, *, taken: AbstractSet[str] = frozenset(), limit: int = 8
+    ) -> tuple[BoardEntry, ...]:
+        """Ranked top-``limit`` candidates for a PARTIAL query (live autocomplete).
+
+        The per-keystroke seam the Checkpoint-2 web cockpit renders while the
+        operator types (rehearsal 2 evidence, 2026-07-24: burst pick entry needs
+        matches visible BEFORE Enter). Same tier scorers and F5 unranked cap as
+        ``resolve`` — one matching implementation — but no auto/confirm verdict:
+        the operator's click/Enter on a VISIBLE name is the confirmation, so the
+        panel semantics (MUST 2/3) don't apply. Empty queries suggest nothing
+        (MUST 1). Ordering: score desc, then ESPN rank, then player_id — the
+        same total order ``resolve`` uses, so the two surfaces never disagree
+        about who the best match is."""
+        q = normalize_query(query)
+        if not q:
+            return ()
+        qt = q.split()
+        alias_exp = _ALIASES.get(q)
+        alias_qt = alias_exp.split() if alias_exp else None
+        scored: list[tuple[float, BoardEntry]] = []
+        for ic in self._index:
+            if ic.entry.player_id in taken:
+                continue
+            s = _score_dst(q, qt, ic) if ic.is_dst else _score_person(q, qt, ic)
+            if alias_exp is not None:
+                sa = (
+                    _score_dst(alias_exp, alias_qt, ic)
+                    if ic.is_dst
+                    else _score_person(alias_exp, alias_qt, ic)
+                )
+                s = max(s, sa)
+            if ic.entry.espn_overall_rank >= _UNRANKED_RANK:
+                s = min(s, _UNRANKED_CAP)
+            if s >= _NONE_FLOOR:
+                scored.append((s, ic.entry))
+        scored.sort(key=lambda t: (-t[0], t[1].espn_overall_rank, t[1].player_id))
+        top = scored[: max(1, limit)]
+        # MUST-2 parity (audit 2026-07-24 finding 3): the best rank-weighted
+        # near-match across tiers is never dropped off the visible list, so an
+        # elite's typo/truncation can't hide behind a page of deeper matches.
+        if len(scored) > len(top):
+            elite: tuple[float, BoardEntry] | None = None
+            for s, e in scored:
+                if s < _ELITE_FLOOR:
+                    continue
+                if elite is None or (e.espn_overall_rank, e.player_id) < (
+                    elite[1].espn_overall_rank, elite[1].player_id
+                ):
+                    elite = (s, e)
+            if elite is not None and elite[1].player_id not in {
+                e.player_id for _, e in top
+            }:
+                top = top[:-1] + [elite]
+        return tuple(e for _, e in top)
+
     # -- internals ---------------------------------------------------------
 
     @staticmethod

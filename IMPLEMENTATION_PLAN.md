@@ -552,6 +552,22 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > clock + structural fix) — next: two timed rehearsals on the fixed engine,
 > one with a mid-draft kill + `--resume`; strategy-from-slot still blocked on
 > ESPN scheduling the draft (2 seats invite-pending as of 2026-07-21).
+>
+> **Rehearsal 2 attempt (ESPN mock lobby, 2026-07-24) → the 2.4-deferred
+> TUI-shape decision resolved: the Rich REPL loses to BURST entry** (7 CPU
+> picks landed in seconds; each entry cost a type→Enter→confirm round trip —
+> and 2 of our 10 real seats autodrafted in 2025, so instant consecutive picks
+> are a draft-day certainty, not a mock artifact). **Built the web cockpit**
+> (`draft/webapp.py` + `webui.html`, thin `ziggurat draft-web` CLI): a
+> 127.0.0.1-only stdlib HTTP view over the SAME headless DraftSession
+> (journal/resume/engine untouched), per-keystroke autocomplete via new
+> `resolver.suggest()` (same tier scorers as `resolve` — punctuation-blind, any
+> name chunk), commits by explicit clicked/highlighted player_id, autodraft
+> propose-then-confirm, posture accept/dismiss and recompute cadence mirroring
+> `app.py`. REPL kept as fallback. Verified live: suggest("jamarr") →
+> Ja'Marr Chase w/o the apostrophe; 4-pick flow + operator rec + kill/`--resume`
+> replay on the real board. rapidfuzz stays unnecessary (structure, not kernel
+> speed, was the gap). Suite 485.
 
 ---
 

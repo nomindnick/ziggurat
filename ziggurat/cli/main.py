@@ -225,44 +225,15 @@ def mock_draft(
     typer.echo(format_strategy_summary(summary))
 
 
-@app.command("draft-board")
-def draft_board(
-    season: Annotated[Optional[int], typer.Option(
-        help="Season whose board to draft from (required to START a new draft; on "
-             "--resume it is read from the journal header).")] = None,
-    as_of: Annotated[Optional[str], typer.Option(
-        help="Knowledge-time cutoff (YYYY-MM-DD); defaults to today. Ignored on "
-             "--resume (the journalled as_of is used).")] = None,
-    slot: Annotated[int, typer.Option(help="Your draft slot / seat id, 1..teams.")] = 1,
-    pick_order: Annotated[Optional[str], typer.Option(
-        help="Real draft order as a CSV of 0-based seat ids "
-             "(draft position -> seat id); defaults to identity 0,1,2,...")] = None,
-    journal: Annotated[Optional[Path], typer.Option(
-        help="Crash-recovery journal file; a new draft defaults to a timestamped "
-             "data/draft/session-<YYYYMMDD>-<HHMMSS>.jsonl, and --resume without "
-             "--journal recovers the newest session in data/draft.")] = None,
-    resume: Annotated[bool, typer.Option("--resume", help="Resume from the journal (replay).")] = False,
-    rollouts: Annotated[int, typer.Option(help="Survival rollouts per recommendation.")] = 512,
-    seed: Annotated[int, typer.Option(help="RNG seed (reproducible).")] = 42,
-    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
-    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
-    weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
-) -> None:
-    """Launch the live draft-board TUI (item 2.4).
-
-    All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8), imported
-    lazily here so nothing outside it couples statically. Parse, resolve the journal
-    (discovering the newest on --resume), load the board at the right as_of, hand off
-    to the app loop (Rule 3 — the discovery/header helpers live in session.py).
-    """
-    # Lazy (in-body) import: keeps the deletable draft package off every other
-    # module's import graph — Rule 8 (same pattern as mock-draft above).
-    from ziggurat.draft import app as draft_app
+def _resolve_draft_launch(
+    *, season, as_of, journal, resume, pick_order, path, source, weeks,
+):
+    """Shared parse-level resolution for the two draft front-ends (Rule 3: this
+    resolves WHICH journal/board to use — discovery and header parsing live in
+    session.py; board loading in simulator.py). Returns
+    ``(board, resolved_season, resolved_as_of, resolved_journal, order)``."""
     from ziggurat.draft.session import find_latest_journal, read_journal_header
-    from ziggurat.draft.simulator import DEFAULT_ROSTER, load_board
-
-    if not 1 <= slot <= DEFAULT_ROSTER.teams:
-        raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
+    from ziggurat.draft.simulator import load_board
 
     draft_dir = REPO_ROOT / "data" / "draft"
 
@@ -314,6 +285,53 @@ def draft_board(
             err=True,
         )
         raise typer.Exit(code=1)
+    return board, resolved_season, resolved_as_of, resolved_journal, order
+
+
+@app.command("draft-board")
+def draft_board(
+    season: Annotated[Optional[int], typer.Option(
+        help="Season whose board to draft from (required to START a new draft; on "
+             "--resume it is read from the journal header).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(
+        help="Knowledge-time cutoff (YYYY-MM-DD); defaults to today. Ignored on "
+             "--resume (the journalled as_of is used).")] = None,
+    slot: Annotated[int, typer.Option(help="Your draft slot / seat id, 1..teams.")] = 1,
+    pick_order: Annotated[Optional[str], typer.Option(
+        help="Real draft order as a CSV of 0-based seat ids "
+             "(draft position -> seat id); defaults to identity 0,1,2,...")] = None,
+    journal: Annotated[Optional[Path], typer.Option(
+        help="Crash-recovery journal file; a new draft defaults to a timestamped "
+             "data/draft/session-<YYYYMMDD>-<HHMMSS>.jsonl, and --resume without "
+             "--journal recovers the newest session in data/draft.")] = None,
+    resume: Annotated[bool, typer.Option("--resume", help="Resume from the journal (replay).")] = False,
+    rollouts: Annotated[int, typer.Option(help="Survival rollouts per recommendation.")] = 512,
+    seed: Annotated[int, typer.Option(help="RNG seed (reproducible).")] = 42,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+) -> None:
+    """Launch the live draft-board TUI (item 2.4).
+
+    All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8), imported
+    lazily here so nothing outside it couples statically. Parse, resolve the journal
+    (discovering the newest on --resume), load the board at the right as_of, hand off
+    to the app loop (Rule 3 — the discovery/header helpers live in session.py).
+    """
+    # Lazy (in-body) import: keeps the deletable draft package off every other
+    # module's import graph — Rule 8 (same pattern as mock-draft above).
+    from ziggurat.draft import app as draft_app
+    from ziggurat.draft.simulator import DEFAULT_ROSTER
+
+    if not 1 <= slot <= DEFAULT_ROSTER.teams:
+        raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
+
+    board, resolved_season, resolved_as_of, resolved_journal, order = (
+        _resolve_draft_launch(
+            season=season, as_of=as_of, journal=journal, resume=resume,
+            pick_order=pick_order, path=path, source=source, weeks=weeks,
+        )
+    )
 
     draft_app.launch(
         board,
@@ -326,6 +344,65 @@ def draft_board(
         rollouts=rollouts,
         seed=seed,
         roster=DEFAULT_ROSTER,
+    )
+
+
+@app.command("draft-web")
+def draft_web(
+    season: Annotated[Optional[int], typer.Option(
+        help="Season whose board to draft from (required to START a new draft; on "
+             "--resume it is read from the journal header).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(
+        help="Knowledge-time cutoff (YYYY-MM-DD); defaults to today. Ignored on "
+             "--resume (the journalled as_of is used).")] = None,
+    slot: Annotated[int, typer.Option(help="Your draft slot / seat id, 1..teams.")] = 1,
+    pick_order: Annotated[Optional[str], typer.Option(
+        help="Real draft order as a CSV of 0-based seat ids "
+             "(draft position -> seat id); defaults to identity 0,1,2,...")] = None,
+    journal: Annotated[Optional[Path], typer.Option(
+        help="Crash-recovery journal file; a new draft defaults to a timestamped "
+             "data/draft/session-<YYYYMMDD>-<HHMMSS>.jsonl, and --resume without "
+             "--journal recovers the newest session in data/draft.")] = None,
+    resume: Annotated[bool, typer.Option("--resume", help="Resume from the journal (replay).")] = False,
+    rollouts: Annotated[int, typer.Option(help="Survival rollouts per recommendation.")] = 512,
+    seed: Annotated[int, typer.Option(help="RNG seed (reproducible).")] = 42,
+    port: Annotated[int, typer.Option(help="Local port for the cockpit page.")] = 8811,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+) -> None:
+    """Launch the live-search web draft cockpit (Checkpoint 2).
+
+    Same headless session, journal, and engine as ``draft-board`` — rendered as a
+    local web page (127.0.0.1 only) with per-keystroke autocomplete for burst pick
+    entry. All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8),
+    imported lazily; this command parses, loads the board, and hands off (Rule 3).
+    """
+    from ziggurat.draft import webapp
+    from ziggurat.draft.simulator import DEFAULT_ROSTER
+
+    if not 1 <= slot <= DEFAULT_ROSTER.teams:
+        raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
+
+    board, resolved_season, resolved_as_of, resolved_journal, order = (
+        _resolve_draft_launch(
+            season=season, as_of=as_of, journal=journal, resume=resume,
+            pick_order=pick_order, path=path, source=source, weeks=weeks,
+        )
+    )
+
+    webapp.launch(
+        board,
+        operator_slot=slot - 1,
+        pick_order=order,
+        season=resolved_season,
+        as_of=resolved_as_of,
+        journal_path=resolved_journal,
+        resume=resume,
+        rollouts=rollouts,
+        seed=seed,
+        roster=DEFAULT_ROSTER,
+        port=port,
     )
 
 

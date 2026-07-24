@@ -471,3 +471,67 @@ def test_resolution_is_frozen():
     res = Resolution("none", ())
     with pytest.raises(dataclasses.FrozenInstanceError):
         res.kind = "auto"  # type: ignore[misc]
+
+
+# ------------------------------------------------ suggest (live autocomplete, C2)
+
+
+def test_suggest_empty_query_suggests_nothing(resolver):
+    assert resolver.suggest("") == ()
+    assert resolver.suggest("   ") == ()
+
+
+def test_suggest_is_punctuation_blind(resolver):
+    # Rehearsal-2 evidence (2026-07-24): the operator hunted for ' typing a
+    # Ja'-style first name. "jabril" (no apostrophe) must surface Ja'Bril Occ.
+    got = resolver.suggest("jabril")
+    assert got and got[0].player_id == "p-occ"
+
+
+def test_suggest_matches_any_name_chunk(resolver):
+    # last name alone, first name alone, and a bare prefix all surface the player.
+    for q in ("mateo", "patrick", "mate", "patr"):
+        assert any(e.player_id == "p-mateo" for e in resolver.suggest(q)), q
+
+
+def test_suggest_excludes_taken_players(resolver):
+    assert any(e.player_id == "p-occ" for e in resolver.suggest("occ"))
+    assert not any(
+        e.player_id == "p-occ" for e in resolver.suggest("occ", taken={"p-occ"})
+    )
+
+
+def test_suggest_surfaces_dst_by_nickname(resolver):
+    got = resolver.suggest("niners")
+    assert got and got[0].player_id == "dst-sf"
+
+
+def test_suggest_honors_curated_aliases(resolver, monkeypatch):
+    from ziggurat.draft import resolver as resolver_mod
+
+    monkeypatch.setitem(resolver_mod._ALIASES, "zzq", "alpha runner")
+    got = resolver.suggest("zzq")
+    assert got and got[0].player_id == "p-alpha-runner"
+
+
+def test_suggest_caps_unranked_scrubs_below_ranked(resolver):
+    # F5 parity with resolve: the unranked deep "braxton" surname never outranks
+    # the ranked players sharing the token.
+    got = resolver.suggest("braxton")
+    ids = [e.player_id for e in got]
+    assert "p-braxton-deep" not in ids[:2]
+
+
+def test_suggest_respects_limit_and_ordering(resolver):
+    got = resolver.suggest("rivera", limit=3)
+    assert len(got) <= 3
+    # every suggestion is one of the rivera-token entries, best-score-first
+    assert all("rivera" in (e.name or "").lower() for e in got)
+
+
+def test_suggest_force_keeps_the_elite_near_match(resolver):
+    # MUST-2 parity for the autocomplete surface: with limit=1 the deep
+    # same-token matches would fill the whole list; the elite near-match
+    # (Rivera Stone #8) must still be present.
+    got = resolver.suggest("rivera", limit=1)
+    assert any(e.player_id == "p-rivera-stone" for e in got)
