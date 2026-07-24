@@ -658,7 +658,15 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > block; pure nicknames like "Hollywood" still refuse), and the verify path
 > accepts a held pick when it appears among the resolver's candidates for
 > ESPN's name (verify catches WRONG PLAYERS, not name variants). Suite 545.
-> Rehearsal 2 of 2 remains — ideally on the draft-day machine. Engine + tooling outcomes of this checkpoint (reachability
+>
+> **Rehearsal 2 of 2 — 2026-07-24, FLAWLESS (operator's words). All 160
+> picks, zero interventions, zero conflicts, sync hands-free throughout.
+> THE TWO-REHEARSAL GATE IS MET.** Checkpoint 2's remaining items are
+> purely calendar-bound: (1) strategy-from-slot the moment ESPN schedules
+> the real draft, (2) near draft day: board refresh + room re-snapshot +
+> one confidence run on the draft-day machine if it differs. Draft-day
+> stack (engine + cockpit + DOM-sync) is validated under full-length live
+> conditions three times in one day. Engine + tooling outcomes of this checkpoint (reachability
 > discount, web cockpit, quick-pick strip) are already landed and audited.
 > **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
 > draft scheduling.
