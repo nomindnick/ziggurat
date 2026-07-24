@@ -257,3 +257,229 @@ def test_concurrent_picks_serialize_under_the_lock(cockpit):
     state = _get(base, "/api/state")
     assert state["overall_pick"] == len(players) + 1
     assert set(p for p in state["taken"]) == set(players)
+
+
+# --------------------------------------------------------- DOM-sync endpoint
+
+
+def _sync_post(base, session, picks, token=None):
+    if token is None:
+        token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    req = urllib.request.Request(
+        base + "/api/sync", data=json.dumps({"picks": picks}).encode(),
+        headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def test_sync_requires_the_token(cockpit):
+    base, session = cockpit
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _sync_post(base, session, [], token="wrong-token")
+    assert ei.value.code == 403
+    # and the userscript endpoint serves the real token + live port
+    with urllib.request.urlopen(base + "/sync.user.js", timeout=10) as r:
+        script = r.read().decode()
+    real = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    assert real in script and str(base.rsplit(":", 1)[1]) in script
+    assert "{{TOKEN}}" not in script and "{{PORT}}" not in script
+
+
+def test_sync_applies_picks_in_order(cockpit):
+    base, session = cockpit
+    out = _sync_post(base, session, [
+        {"overall": 1, "player": "RB0"},
+        {"overall": 2, "player": "WR0"},
+    ])
+    assert out["applied"] == 2 and out["session_overall"] == 3
+    assert out["blocked"] is None
+    assert sorted(out["accepted"]) == [1, 2]
+    state = _get(base, "/api/state")
+    assert [p["player_id"] for p in state["picks"]] == ["RB-0", "WR-0"]
+    assert state["sync"]["active"] is True
+
+
+def test_sync_stashes_out_of_order_then_drains(cockpit):
+    base, session = cockpit
+    out = _sync_post(base, session, [{"overall": 3, "player": "WR1"}])
+    assert out["applied"] == 0 and 3 in out["accepted"]
+    assert _get(base, "/api/state")["sync"]["pending"] == [3]
+
+    out = _sync_post(base, session, [
+        {"overall": 2, "player": "RB1"},
+        {"overall": 1, "player": "RB0"},
+    ])
+    # 1 and 2 apply in order, then the stashed 3 drains automatically.
+    assert out["session_overall"] == 4
+    state = _get(base, "/api/state")
+    assert [p["player_id"] for p in state["picks"]] == ["RB-0", "RB-1", "WR-1"]
+    assert state["sync"]["pending"] == []
+
+
+def test_sync_blocks_on_unresolvable_name_and_manual_entry_unblocks(cockpit):
+    base, session = cockpit
+    out = _sync_post(base, session, [{"overall": 1, "player": "Zzyzx Nobody"}])
+    assert out["applied"] == 0
+    assert out["blocked"]["overall"] == 1
+    assert 1 not in out["accepted"]           # the script keeps retrying it
+    sync = _get(base, "/api/state")["sync"]
+    assert sync["blocked"]["name"] == "Zzyzx Nobody"
+
+    # Operator enters the pick manually -> blocked clears on the next batch,
+    # and the retried pick dedupes through the verify path.
+    _post(base, "/api/pick", {"player_id": "RB-0"})
+    out = _sync_post(base, session, [{"overall": 1, "player": "Zzyzx Nobody"}])
+    assert 1 in out["accepted"] and out["blocked"] is None
+    # verify path saw a name mismatch and surfaced it as a conflict
+    assert _get(base, "/api/state")["sync"]["conflicts"]
+
+
+def test_sync_repost_is_idempotent_and_verifies(cockpit):
+    base, session = cockpit
+    _sync_post(base, session, [{"overall": 1, "player": "RB0"}])
+    out = _sync_post(base, session, [{"overall": 1, "player": "RB0"}])
+    assert out["applied"] == 0 and out["session_overall"] == 2
+    assert 1 in out["accepted"]
+    assert _get(base, "/api/state")["sync"]["conflicts"] == []
+
+
+def test_sync_and_manual_quick_picks_interleave(cockpit):
+    base, session = cockpit
+    _sync_post(base, session, [{"overall": 2, "player": "WR0"}])   # stashed
+    _post(base, "/api/pick", {"player_id": "RB-0"})                # manual pick 1
+    # the stashed pick 2 drained on the manual state change
+    state = _get(base, "/api/state")
+    assert state["overall_pick"] == 3
+    assert [p["player_id"] for p in state["picks"]] == ["RB-0", "WR-0"]
+
+
+def test_sync_malformed_items_are_ignored_not_fatal(cockpit):
+    base, session = cockpit
+    out = _sync_post(base, session, [
+        {"overall": "x", "player": "RB0"}, {"nonsense": True},
+        {"overall": 1, "player": "RB0"},
+    ])
+    assert out["applied"] == 1 and out["session_overall"] == 2
+
+    token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    req = urllib.request.Request(
+        base + "/api/sync", data=json.dumps({"picks": "not-a-list"}).encode(),
+        headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        urllib.request.urlopen(req, timeout=10)
+    assert ei.value.code == 400
+
+
+def test_sync_response_carries_a_stable_epoch(cockpit):
+    base, session = cockpit
+    a = _sync_post(base, session, [{"overall": 1, "player": "RB0"}])
+    b = _sync_post(base, session, [{"overall": 2, "player": "WR0"}])
+    assert a["epoch"] and a["epoch"] == b["epoch"]
+    assert _get(base, "/api/state")["sync"]["epoch"] == a["epoch"]
+
+
+def _sync_post_league(base, session, picks, league):
+    token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    req = urllib.request.Request(
+        base + "/api/sync",
+        data=json.dumps({"league": league, "picks": picks}).encode(),
+        headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def test_sync_binds_to_the_first_league_and_rejects_others(cockpit):
+    # Audit finding 18: a practice-draft tab left open must not feed the
+    # live session. First room wins; a different room 400s.
+    base, session = cockpit
+    _sync_post_league(base, session, [{"overall": 1, "player": "RB0"}], "111")
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _sync_post_league(base, session, [{"overall": 2, "player": "WR0"}], "222")
+    assert ei.value.code == 400
+    assert "different ESPN draft room" in json.loads(ei.value.read())["error"]
+    assert _get(base, "/api/state")["overall_pick"] == 2  # pick 2 never landed
+    # the bound room keeps flowing
+    out = _sync_post_league(base, session, [{"overall": 2, "player": "WR0"}], "111")
+    assert out["applied"] == 1
+
+
+def test_manual_pick_with_stale_expected_overall_rejected_while_sync_active(cockpit):
+    # Audit finding 8: the dual-writer race — a confirm rendered against head
+    # N arriving after sync applied ESPN's real pick N must NOT land at N+1.
+    base, session = cockpit
+    _sync_post(base, session, [{"overall": 1, "player": "RB0"}])  # sync active, head=2
+    token_stale = json.dumps({"player_id": "WR-0", "expected_overall": 1}).encode()
+    req = urllib.request.Request(
+        base + "/api/pick", data=token_stale,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        urllib.request.urlopen(req, timeout=10)
+    assert ei.value.code == 400
+    assert "board moved" in json.loads(ei.value.read())["error"]
+    # with the CURRENT head it commits fine
+    out = _post(base, "/api/pick", {"player_id": "WR-0", "expected_overall": 2})
+    assert out["ok"]
+
+
+def test_manual_pick_guard_inactive_without_sync(cockpit):
+    # Pure-manual burst entry keeps its speed: no sync feed -> no guard.
+    base, _session = cockpit
+    out = _post(base, "/api/pick", {"player_id": "RB-0", "expected_overall": 99})
+    assert out["ok"]
+
+
+def test_undo_clears_a_stale_blocked_banner(cockpit):
+    # Audit finding 6 (critical): blocked at head N + undo -> banner must NOT
+    # keep pointing the operator at pick N while the head is N-1.
+    base, session = cockpit
+    _sync_post(base, session, [{"overall": 1, "player": "RB0"}])
+    _sync_post(base, session, [{"overall": 2, "player": "Zzyzx Nobody"}])
+    assert _get(base, "/api/state")["sync"]["blocked"]["overall"] == 2
+    _post(base, "/api/undo", {})   # head back to 1
+    sync = _get(base, "/api/state")["sync"]
+    assert sync["blocked"] is None
+
+
+def test_conflict_clears_when_the_operator_edits_the_slot(cockpit):
+    # Audit finding 12: fixing the flagged pick must clear its conflict.
+    base, session = cockpit
+    _post(base, "/api/pick", {"player_id": "RB-0"})
+    _sync_post(base, session, [{"overall": 1, "player": "WR0"}])  # mismatch
+    assert _get(base, "/api/state")["sync"]["conflicts"]
+    _post(base, "/api/edit", {"overall": 1, "player_id": "WR-0"})
+    assert _get(base, "/api/state")["sync"]["conflicts"] == []
+
+
+def test_sync_ignores_overalls_beyond_the_draft(cockpit):
+    base, session = cockpit
+    out = _sync_post(base, session, [{"overall": 9999, "player": "RB0"}])
+    assert 9999 not in out["accepted"]
+    assert _get(base, "/api/state")["sync"]["pending"] == []
+
+
+def test_sync_league_binding_cannot_be_bypassed_by_empty_league(cockpit):
+    # Re-audit finding 1 (live-proven): after binding, a batch with NO league
+    # (or league:"") must be rejected, not waved through.
+    base, session = cockpit
+    _sync_post_league(base, session, [{"overall": 1, "player": "RB0"}], "111")
+    for bad_payload in (
+        {"picks": [{"overall": 2, "player": "WR0"}]},                  # absent
+        {"league": "", "picks": [{"overall": 2, "player": "WR0"}]},    # empty
+    ):
+        token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+        req = urllib.request.Request(
+            base + "/api/sync", data=json.dumps(bad_payload).encode(),
+            headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(req, timeout=10)
+        assert ei.value.code == 400
+    assert _get(base, "/api/state")["overall_pick"] == 2  # nothing leaked in

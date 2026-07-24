@@ -611,8 +611,28 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > re-activation re-renders ALL rows, so a dedupe-by-pick-number harvester
 > back-fills anything missed — flipping tabs pauses sync, never loses it.
 > Selector spec + protocol in `intel/research/espn-live-draft-sync-spike.md`
-> (addendum). Next build: the userscript + authenticated cockpit sync
-> endpoint, then an end-to-end mock-lobby rehearsal. Engine + tooling outcomes of this checkpoint (reachability
+> (addendum).
+>
+> **DOM-sync BUILT 2026-07-24** (`draft/sync.py` + `/api/sync` + Tampermonkey
+> `espn_sync.user.js` served at `/sync.user.js` with the per-install token +
+> port baked in). Trust model (Rule 6): a synced pick auto-commits ONLY
+> through one gate — field consistency + suffix/punctuation-blind NAME
+> identity (or DST-by-team), same-name twins refuse, wrong/stale anchor ids
+> refuse; anything else BLOCKS with a one-click "Find him" assist and manual
+> quick-pick entry always live underneath. Protocol: per-run sync epoch (the
+> userscript resends everything after a cockpit restart; the verify path
+> dedupes — acceptance never needs to be durable), first-room-wins league
+> binding (a practice tab can't contaminate the live session; empty league is
+> an identity, not a bypass), expected-overall dual-writer guard on manual
+> picks while sync is active, conflicts surfaced (never auto-edited) and
+> cleared on operator edit. Audited by a 35-agent find→verify workflow (30
+> raised, 29 confirmed incl. 2 critical wrong-commit classes + restart
+> deadlock + cross-room contamination) then a re-audit of the fixes
+> (FIX-MINOR; 3 residuals found and fixed: empty-league bypass — live-proven,
+> anchor-drift blinding the id gate, same-name-twin commits). All fixed with
+> regression tests. Suite 537. REMAINING: end-to-end validation in a live
+> practice draft (userscript in Tampermonkey + cockpit + real room) — that
+> run doubles as the first counted rehearsal. Engine + tooling outcomes of this checkpoint (reachability
 > discount, web cockpit, quick-pick strip) are already landed and audited.
 > **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
 > draft scheduling.

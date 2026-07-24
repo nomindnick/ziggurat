@@ -49,6 +49,15 @@
   #flash { min-height: 20px; font-size: 13px; margin-top: 6px; }
   #flash.ok { color: var(--good); } #flash.err { color: var(--bad); }
 
+  /* sync feed status */
+  #syncline { min-height: 16px; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  #syncline.on { color: var(--good); }
+  #syncline.warn { color: var(--warn); }
+  #syncblocked {
+    display: none; margin-bottom: 8px; padding: 8px 10px; border-radius: 6px;
+    background: #3a2822; border: 1px solid var(--bad); font-size: 13px;
+  }
+
   /* quick-pick strip: the likely next picks as one-press buttons */
   #quick { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
   #quick button.qp {
@@ -117,6 +126,8 @@
 <main>
   <section>
     <h2>Enter pick</h2>
+    <div id="syncline"></div>
+    <div id="syncblocked"></div>
     <div id="entrymode"></div>
     <div id="quick"></div>
     <input id="q" autocomplete="off" spellcheck="false"
@@ -185,6 +196,10 @@ function seatLabel(seat) {
   return seat === STATE.operator_slot ? "YOU" : ("seat " + seat);
 }
 function renderState(s) {
+  // A pending autodraft proposal was rendered for a specific head; if the
+  // head moved (sync applied a pick), the proposal is stale — drop it before
+  // the operator can confirm it into the wrong slot (re-audit finding 6).
+  if (STATE && s.overall_pick !== STATE.overall_pick) hideProposal();
   STATE = s;
   TAKEN = new Set(s.taken);
   const c = $("clock");
@@ -239,8 +254,45 @@ function renderState(s) {
   $("posturemsg").textContent = s.posture || "";
 
   renderQuick(s);
+  renderSync(s.sync);
   renderAvail();
   renderRoster(s);
+}
+function renderSync(sync) {
+  const line = $("syncline"), blk = $("syncblocked");
+  if (!sync || !sync.active) {
+    line.textContent = "sync: not connected (install the userscript from /sync.user.js — manual entry always works)";
+    line.className = "";
+  } else if (sync.blocked) {
+    line.textContent = `sync: paused at pick ${sync.blocked.overall}`;
+    line.className = "warn";
+  } else {
+    const pend = sync.pending.length ? ` · ${sync.pending.length} waiting` : "";
+    line.textContent = `sync: live${pend}` + (sync.conflicts.length ? ` · ${sync.conflicts.length} conflict(s)` : "");
+    line.className = sync.conflicts.length ? "warn" : "on";
+  }
+  if (sync && sync.blocked) {
+    blk.style.display = "block";
+    blk.innerHTML = "";
+    blk.append(`Sync needs you — ESPN pick ${sync.blocked.overall}: "${sync.blocked.name}" (${sync.blocked.reason}). `);
+    const b = document.createElement("button");
+    b.className = "primary";
+    b.textContent = "Find him";
+    b.onclick = () => {
+      $("q").value = sync.blocked.name;
+      fetchSugg();
+      $("q").focus();
+    };
+    blk.appendChild(b);
+  } else {
+    blk.style.display = "none";
+  }
+  if (sync && sync.conflicts.length) {
+    const d = document.createElement("div");
+    d.style.cssText = "font-size:12px;color:var(--warn);margin-top:4px";
+    d.textContent = sync.conflicts[sync.conflicts.length - 1];
+    line.appendChild(d);
+  }
 }
 function renderQuick(s) {
   // Rehearsal-3 evidence (2026-07-24): transcription, not typing speed, is the
@@ -347,14 +399,24 @@ async function commit(entry) {
       EDITING = null; renderEditMode();
     } else {
       // label from the SERVER's response — the page's own state can be stale
-      // mid-burst (audit finding 5)
-      const out = await api("/api/pick", { player_id: entry.player_id });
+      // mid-burst (audit finding 5). expected_overall guards the dual-writer
+      // race with the sync feed (finding 8): the server enforces it only
+      // while sync is active, so pure-manual bursts keep their speed.
+      const out = await api("/api/pick", {
+        player_id: entry.player_id,
+        expected_overall: STATE ? STATE.overall_pick : undefined,
+      });
       flash(`Pick ${out.overall} (${seatLabel(out.seat)}): ${entry.name} ✓`, true);
     }
     $("q").value = ""; SUGG = []; HI = 0; renderSugg();
     hideProposal();
     await refresh();
-  } catch (e) { flash(e.message, false); }
+  } catch (e) {
+    flash(e.message, false);
+    // A "board moved" reject means our STATE is stale — refresh immediately
+    // so the next attempt carries the current head (re-audit finding 4).
+    await refresh();
+  }
   $("q").focus();
 }
 

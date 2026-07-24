@@ -34,7 +34,11 @@ shell lives in the sibling ``webui.html`` (read once at startup).
 
 from __future__ import annotations
 
+import hmac
 import json
+import os
+import re
+import secrets
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,10 +48,16 @@ from urllib.parse import parse_qs, urlparse
 
 from ziggurat.draft.bots import BoardEntry
 from ziggurat.draft.posture import PostureMonitor
-from ziggurat.draft.resolver import NameResolver
+from ziggurat.draft.resolver import NameResolver, normalize_query
 from ziggurat.draft.session import DraftSession
+from ziggurat.draft.sync import ParsedPick, parse_payload_pick, resolve_synced_pick
 
 _UI_PATH = Path(__file__).with_name("webui.html")
+_USERSCRIPT_PATH = Path(__file__).with_name("espn_sync.user.js")
+
+# Sync bookkeeping caps: pending picks are bounded by draft size; conflict
+# messages are display-only and bounded so a pathological feed can't grow RAM.
+_MAX_CONFLICTS_SHOWN = 12
 
 # The web pick flow commits an explicit player_id the operator SAW and chose, so
 # suggestion count only needs to cover honest ambiguity, not typo rescue depth.
@@ -57,6 +67,26 @@ _SUGGEST_LIMIT_MAX = 25
 
 class CockpitError(ValueError):
     """A user-correctable request error (rendered as a 400 with a message)."""
+
+
+def _load_or_create_sync_token(directory: Path) -> str:
+    """Per-installation shared secret for the userscript feed (0600, gitignored
+    dir). Stable across cockpit restarts so the installed userscript keeps
+    working; delete the file to rotate."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "sync-token.txt"
+    if path.exists():
+        os.chmod(path, 0o600)  # re-harden a pre-existing file (audit)
+        token = path.read_text(encoding="utf-8").strip()
+        # Only accept the token_urlsafe alphabet: the value is substituted
+        # into a JS string literal and an HTTP header (audit note 22).
+        if token and re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            return token
+    token = secrets.token_urlsafe(24)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token + "\n")
+    return token
 
 
 def _entry_json(e: BoardEntry) -> dict[str, Any]:
@@ -101,9 +131,30 @@ class WebCockpit:
     _recs: tuple[Any, ...] = field(default=(), init=False)
     _recal: Any = field(default=None, init=False)
     _advice: Any = field(default=None, init=False)
+    # DOM-sync state (userscript feed): out-of-order picks wait in _sync_pending;
+    # a pick the resolver refuses to auto-commit blocks the head until the
+    # operator enters it manually (the userscript keeps retrying it, and the
+    # verify path then dedupes it away — self-healing by design).
+    _sync_pending: dict[int, ParsedPick] = field(default_factory=dict, init=False)
+    _sync_blocked: tuple[ParsedPick, str] | None = field(default=None, init=False)
+    _sync_conflicts: dict[int, str] = field(default_factory=dict, init=False)
+    _sync_received: int = field(default=0, init=False)
+    # Epoch: a fresh random id per cockpit RUN. The userscript clears its
+    # sent-set whenever the epoch changes, so acceptance never has to be
+    # durable — a crash/restart just triggers a full re-send that the verify
+    # path dedupes (audit findings 7/17: the RAM-only pending dict plus a
+    # stale in-page sent-set otherwise deadlocks sync under a green badge).
+    sync_epoch: str = field(default="", init=False)
+    # League binding: the first sync batch of an epoch claims the session for
+    # its draft room; batches from a DIFFERENT room (e.g. a practice draft
+    # left open in another tab) are rejected (audit finding 18).
+    _sync_league: str | None = field(default=None, init=False)
+    sync_token: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
         self.resolver = NameResolver(self.session.board)
+        self.sync_token = _load_or_create_sync_token(self.session.journal_path.parent)
+        self.sync_epoch = secrets.token_hex(8)
         with self._lock:
             self._recompute()
 
@@ -172,14 +223,29 @@ class WebCockpit:
                 "recal": self._recal.message if self._recal is not None else None,
                 "posture": self._advice.message if self._advice is not None else None,
                 "contingencies": [b.message for b in branches],
+                "sync": self._sync_state(),
             }
 
     # -- mutations (each recomputes synchronously, like the REPL) ------------
 
-    def pick(self, player_id: str) -> dict[str, Any]:
+    def pick(self, player_id: str, *, expected_overall: int | None = None) -> dict[str, Any]:
         with self._lock:
             if self.session.complete:
                 raise CockpitError("the draft is complete — no more picks")
+            # Dual-writer guard (audit finding 8): once the sync feed is live,
+            # a manual commit rendered against a stale head must not land one
+            # slot late. Only enforced while sync is active so pure-manual
+            # burst entry keeps its speed.
+            if (
+                expected_overall is not None
+                and self._sync_received > 0
+                and expected_overall != self.session.overall_pick
+            ):
+                raise CockpitError(
+                    f"the board moved — pick {expected_overall} was already "
+                    f"entered (now on pick {self.session.overall_pick}); "
+                    "re-check and click again"
+                )
             entry = next(
                 (e for e in self.session.board if e.player_id == player_id), None
             )
@@ -192,6 +258,7 @@ class WebCockpit:
             # own state can be stale mid-burst; the server's cannot).
             overall, seat = self.session.overall_pick, self.session.current_seat
             self.session.append_pick(player_id)
+            self._drain_sync()
             self._recompute()
             return {"ok": True, "picked": _entry_json(entry), "overall": overall, "seat": seat}
 
@@ -201,6 +268,11 @@ class WebCockpit:
                 self.session.undo_last()
             except Exception as exc:
                 raise CockpitError(str(exc)) from exc
+            # Deliberately NO sync drain here: the operator undid for a reason;
+            # re-applying the same stashed pick instantly would fight them. But
+            # a blocked banner for a DIFFERENT head is a misdirection trap
+            # (audit finding 6) — reconcile it away.
+            self._sync_reconcile_blocked()
             self._recompute()
             return {"ok": True}
 
@@ -210,6 +282,11 @@ class WebCockpit:
                 self.session.edit_pick(int(overall), player_id=player_id)
             except Exception as exc:
                 raise CockpitError(str(exc)) from exc
+            # The operator just fixed this slot — its sync conflict is resolved
+            # (audit finding 12; a fresh mismatch would be re-raised by the
+            # next verify pass anyway).
+            self._sync_conflicts.pop(int(overall), None)
+            self._drain_sync()
             self._recompute()
             return {"ok": True}
 
@@ -239,6 +316,156 @@ class WebCockpit:
                 raise CockpitError("autodraft could not find a legal pick")
             return {"seat": seat, "proposal": _entry_json(entry)}
 
+    # -- DOM-sync feed (userscript) -----------------------------------------
+
+    def _sync_verify_existing(self, pick: ParsedPick) -> None:
+        """A pick we already hold: cross-check instead of re-entering. A
+        mismatch is SURFACED, never auto-edited (Rule 6 — the operator decides;
+        the ``e N`` / click-to-edit flow is one click away). The NAME is
+        compared first: an espn_id can be wrong for the same DOM-drift reasons
+        the resolution rung distrusts it (audit finding 2), so an id match
+        alone must not silence a name contradiction."""
+        held = self.session.picks[pick.overall - 1]
+        names_agree = bool(
+            held.name and normalize_query(held.name) == normalize_query(pick.name)
+        )
+        ids_agree = pick.espn_id is not None and held.player_id == pick.espn_id
+        if names_agree or (ids_agree and not pick.name):
+            self._sync_conflicts.pop(pick.overall, None)
+            return
+        if ids_agree and not names_agree:
+            # id says same player, text disagrees — still surface it.
+            pass
+        self._sync_conflicts[pick.overall] = (
+            f"pick {pick.overall}: cockpit has {held.name or held.player_id}, "
+            f"ESPN shows {pick.name} — click the pick in the log to fix it"
+        )
+        while len(self._sync_conflicts) > _MAX_CONFLICTS_SHOWN:
+            self._sync_conflicts.pop(next(iter(self._sync_conflicts)))
+
+    def _sync_try_apply_head(self, pick: ParsedPick) -> bool:
+        """Resolve-and-commit the pick that is exactly at the session head.
+        True on commit; False leaves it as the blocked pick."""
+        res = resolve_synced_pick(
+            self.resolver, self.session.board, pick, taken=self.session.taken
+        )
+        if not res.confident or res.entry is None:
+            self._sync_blocked = (pick, res.reason)
+            return False
+        self.session.append_pick(res.entry.player_id)
+        self._sync_blocked = None
+        return True
+
+    def _sync_reconcile_blocked(self) -> None:
+        """A blocked pick is only meaningful AT the current head. If the head
+        moved in either direction (manual entry past it, or an UNDO below it —
+        audit finding 6: the stale 'Find him' banner misdirected a wrong-slot
+        commit), drop it; the userscript resends and the machine re-decides."""
+        if self._sync_blocked is not None and (
+            self._sync_blocked[0].overall != self.session.overall_pick
+        ):
+            self._sync_blocked = None
+
+    def _drain_sync(self) -> None:
+        """Apply every stashed pick that has become the session head. Called
+        after any state change (sync or manual) so the two entry paths
+        interleave freely. Stops at the first pick the resolver refuses.
+        Stashed picks the head has already passed (the operator typed them)
+        are routed through the verify path and pruned."""
+        self._sync_reconcile_blocked()
+        while not self.session.complete:
+            head = self.session.overall_pick
+            for stale in [o for o in self._sync_pending if o < head]:
+                self._sync_verify_existing(self._sync_pending.pop(stale))
+            pick = self._sync_pending.get(head)
+            if pick is None:
+                break
+            if not self._sync_try_apply_head(pick):
+                break
+            del self._sync_pending[head]
+        self._sync_reconcile_blocked()
+
+    def sync_apply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ingest a userscript batch. Returns which overalls the cockpit now
+        OWNS (``accepted`` — the script stops resending those for THIS epoch),
+        the session head, the epoch, and the blocked pick if the operator is
+        needed."""
+        raw = payload.get("picks")
+        if not isinstance(raw, list):
+            raise CockpitError("body must carry a 'picks' list")
+        # The room identity: absent/empty league is still an IDENTITY (a room
+        # whose URL carries no leagueId), never a bypass — re-audit finding 1
+        # live-proved that a league-less batch walked straight past the
+        # binding into a bound session.
+        league = str(payload.get("league") or "").strip()
+        parsed = [pp for p in raw if isinstance(p, dict) and (pp := parse_payload_pick(p))]
+        draft_size = self.session.roster.teams * self.session.rounds_total
+        accepted: list[int] = []
+        applied = 0
+        with self._lock:
+            # First-room-wins binding (audit finding 18): a practice/mock room
+            # left open in another tab must not feed the live session. Note
+            # the honest limit: after a cockpit restart, whichever open tab
+            # ticks first claims the binding — the operator closes tabs they
+            # don't mean to sync (the loser's badge says so out loud).
+            if self._sync_league is None:
+                self._sync_league = league
+            elif league != self._sync_league:
+                raise CockpitError(
+                    "this cockpit session is already synced to a different "
+                    "ESPN draft room — close the other room's tab (or "
+                    "restart the cockpit to re-bind)"
+                )
+            self._sync_received += len(parsed)
+            state_changed = False
+            for pick in sorted(parsed, key=lambda p: p.overall):
+                if pick.overall > draft_size:
+                    continue  # not a real slot in this draft; never stash it
+                head = self.session.overall_pick
+                if pick.overall < head or self.session.complete:
+                    self._sync_verify_existing(pick)
+                    accepted.append(pick.overall)
+                elif pick.overall == head:
+                    if self._sync_try_apply_head(pick):
+                        accepted.append(pick.overall)
+                        applied += 1
+                        state_changed = True
+                        self._drain_sync()
+                    # blocked: NOT accepted — the script retries until cleared
+                else:
+                    self._sync_pending[pick.overall] = pick
+                    accepted.append(pick.overall)
+            if state_changed:
+                self._recompute()
+            blocked = self._sync_blocked
+            return {
+                "accepted": accepted,
+                "applied": applied,
+                "epoch": self.sync_epoch,
+                "session_overall": self.session.overall_pick,
+                "blocked": (
+                    {"overall": blocked[0].overall, "name": blocked[0].name,
+                     "reason": blocked[1]}
+                    if blocked is not None else None
+                ),
+                "conflicts": len(self._sync_conflicts),
+            }
+
+    def _sync_state(self) -> dict[str, Any]:
+        blocked = self._sync_blocked
+        return {
+            "active": self._sync_received > 0,
+            "epoch": self.sync_epoch,
+            "league": self._sync_league,
+            "pending": sorted(self._sync_pending),
+            "blocked": (
+                {"overall": blocked[0].overall, "name": blocked[0].name,
+                 "reason": blocked[1]}
+                if blocked is not None else None
+            ),
+            "conflicts": [self._sync_conflicts[k] for k in sorted(self._sync_conflicts)],
+        }
+
     def posture_action(self, action: str) -> dict[str, Any]:
         with self._lock:
             if action == "accept":
@@ -256,6 +483,7 @@ class WebCockpit:
 
 def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
     ui_html = _UI_PATH.read_text(encoding="utf-8")
+    userscript_tpl = _USERSCRIPT_PATH.read_text(encoding="utf-8")
 
     class Handler(BaseHTTPRequestHandler):
         # A local single-operator cockpit: keep the terminal quiet during bursts.
@@ -288,6 +516,17 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
             url = urlparse(self.path)
             if url.path in ("/", "/index.html"):
                 self._send(200, ui_html.encode("utf-8"), "text/html; charset=utf-8")
+            elif url.path == "/sync.user.js":
+                # Serves the Tampermonkey script with this installation's token
+                # and the live port baked in. Loopback-only server: any local
+                # process could read this — same trust boundary as the journal
+                # on disk (single-operator machine).
+                script = (
+                    userscript_tpl
+                    .replace("{{TOKEN}}", cockpit.sync_token)
+                    .replace("{{PORT}}", str(self.server.server_address[1]))
+                )
+                self._send(200, script.encode("utf-8"), "text/javascript; charset=utf-8")
             elif url.path == "/api/state":
                 self._run(cockpit.state_json)
             elif url.path == "/api/board":
@@ -318,9 +557,23 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
             if ctype != "application/json":
                 self._json({"error": "Content-Type must be application/json"}, code=403)
                 return
+            # The sync feed authenticates by TOKEN, not by origin: some
+            # userscript managers forward the ESPN page's Origin, which the
+            # CSRF guard would reject (audit finding 14) — but a page that
+            # KNOWS the token isn't a confused deputy, so a valid token
+            # bypasses the Origin check. Compare as bytes so a hostile
+            # non-ASCII header can't raise out of compare_digest (note 27).
+            sent_token = (self.headers.get("X-Zig-Sync-Token") or "").encode(
+                "utf-8", "surrogateescape"
+            )
+            has_valid_token = hmac.compare_digest(
+                sent_token, cockpit.sync_token.encode("utf-8")
+            )
             origin = self.headers.get("Origin")
-            if origin is not None and urlparse(origin).hostname not in (
-                "127.0.0.1", "localhost"
+            if (
+                not has_valid_token
+                and origin is not None
+                and urlparse(origin).hostname not in ("127.0.0.1", "localhost")
             ):
                 # Includes Origin: null (sandboxed iframes) — hostname parses None.
                 self._json({"error": "cross-origin request rejected"}, code=403)
@@ -334,8 +587,20 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
             except (ValueError, json.JSONDecodeError):
                 self._json({"error": "malformed JSON body"}, code=400)
                 return
-            if url.path == "/api/pick":
-                self._run(lambda: cockpit.pick(str(payload.get("player_id", ""))))
+            if url.path == "/api/sync":
+                # The token (checked above, constant-time) is what stops any
+                # other local page/process from injecting picks.
+                if not has_valid_token:
+                    self._json({"error": "bad sync token"}, code=403)
+                    return
+                self._run(lambda: cockpit.sync_apply(payload))
+            elif url.path == "/api/pick":
+                exp = payload.get("expected_overall")
+                self._run(lambda: cockpit.pick(
+                    str(payload.get("player_id", "")),
+                    # type() not isinstance(): a JSON true must not become 1
+                    expected_overall=exp if type(exp) is int else None,
+                ))
             elif url.path == "/api/undo":
                 self._run(cockpit.undo)
             elif url.path == "/api/edit":
@@ -417,6 +682,7 @@ def launch(
     server = serve(session, port=port)
     host, bound_port = server.server_address[:2]
     print(f"Draft cockpit: http://{host}:{bound_port}/  (Ctrl-C to quit; journal: {session.journal_path})")
+    print(f"ESPN sync userscript (install once in Tampermonkey): http://{host}:{bound_port}/sync.user.js")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
