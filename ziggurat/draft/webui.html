@@ -49,6 +49,22 @@
   #flash { min-height: 20px; font-size: 13px; margin-top: 6px; }
   #flash.ok { color: var(--good); } #flash.err { color: var(--bad); }
 
+  /* quick-pick strip: the likely next picks as one-press buttons */
+  #quick { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+  #quick button.qp {
+    display: flex; gap: 8px; align-items: baseline; text-align: left;
+    padding: 8px 10px; font-size: 15px;
+  }
+  #quick .num {
+    color: #0b1017; background: var(--accent); font-weight: 700;
+    border-radius: 4px; padding: 0 7px; font-size: 13px;
+  }
+  #quick .pos { color: var(--accent); font-weight: 600; }
+  #quick .team { color: var(--dim); }
+  #quick .hint { color: var(--dim); font-size: 12px; }
+  .takebar { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 4px; }
+  .takebar button.take1 { font-size: 16px; padding: 10px 16px; }
+
   /* log */
   #log { max-height: 44vh; overflow-y: auto; margin-top: 6px; }
   .pickrow { display: flex; gap: 8px; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
@@ -102,6 +118,7 @@
   <section>
     <h2>Enter pick</h2>
     <div id="entrymode"></div>
+    <div id="quick"></div>
     <input id="q" autocomplete="off" spellcheck="false"
            placeholder="type any chunk of a name — last, first, no punctuation needed">
     <ul id="sugg"></ul>
@@ -146,6 +163,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 let BOARD = [], TAKEN = new Set(), STATE = null;
 let SUGG = [], HI = 0, EDITING = null, POS_TAB = "ALL";
+let QUICK = [];  // rival turn: likely picks; operator turn: the top recs — keys 1-6 commit
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "DST", "K"];
 
 async function api(path, body) {
@@ -204,15 +222,60 @@ function renderState(s) {
     rec.innerHTML = head +
       `<div class="meta">pick score ${r.pick_score} · value (VOR) ${r.vor} · ${Math.round(r.survival_next*100)}% lasts to your next pick</div>` +
       `<ul>` + r.reasons.map(x => `<li>${esc(x)}</li>`).join("") + `</ul>` +
+      `<div class="takebar"></div>` +
       s.recs.slice(1, 3).map(a =>
         `<div class="alt">next: <span class="altname">${esc(a.name)}</span> (${esc(a.position)}, score ${a.pick_score})</div>`).join("");
+    const bar = rec.querySelector(".takebar");
+    s.recs.slice(0, 3).forEach((cand, i) => {
+      const b = document.createElement("button");
+      b.className = i === 0 ? "primary take1" : "";
+      b.textContent = `${i + 1} · Draft ${cand.name}`;
+      b.onclick = () => commit(cand);
+      bar.appendChild(b);
+    });
   }
   $("contin").textContent = (s.contingencies || []).join("  ");
   $("posture").style.display = s.posture ? "block" : "none";
   $("posturemsg").textContent = s.posture || "";
 
+  renderQuick(s);
   renderAvail();
   renderRoster(s);
+}
+function renderQuick(s) {
+  // Rehearsal-3 evidence (2026-07-24): transcription, not typing speed, is the
+  // burst bottleneck. Rooms mostly pick off the top of the ESPN board, so show
+  // the likely next picks as numbered one-press buttons — the operator VERIFIES
+  // a visible name against ESPN's ticker instead of reproducing it by keyboard.
+  const el = $("quick"); el.innerHTML = "";
+  if (!s || s.complete) { QUICK = []; return; }
+  if (s.is_operator_turn) {
+    // your turn: keys 1-3 take the engine's recs (buttons live in the rec panel)
+    QUICK = s.recs.slice(0, 3);
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = "Your pick — press 1-3 to draft a recommendation, or search below.";
+    el.appendChild(hint);
+    return;
+  }
+  QUICK = BOARD
+    .filter(e => !TAKEN.has(e.player_id) && e.name && e.espn_rank < 10000)
+    .sort((a, b) => a.espn_rank - b.espn_rank)
+    .slice(0, 6);
+  QUICK.forEach((e, i) => {
+    const b = document.createElement("button");
+    b.className = "qp";
+    b.innerHTML = `<span class="num">${i + 1}</span> ${esc(e.name)} ` +
+      `<span class="pos">${esc(e.position)}</span> <span class="team">${esc(e.team || "")}</span>`;
+    b.onclick = () => commit(e);
+    el.appendChild(b);
+  });
+  if (QUICK.length) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = "Likely picks for the seat on the clock — press 1-6 or click. Search below for a reach.";
+    el.appendChild(hint);
+  }
 }
 function renderRoster(s) {
   const el = $("roster"); el.innerHTML = "";
@@ -333,6 +396,13 @@ $("q").addEventListener("input", () => {
   debounceTimer = setTimeout(fetchSugg, 110);
 });
 $("q").addEventListener("keydown", (ev) => {
+  // Empty box + a digit = one-press commit of the numbered quick pick (rival
+  // turn: likely picks; your turn: the recommendations). With text in the box
+  // digits type normally, and edit-mode always goes through search.
+  if (/^[1-6]$/.test(ev.key) && $("q").value === "" && EDITING === null) {
+    const i = Number(ev.key) - 1;
+    if (i < QUICK.length) { ev.preventDefault(); commit(QUICK[i]); return; }
+  }
   if (ev.key === "ArrowDown") { ev.preventDefault(); if (SUGG.length) { HI = (HI + 1) % SUGG.length; renderSugg(); } }
   else if (ev.key === "ArrowUp") { ev.preventDefault(); if (SUGG.length) { HI = (HI - 1 + SUGG.length) % SUGG.length; renderSugg(); } }
   else if (ev.key === "Enter") {

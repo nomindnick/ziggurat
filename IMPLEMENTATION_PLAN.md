@@ -568,6 +568,20 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > Ja'Marr Chase w/o the apostrophe; 4-pick flow + operator rec + kill/`--resume`
 > replay on the real board. rapidfuzz stays unnecessary (structure, not kernel
 > speed, was the gap). Suite 485.
+>
+> **Rehearsal 3 attempts (ESPN mock lobby, 2026-07-24): typed live-search still
+> loses the burst** — the operator was typing+Enter blind to keep up, which
+> defeats the visible-confirm safety. Root cause named: TRANSCRIPTION (read a
+> name on one screen, reproduce it on another) costs 5-8 s/pick regardless of
+> search quality. Fix: turn transcription into VERIFICATION — a numbered
+> quick-pick strip (top-6 available by ESPN rank; rooms mostly draft off the
+> top of their board) commits a rival pick with one keypress (1-6) or click,
+> and on the operator's turn keys 1-3 / one-click buttons draft the engine's
+> recommendations directly. Search remains the fallback for reaches; edit-mode
+> always uses search. Playwright-verified live: 4 rival picks in 4 keypresses,
+> operator pick in 1. Perspective for the gate: the CPU lobby (7 picks in
+> seconds) is beyond the real worst case (2/10 autodraft seats → bursts of
+> ~2-3); rehearsals in the mock lobby remain the stress test.
 
 ---
 
