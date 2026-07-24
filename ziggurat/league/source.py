@@ -21,7 +21,19 @@ or 404. League history exists only because these pulls run on a cadence.
 """
 
 import json
+import socket
+from contextlib import contextmanager
 from importlib import import_module
+
+# Seconds any single ESPN socket operation may block. espn_api calls
+# ``requests.get`` with NO timeout (grep the package: zero hits), so a
+# black-holed connection blocks forever — and under ``Type=oneshot`` systemd's
+# TimeoutStartSec defaults to infinity, so a single hung pull would hold the
+# service Active forever and every later timer trigger would be skipped: the
+# sync stops capturing days and nothing reports it (audit finding). The unit now
+# also sets TimeoutStartSec, but bounding the socket here fixes it for every
+# caller, cron included.
+_SOCKET_TIMEOUT = 60
 
 # Kept in sync with espn_api's own activity filter (League.recent_activity):
 # ADD/DROP/WAIVER/TRADE message type ids on the league communication feed.
@@ -34,6 +46,22 @@ _TRANSACTION_TYPES = ["FREEAGENT", "WAIVER", "WAIVER_ERROR", "TRADE_ACCEPT", "RO
 STATE_VIEWS = ("mTeam", "mRoster", "mMatchupScore", "mStandings", "mSettings")
 
 
+@contextmanager
+def _bounded_socket(seconds: int = _SOCKET_TIMEOUT):
+    """Bound socket blocking for the duration of one request, then restore.
+
+    Scoped rather than set once at import: this process is not only the sync
+    (the draft cockpit and ingesters share the interpreter), so the default is
+    put back on the way out.
+    """
+    previous = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(seconds)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(previous)
+
+
 def _request(league, *, params, headers=None, extend=""):
     """Issue one authenticated league GET, converting ESPN's auth failures into a
     loud, actionable error.
@@ -44,9 +72,10 @@ def _request(league, *, params, headers=None, extend=""):
     """
     espn_requests = import_module("espn_api.requests.espn_requests")
     try:
-        if extend:
-            return league.espn_request.league_get(extend=extend, params=params, headers=headers)
-        return league.espn_request.league_get(params=params, headers=headers)
+        with _bounded_socket():
+            if extend:
+                return league.espn_request.league_get(extend=extend, params=params, headers=headers)
+            return league.espn_request.league_get(params=params, headers=headers)
     except (espn_requests.ESPNAccessDenied, espn_requests.ESPNInvalidLeague) as exc:
         raise RuntimeError(
             "ESPN rejected the league-state request (expired/invalid cookies?); "
@@ -76,10 +105,14 @@ def fetch_league_state(*, league_id: int, season: int, espn_s2, swid) -> dict:
     # attempt does not silently index a list.
     if isinstance(data, list):
         data = data[0] if data else {}
-    if not isinstance(data, dict) or "teams" not in data:
+    # Require teams to be non-EMPTY, not merely present: a payload with
+    # "teams": [] passes a key check and then drives a delete-and-replace that
+    # erases the day's standings (audit finding). Refuse it at the seam.
+    if not isinstance(data, dict) or not (data.get("teams") or []):
         raise RuntimeError(
-            "ESPN league-state payload has no 'teams' key — the league id or the "
-            "season is wrong, or ESPN changed the view contract"
+            "ESPN league-state payload carries no teams — the league id or the "
+            "season is wrong, ESPN changed the view contract, or the views were "
+            "served mid-flush. Refusing rather than writing an empty league."
         )
     return data
 

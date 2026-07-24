@@ -24,7 +24,7 @@ from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
 from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks, pull_espn_ranks
 from ziggurat.data.nfl.espn_source import load_espn_credentials
-from ziggurat.data.store import apply_schema, connect
+from ziggurat.data.store import apply_schema, connect, open_db
 from ziggurat.league.state import (
     format_free_agents,
     format_roster,
@@ -439,6 +439,10 @@ def league_sync(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
     league_id: Annotated[Optional[int], typer.Option(help="ESPN league id (default $ESPN_LEAGUE_ID).")] = None,
     transactions: Annotated[bool, typer.Option(help="Also pull the (best-effort) transaction feed.")] = True,
+    allow_shrink: Annotated[bool, typer.Option("--allow-shrink",
+        help="Accept a snapshot materially smaller than the stored one (default: refuse).")] = False,
+    allow_backfill: Annotated[bool, typer.Option("--allow-backfill",
+        help="Permit --as-of on a past day, writing TODAY's state under that date.")] = False,
 ) -> None:
     """Pull one full league-state snapshot: rosters, standings, matchups, FA pool.
 
@@ -447,13 +451,14 @@ def league_sync(
     `ziggurat league status`.
     """
     creds = load_espn_credentials(league_id=league_id)
-    conn = connect(path)
-    apply_schema(conn)
+    conn = open_db(path)
     try:
         summary = run_sync(
             conn, season=_season(season), league_id=creds["league_id"],
             espn_s2=creds["espn_s2"], swid=creds["swid"],
-            retrieved_as_of=as_of or _today(), include_transactions=transactions,
+            retrieved_as_of=as_of or _today(), today=_today(),
+            include_transactions=transactions,
+            allow_shrink=allow_shrink, allow_backfill=allow_backfill,
         )
     finally:
         conn.close()
@@ -467,7 +472,7 @@ def league_status(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Report sync health: last run, snapshot coverage, and permanently missing days."""
-    conn = connect(path)
+    conn = open_db(path)
     typer.echo(format_status(conn, season=_season(season), through=through or _today()))
     conn.close()
 
@@ -480,7 +485,7 @@ def league_roster(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Print a team's roster as of a date."""
-    conn = connect(path)
+    conn = open_db(path)
     rows = get_player_state(conn, as_of=as_of or _today(), season=_season(season), on_team_id=team)
     conn.close()
     typer.echo(format_roster(rows))
@@ -495,7 +500,7 @@ def league_free_agents(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Print the free-agent pool as of a date, most-owned first."""
-    conn = connect(path)
+    conn = open_db(path)
     rows = get_free_agents(conn, as_of=as_of or _today(), season=_season(season), position=position)
     conn.close()
     typer.echo(format_free_agents(rows, limit=limit))
@@ -510,7 +515,7 @@ def league_holdings(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Show who held a player over time (the observed snapshot history)."""
-    conn = connect(path)
+    conn = open_db(path)
     segments = holder_timeline(conn, season=_season(season), espn_player_id=player_id,
                                since=since, until=until)
     conn.close()

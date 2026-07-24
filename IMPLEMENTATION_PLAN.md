@@ -774,6 +774,61 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > can only be built from 2026-forward snapshots. The 2025 season yields exactly
 > one usable artifact (the draft + final standings/rosters), already harvested by 2.2.
 >
+> **Adversarial audit (2026-07-24, 27 agents over two rounds): 24 findings, 12
+> confirmed after skeptic verification, 9 refuted, all confirmed ones fixed.**
+> Suite 604 → 624. The audit's central catch was that the item's own load-bearing
+> guarantee had a hole in it:
+> - **CRITICAL-in-effect (reproduced, then re-verified fixed): a degraded pull
+>   destroyed the day it was supposed to refresh.** Ingest replaces a day by
+>   deleting its partition and rewriting it, with no floor on the replacement. So
+>   when ESPN answered 200 with an empty `players` array on the 11:15 run, the
+>   complete 05:15 snapshot was DELETED and nothing written — and because the
+>   newest surviving row for each player was then the *previous* day's, a player
+>   dropped that morning silently reverted to his stale holder for the rest of the
+>   season. The exact failure the whole-universe design exists to prevent,
+>   reintroduced through the replace, with the run still logged `ok`. Same shape
+>   for a collapsed `mRoster` view (every rostered player rewritten as a free
+>   agent). Fixed with `SnapshotCollapse` floors (`_MIN_SNAPSHOT_FRACTION`, on
+>   both universe size and rostered count) checked BEFORE any delete, plus
+>   `--allow-shrink` for a confirmed real shrink. Refusing is always right here:
+>   a refused day is retried three more times by the timer; a destroyed day is gone.
+> - **MAJOR: a hung pull would have silently killed the cadence.** `espn_api`
+>   passes no timeout to `requests`, and under `Type=oneshot` systemd defaults
+>   `TimeoutStartSec` to *infinity* — one black-holed connection would hold the
+>   service Active forever and every later trigger would be skipped, with nothing
+>   reporting it. Fixed at both levels (`TimeoutStartSec=600`; a scoped socket
+>   timeout at the seam, which also covers the cron fallback, now `timeout 600`).
+> - **Back-stamping refused.** `--as-of <past day>` wrote *today's* ESPN state
+>   under that date — fabricating history rather than recovering it, and erasing
+>   the day from the gap report that exists to say history is missing. Now refused
+>   unless `--allow-backfill`, and a forced one is marked so `league status` still
+>   reports it as `BACK-STAMPED … NOT point-in-time`.
+> - **Inverted priority corrected:** a collapsed espn→gsis crosswalk used to
+>   *discard the whole snapshot*. `gsis_id` is derived and backfillable at any
+>   time; the ESPN snapshot is perishable. Never trade an unrecoverable asset to
+>   protect a recoverable one — it now writes the day and downgrades the run to
+>   `partial`.
+> - Also fixed: writes now validate their stamp like reads do (`'2026-9-8'` wrote
+>   a day no accessor could ever see, since the gate compares dates lexically);
+>   DELETE+insert wrapped in one transaction (`base.upsert` gained `commit=False`);
+>   event/acquisition days derived in LOCAL time, not UTC (evening events were
+>   stamped a day late, producing `knowable_as_of > retrieved_as_of`);
+>   reconciliation counts disagreements in BOTH directions (the pool flushing a
+>   drop before `mRoster` — the direction that matters most — was silently
+>   swallowed); the four `league` READ commands now migrate (`store.open_db`)
+>   instead of tracebacking on any pre-005 database, which is exactly the sequence
+>   CLAUDE.md tells the operator to run; `last_run` orders by the monotonic
+>   `run_id`, not a second-resolution timestamp.
+> - **Refuted and deliberately NOT changed** (recorded so they are not re-litigated):
+>   a stale holder for a player vanishing from both roster and pool (triggers
+>   contradicted by the real payload); teams/matchups surviving a failed run
+>   (those two tables are re-served by ESPN every pull — not perishable);
+>   duplicate rows across the two transaction feeds and the same-day transaction
+>   PK collapse (no reader, no wrong result — but the timer's rationale comment
+>   overclaimed and was corrected to say only CROSS-day transitions survive); the
+>   244/TRADE branch (its acquiring-team semantics match every other row; dead
+>   `elif` removed and the docstring corrected).
+>
 > **Deferred:** ESPN `acquisitionBudget=100` semantics (the 1.1 open question)
 > now resolve themselves from observed in-season `transactionCounter`s;
 > matchup-period ↔ NFL-week 1:1 assumed, verify at Checkpoint 3; the

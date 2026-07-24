@@ -8,10 +8,13 @@
 #      asleep laptop, expired cookie noticed late) costs a day of history that
 #      can never be recovered. With four attempts, a day is lost only if all
 #      four fail.
-#   2. INTRADAY EVENTS. league_transactions is write-on-change and carries real
-#      ESPN timestamps, so extra runs DO capture state transitions the daily
-#      snapshot flattens — notably a waiver claim going PENDING -> EXECUTED in
-#      ESPN's overnight batch.
+#   2. CROSS-DAY EVENT TRANSITIONS. league_transactions is write-on-change, so a
+#      waiver claim proposed one day and processed in ESPN's ~03:00-04:30 ET
+#      overnight batch is stored as TWO versions — the 23:15 run sees it PENDING,
+#      the 05:15 run sees it EXECUTED. Note the limit precisely: versions are
+#      keyed by retrieved_as_of, which is a DAY, so two transitions within one
+#      calendar day collapse to the last one. The real waiver case spans days;
+#      same-day churn does not survive.
 #
 # Times are chosen around the league's rhythm (SPEC): ESPN processes waiver
 # claims ~03:00-04:30 ET Wednesday, so the 05:15 run lands just after the batch

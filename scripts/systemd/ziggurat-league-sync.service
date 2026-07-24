@@ -33,6 +33,11 @@ ExecStart=@REPO@/.venv/bin/ziggurat league sync --season @SEASON@
 # must surface as a failure rather than loop all day.
 Restart=on-failure
 RestartSec=180
+# Type=oneshot defaults TimeoutStartSec to INFINITY. Without this, one hung ESPN
+# pull holds the service Active forever, every later timer trigger is silently
+# skipped, and the sync stops capturing days with nothing reporting it. Bound it
+# so a hang becomes a failure the Restart= above retries and the run log records.
+TimeoutStartSec=600
 # The credentials live in the repo .env, which the package loads itself
 # (never echoed into logs — rule 5).
 StandardOutput=journal

@@ -135,15 +135,26 @@ def frame_to_rows(
     return rows
 
 
-def upsert(conn: sqlite3.Connection, table: str, rows: Sequence[Mapping]) -> int:
-    """Idempotent INSERT OR REPLACE of uniform row dicts. Returns rows written."""
+def upsert(conn: sqlite3.Connection, table: str, rows: Sequence[Mapping], *,
+           commit: bool = True) -> int:
+    """Idempotent INSERT OR REPLACE of uniform row dicts. Returns rows written.
+
+    ``commit=False`` leaves the write inside the caller's transaction. A
+    replace-the-partition ingester (DELETE then insert) needs this: with the
+    default per-call commit, the DELETE and the insert are two transactions, so
+    a failure between them leaves the partition deleted and unreplaced — for
+    league state (item 3.1) that is unrecoverable data loss, since ESPN serves
+    no history. Such callers wrap both statements in one ``with conn:`` block
+    and pass ``commit=False``.
+    """
     if not rows:
         return 0
     cols = list(rows[0].keys())
     placeholders = ", ".join(f":{c}" for c in cols)
     sql = f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
     conn.executemany(sql, rows)
-    conn.commit()
+    if commit:
+        conn.commit()
     return len(rows)
 
 

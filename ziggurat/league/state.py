@@ -19,6 +19,7 @@ import logging
 import sqlite3
 from datetime import date, datetime, timezone
 
+from ziggurat.data.asof import normalize_as_of
 from ziggurat.data.nfl import base
 from ziggurat.data.nfl.espn_ranks import DEFPOS
 
@@ -78,8 +79,34 @@ _TRANSACTION_MUTABLE = ("action", "source", "status", "bid_amount", "proposed_at
 # The live pool runs high but never 100% (ESPN carries fringe/practice-squad
 # players nflverse has not issued an id for). Wholesale drift — a players table
 # that was never loaded, or an espn_id format change — drops coverage to ~0, so
-# the gap between the two regimes is wide.
+# the gap between the two regimes is wide. Below this the run is downgraded to
+# 'partial' — NOT failed: see _gsis_coverage.
 _MIN_GSIS_COVERAGE = 0.5
+
+# A replacement snapshot must be at least this fraction of the previous one,
+# both in total universe size and in rostered count. Day-over-day churn in
+# ESPN's universe is ~0-2%; a 25% collapse means a degraded response, not news.
+#
+# WHY THIS EXISTS (audit finding, reproduced): ingest replaces a day by deleting
+# its partition and rewriting it. Without a floor, a single degraded pull — ESPN
+# answering 200 with an empty `players` array on the 11:15 run — DELETES a
+# complete 05:15 snapshot and writes nothing, so the newest surviving row for a
+# player is the PREVIOUS day's, and a player dropped that morning reverts to his
+# stale holder for the rest of the season. That is exactly the failure the
+# whole-universe design exists to prevent, reintroduced through the replace.
+# Refusing is always safe here: a refused day is retried three more times by the
+# timer, while a destroyed day is gone forever.
+_MIN_SNAPSHOT_FRACTION = 0.75
+
+
+class SnapshotCollapse(RuntimeError):
+    """A replacement snapshot is materially smaller than the one it would destroy.
+
+    Raised BEFORE any DELETE, so the stored day survives untouched. The operator
+    can override with ``allow_shrink=True`` (``--allow-shrink``) once they have
+    confirmed the shrink is real (e.g. ESPN pruning the universe in the
+    offseason) rather than a degraded response.
+    """
 
 
 def is_starting_slot(slot) -> bool:
@@ -93,16 +120,25 @@ def is_starting_slot(slot) -> bool:
 
 
 def _epoch_ms_to_iso(value, *, date_only: bool = False) -> str | None:
-    """ESPN epoch-milliseconds -> ISO string (UTC), or None.
+    """ESPN epoch-milliseconds -> ISO string in LOCAL time, or None.
 
-    Timestamps are kept at FULL precision for transactions — they are the only
-    intraday-accurate record in the system (design §3.4). ``date_only`` truncates
-    for the day-granular columns the as-of gate reads.
+    Timestamps are kept at FULL precision (offset-aware) for transactions — they
+    are the only intraday-accurate record in the system (design §3.4).
+    ``date_only`` truncates to the calendar day the as-of gate reads.
+
+    LOCAL, not UTC, and that matters: every other date in this system is a local
+    calendar day (the CLI stamps ``retrieved_as_of`` from ``date.today()``).
+    Deriving the day in UTC put every evening event on the NEXT day west of
+    Greenwich — so an 8pm waiver add was stamped knowable TOMORROW, invisible to
+    a same-evening read and producing knowable_as_of > retrieved_as_of, which the
+    as-of model treats as impossible (audit finding). ``astimezone()`` with no
+    argument converts to the machine's local zone, which is by construction the
+    same clock ``date.today()`` reads.
     """
     if value in (None, "", 0):
         return None
     try:
-        moment = datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc)
+        moment = datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc).astimezone()
     except (TypeError, ValueError, OSError, OverflowError):
         return None
     return moment.date().isoformat() if date_only else moment.isoformat(timespec="seconds")
@@ -300,20 +336,21 @@ def map_activity_topic(topic: dict, *, season: int) -> list[dict]:
     """Map one raw communication topic to transaction rows (one per message).
 
     Same UNVERIFIED-shape caveat as ``map_transaction``; field names follow
-    espn_api's ``Activity`` parser. Message id 244 (TRADE) names both sides via
-    ``from``/``to``; 239 names the team in ``for``; the rest use ``to``.
+    espn_api's ``Activity`` parser. Message id 239 names its team in ``for``;
+    every other type (including 244/TRADE) uses ``to`` — see the loop comment.
     """
     topic_id = topic.get("id") or topic.get("date")
     rows = []
     for index, msg in enumerate(topic.get("messages") or []):
         msg_type = msg.get("messageTypeId")
         action, source = ACTIVITY_ACTIONS.get(msg_type, ("UNKNOWN", None))
-        if msg_type == 239:
-            team_id = msg.get("for")
-        elif msg_type == 244:
-            team_id = msg.get("to")
-        else:
-            team_id = msg.get("to")
+        # 239 names its team in 'for'; every other type (including 244/TRADE)
+        # names it in 'to'. For a trade that is the ACQUIRING side, which matches
+        # the semantics of every other row here ("the team that ended up with
+        # this player"); espn_api additionally emits the sending side from
+        # 'from', which we deliberately do not, since a trade shows up as two
+        # messages (one per player) and the acquiring side is the holding fact.
+        team_id = msg.get("for") if msg_type == 239 else msg.get("to")
         player_id = msg.get("targetId")
         stamp = _epoch_ms_to_iso(msg.get("date") or topic.get("date"))
         rows.append({
@@ -343,7 +380,7 @@ def ingest_league_state(conn, payload: dict, *, retrieved_as_of, season: int) ->
     partition is deleted and rewritten, so re-running a day (or a cron firing
     twice) replaces rather than duplicates.
     """
-    stamp = base.iso_date(retrieved_as_of)
+    stamp = normalize_as_of(retrieved_as_of).isoformat()
     scoring_period = payload.get("scoringPeriodId")
 
     teams = [
@@ -351,6 +388,12 @@ def ingest_league_state(conn, payload: dict, *, retrieved_as_of, season: int) ->
         for raw in (payload.get("teams") or [])
     ]
     teams = [t for t in teams if t["team_id"] is not None]
+    if not teams:
+        # Never delete a stored day for a payload that cannot replace it.
+        raise SnapshotCollapse(
+            "league-state payload mapped to ZERO teams — refusing to replace the "
+            f"stored {stamp} snapshot with an empty one"
+        )
 
     raw_matchups = payload.get("schedule") or []
     matchups = [map_matchup(raw, season=season, scoring_period=scoring_period) for raw in raw_matchups]
@@ -358,17 +401,24 @@ def ingest_league_state(conn, payload: dict, *, retrieved_as_of, season: int) ->
     base.note_drops("league_matchups", len(raw_matchups) - len(kept), len(raw_matchups),
                     why="no home teamId / matchupPeriodId")
 
-    for rows, table, columns in (
-        (teams, "league_teams", _TEAM_COLUMNS),
-        (kept, "league_matchups", _MATCHUP_COLUMNS),
-    ):
-        conn.execute(f"DELETE FROM {table} WHERE season = ? AND retrieved_as_of = ?", (season, stamp))
-        for row in rows:
-            row["retrieved_as_of"] = stamp
-            row["knowable_as_of"] = stamp
-            for col in columns:
-                row.setdefault(col, None)
-        base.upsert(conn, table, rows)
+    # ONE transaction for the whole delete-then-rewrite. Two transactions (the
+    # default per-call commit in base.upsert) leave a window where the day is
+    # deleted and not yet replaced; a crash there loses it permanently.
+    with conn:
+        for rows, table, columns in (
+            (teams, "league_teams", _TEAM_COLUMNS),
+            (kept, "league_matchups", _MATCHUP_COLUMNS),
+        ):
+            if not rows:
+                continue  # nothing to write -> nothing to destroy
+            conn.execute(f"DELETE FROM {table} WHERE season = ? AND retrieved_as_of = ?",
+                         (season, stamp))
+            for row in rows:
+                row["retrieved_as_of"] = stamp
+                row["knowable_as_of"] = stamp
+                for col in columns:
+                    row.setdefault(col, None)
+            base.upsert(conn, table, rows, commit=False)
 
     return {"teams": len(teams), "matchups": len(kept)}
 
@@ -381,6 +431,7 @@ def ingest_player_state(
     season: int,
     roster: dict[str, dict] | None = None,
     scoring_period=None,
+    allow_shrink: bool = False,
 ) -> dict:
     """Persist one full-universe player-state snapshot.
 
@@ -393,8 +444,13 @@ def ingest_player_state(
     A player who is on a roster but absent from the pool response is still
     written — losing a rostered player from the snapshot would make him look
     dropped, which is unrecoverable history.
+
+    Refuses (``SnapshotCollapse``, BEFORE any delete) when the incoming snapshot
+    is materially smaller than the one it would replace — see
+    ``_MIN_SNAPSHOT_FRACTION``. ``allow_shrink`` overrides that once the operator
+    has confirmed the shrink is real.
     """
-    stamp = base.iso_date(retrieved_as_of)
+    stamp = normalize_as_of(retrieved_as_of).isoformat()
     roster = dict(roster or {})
     crosswalk = base.gsis_by_espn(conn)
 
@@ -414,7 +470,13 @@ def ingest_player_state(
 
         held = roster.get(key)
         if held is not None:
-            if row["on_team_id"] is not None and row["on_team_id"] != held["on_team_id"]:
+            # Count a disagreement in BOTH directions. The pool saying "free
+            # agent" while mRoster still shows a holder is the direction that
+            # matters most — it is what a half-flushed DROP looks like — and
+            # gating on `is not None` silently swallowed exactly that case.
+            # An entry with no onTeamId field at all asserts nothing, so it is
+            # not a disagreement.
+            if "onTeamId" in entry and row["on_team_id"] != held["on_team_id"]:
                 conflicts += 1
             row.update(held)
         elif row["on_team_id"] is not None:
@@ -445,41 +507,113 @@ def ingest_player_state(
             "ESPN views may be mid-flush)", conflicts, stamp,
         )
 
-    _check_gsis_coverage(rows)
+    # Guard BEFORE the delete: a refused day is retried by the next timer run,
+    # a destroyed day is gone forever.
+    _check_snapshot_size(conn, rows, roster, season=season, stamp=stamp, allow_shrink=allow_shrink)
+    coverage = _gsis_coverage(rows)
 
-    conn.execute(
-        "DELETE FROM league_player_state WHERE season = ? AND retrieved_as_of = ?",
-        (season, stamp),
-    )
-    for row in rows:
-        row["retrieved_as_of"] = stamp
-        row["knowable_as_of"] = stamp
-        for col in _PLAYER_COLUMNS:
-            row.setdefault(col, None)
-    written = base.upsert(conn, "league_player_state", rows)
+    with conn:  # one transaction: the day is replaced atomically or not at all
+        conn.execute(
+            "DELETE FROM league_player_state WHERE season = ? AND retrieved_as_of = ?",
+            (season, stamp),
+        )
+        for row in rows:
+            row["retrieved_as_of"] = stamp
+            row["knowable_as_of"] = stamp
+            for col in _PLAYER_COLUMNS:
+                row.setdefault(col, None)
+        written = base.upsert(conn, "league_player_state", rows, commit=False)
     logger.info("league_player_state: wrote %d rows at %s (%d non-league positions skipped)",
                 written, stamp, skipped)
-    return {"players": written, "conflicts": conflicts, "skipped": skipped}
+    return {"players": written, "conflicts": conflicts, "skipped": skipped,
+            "gsis_coverage": coverage}
 
 
-def _check_gsis_coverage(rows) -> None:
-    """Fail LOUD when the espn->gsis crosswalk collapses wholesale.
+def _snapshot_sizes(conn, *, season: int) -> tuple[int, int]:
+    """(universe rows, rostered rows) of the most recent stored snapshot day.
 
-    Individual misses are normal (fringe players nflverse has no id for), so this
-    only fires on the wide gap: an unloaded ``players`` table or an id-format
-    change takes coverage to ~0 and would quietly sever league state from the NFL
-    spine that 3.2 values it through.
+    The yardstick the collapse guard measures a replacement against. Includes
+    today's own snapshot when one exists — a re-run must not shrink what an
+    earlier run of the SAME day already captured.
+    """
+    day = conn.execute(
+        "SELECT MAX(retrieved_as_of) FROM league_player_state WHERE season = ?", (season,)
+    ).fetchone()[0]
+    if day is None:
+        return (0, 0)
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, COUNT(on_team_id) AS held FROM league_player_state "
+        "WHERE season = ? AND retrieved_as_of = ?",
+        (season, day),
+    ).fetchone()
+    return (row["n"], row["held"])
+
+
+def _check_snapshot_size(conn, rows, roster, *, season: int, stamp: str, allow_shrink: bool) -> None:
+    """Refuse to replace a stored snapshot with a materially smaller one.
+
+    Two independent collapses are caught, because ESPN can degrade either view
+    on its own: the player POOL coming back empty/short, and the mRoster view
+    coming back empty (which would rewrite every rostered player as a free
+    agent). Both were reproduced during the item-3.1 audit; both looked like a
+    successful run.
+    """
+    if allow_shrink:
+        logger.warning("league state: --allow-shrink set, skipping the collapse guard at %s", stamp)
+        return
+
+    previous_total, previous_held = _snapshot_sizes(conn, season=season)
+    if not previous_total:
+        return  # first snapshot of the season: nothing to lose, nothing to compare
+
+    floor = int(previous_total * _MIN_SNAPSHOT_FRACTION)
+    if len(rows) < floor:
+        raise SnapshotCollapse(
+            f"refusing to replace the stored {stamp} snapshot: incoming universe has "
+            f"{len(rows)} players vs {previous_total} stored "
+            f"(floor {floor} = {_MIN_SNAPSHOT_FRACTION:.0%}). ESPN likely returned a "
+            "degraded pool. The stored day is untouched; the next run will retry. "
+            "Re-run with --allow-shrink only if the shrink is real."
+        )
+
+    held_floor = int(previous_held * _MIN_SNAPSHOT_FRACTION)
+    if previous_held and len(roster) < held_floor:
+        raise SnapshotCollapse(
+            f"refusing to replace the stored {stamp} snapshot: mRoster reports "
+            f"{len(roster)} rostered players vs {previous_held} stored "
+            f"(floor {held_floor}). Writing this would mark the league as mass free "
+            "agency. The stored day is untouched; the next run will retry. "
+            "Re-run with --allow-shrink only if the drop is real."
+        )
+
+
+def _gsis_coverage(rows) -> float | None:
+    """Fraction of skill players that resolved to a gsis_id (None when N/A).
+
+    Logs LOUDLY below ``_MIN_GSIS_COVERAGE`` — an unloaded ``players`` table or an
+    id-format change takes coverage to ~0 and severs league state from the NFL
+    spine 3.2 values it through — but deliberately does NOT raise.
+
+    It used to raise, which inverted this system's own priority: ``gsis_id`` is a
+    DERIVED column (``base.gsis_by_espn`` is crosswalk-at-now over immutable
+    identity, so it can be recomputed and backfilled from ``players`` any time),
+    while the ESPN league state being rejected is PERISHABLE and gone forever
+    (audit finding). Never trade an unrecoverable asset to protect a recoverable
+    one: the snapshot is written with gsis_id NULL and the run is downgraded to
+    'partial' so the operator sees it.
     """
     skill = [r for r in rows if r.get("position") not in (None, "D/ST")]
     if not skill:
-        return
-    covered = sum(1 for r in skill if r.get("gsis_id"))
-    if covered / len(skill) < _MIN_GSIS_COVERAGE:
-        raise ValueError(
-            f"espn->gsis crosswalk collapsed: only {covered}/{len(skill)} skill players "
-            f"resolved (min {_MIN_GSIS_COVERAGE:.0%}). Is the players table loaded "
-            "(`ziggurat` NFL ingestion) and current?"
+        return None
+    coverage = sum(1 for r in skill if r.get("gsis_id")) / len(skill)
+    if coverage < _MIN_GSIS_COVERAGE:
+        logger.error(
+            "espn->gsis crosswalk collapsed: only %.0f%% of %d skill players resolved "
+            "(min %.0f%%). Snapshot IS being written (it is perishable); gsis_id is "
+            "derived and can be backfilled. Is the players table loaded and current?",
+            coverage * 100, len(skill), _MIN_GSIS_COVERAGE * 100,
         )
+    return coverage
 
 
 def ingest_transactions(conn, rows, *, retrieved_as_of, season: int) -> int:
@@ -493,7 +627,7 @@ def ingest_transactions(conn, rows, *, retrieved_as_of, season: int) -> int:
     ``knowable_as_of`` is the EVENT's own date (processed, else proposed, else the
     pull day) — the one table here whose knowledge time is not the pull day.
     """
-    stamp = base.iso_date(retrieved_as_of)
+    stamp = normalize_as_of(retrieved_as_of).isoformat()
     written = 0
     for row in rows:
         key = row.get("transaction_key")
@@ -613,10 +747,10 @@ def holder_timeline(conn, *, season, espn_player_id, since=None, until=None) -> 
     }
     if since is not None:
         clauses.append("retrieved_as_of >= :since")
-        params["since"] = base.iso_date(since)
+        params["since"] = normalize_as_of(since).isoformat()
     if until is not None:
         clauses.append("retrieved_as_of <= :until")
-        params["until"] = base.iso_date(until)
+        params["until"] = normalize_as_of(until).isoformat()
     rows = conn.execute(
         f"SELECT retrieved_as_of, on_team_id FROM league_player_state "
         f"WHERE {' AND '.join(clauses)} ORDER BY retrieved_as_of",
@@ -676,7 +810,7 @@ def start_run(conn, *, season: int, retrieved_as_of, started_at: str) -> int:
     cur = conn.execute(
         "INSERT INTO league_sync_runs (season, retrieved_as_of, started_at, status) "
         "VALUES (?, ?, ?, 'running')",
-        (season, base.iso_date(retrieved_as_of), started_at),
+        (season, normalize_as_of(retrieved_as_of).isoformat(), started_at),
     )
     conn.commit()
     return cur.lastrowid
@@ -701,15 +835,21 @@ def finish_run(conn, run_id: int, *, status: str, finished_at: str, counts=None,
 
 
 def last_run(conn, *, season: int, status: str | None = "ok"):
-    """The most recent run row (by default the most recent SUCCESSFUL one)."""
+    """The most recent run row (by default the most recent SUCCESSFUL one).
+
+    Ordered by the monotonic ``run_id``, NOT ``started_at``: run timestamps are
+    second-resolution, and two runs inside one second (a retry, or a manual run
+    racing the timer) made "the last run" ambiguous — so a failure could be
+    reported as the earlier success.
+    """
     if status is None:
         return conn.execute(
-            "SELECT * FROM league_sync_runs WHERE season = ? ORDER BY started_at DESC LIMIT 1",
+            "SELECT * FROM league_sync_runs WHERE season = ? ORDER BY run_id DESC LIMIT 1",
             (season,),
         ).fetchone()
     return conn.execute(
         "SELECT * FROM league_sync_runs WHERE season = ? AND status = ? "
-        "ORDER BY started_at DESC LIMIT 1",
+        "ORDER BY run_id DESC LIMIT 1",
         (season, status),
     ).fetchone()
 
@@ -725,6 +865,23 @@ def snapshot_days(conn, *, season: int) -> list[str]:
     ]
 
 
+def backfilled_days(conn, *, season: int, marker: str) -> list[str]:
+    """Days whose snapshot was deliberately back-stamped rather than captured live.
+
+    Such a day LOOKS like coverage to ``snapshot_gaps`` (it has rows), but its
+    contents are today's ESPN state wearing a past date. The status report has to
+    keep saying so, or the one honest signal about missing history quietly turns
+    into a lie.
+    """
+    return [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT retrieved_as_of FROM league_sync_runs "
+            "WHERE season = ? AND error LIKE ? ORDER BY retrieved_as_of",
+            (season, f"%{marker}%"),
+        )
+    ]
+
+
 def snapshot_gaps(conn, *, season: int, through) -> list[str]:
     """Days between the first snapshot and ``through`` with NO snapshot at all.
 
@@ -735,7 +892,7 @@ def snapshot_gaps(conn, *, season: int, through) -> list[str]:
     if not days:
         return []
     start = date.fromisoformat(days[0])
-    end = date.fromisoformat(base.iso_date(through))
+    end = normalize_as_of(through)
     have = set(days)
     missing, cursor = [], start
     while cursor <= end:

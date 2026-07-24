@@ -157,10 +157,16 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   the WHOLE universe daily (a drop must be a positive `on_team_id IS NULL` fact,
   which doubles as the FA pool). Validated live: 10 teams, 70 matchups, 1026
   players all correctly free agents pre-draft, 98.9% espn→gsis coverage, leakage
-  clean. Suite green (604). Remaining is calendar-bound: real-data confirmation
-  of roster history needs the August draft, and the timer needs installing on the
-  machine that will run it. Details: `IMPLEMENTATION_PLAN.md` 3.1 + gitignored
-  `intel/research/league-sync-3.1-design.md`.
+  clean. Two-round adversarial audit (27 agents): 24 findings, 12 confirmed, all
+  fixed — headline catch was that a degraded pull *destroyed* the day it should
+  have refreshed (empty ESPN response → partition deleted → dropped players
+  reverted to stale holders, run still logged `ok`), now blocked by
+  `SnapshotCollapse` floors checked before any delete; plus an unbounded hang
+  that would have silently killed the cadence under `Type=oneshot`. Suite green
+  (624). Timer installed and firing on this box. Remaining is calendar-bound:
+  real-data confirmation of roster history needs the August draft, and the
+  Strix Halo still needs the same installer run on it. Details:
+  `IMPLEMENTATION_PLAN.md` 3.1 + gitignored `intel/research/league-sync-3.1-design.md`.
 
 Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
 (monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).

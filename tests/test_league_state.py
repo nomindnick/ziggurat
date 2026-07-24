@@ -11,7 +11,9 @@ The leakage tests here are the standing rule-1 requirement: every accessor has o
 """
 
 import json
+import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -179,11 +181,112 @@ def test_gsis_crosswalk_is_applied(crosswalked_db, league_world):
     assert row["gsis_id"] == "00-000005"
 
 
-def test_collapsed_crosswalk_fails_loud(db, league_world):
-    """No players table -> the join to the NFL spine is severed; refuse the write."""
+def test_collapsed_crosswalk_keeps_the_snapshot_and_reports(db, league_world, caplog):
+    """A severed crosswalk must NOT cost the day.
+
+    gsis_id is DERIVED (recomputable from players at any time); the ESPN snapshot
+    is PERISHABLE. Discarding the snapshot to protect the derived column inverted
+    this system's own priority, so the write proceeds with gsis_id NULL and the
+    collapse is reported loudly instead.
+    """
     payload, pool = league_world()
-    with pytest.raises(ValueError, match="crosswalk collapsed"):
-        _ingest(db, payload, pool, day="2026-09-10")
+    with caplog.at_level("ERROR"):
+        counts = _ingest(db, payload, pool, day="2026-09-10")
+    assert counts["players"] == len(pool)          # the perishable part survived
+    assert counts["gsis_coverage"] == 0.0
+    assert "crosswalk collapsed" in caplog.text
+    rows = state.get_player_state(db, as_of="2026-09-10", season=2026)
+    assert rows and all(r["gsis_id"] is None for r in rows)
+
+
+# ------------------------------------------- collapse guards (the audit findings)
+
+
+def test_degraded_pool_cannot_destroy_a_stored_snapshot(crosswalked_db, league_world):
+    """THE audit finding: a degraded second pull of the day used to DELETE the
+    good snapshot, reverting a dropped player to his stale holder — silently, and
+    with the run still logged 'ok'."""
+    payload, pool = league_world(holdings={"1005": 4})
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    dropped, pool2 = league_world(holdings={})
+    _ingest(crosswalked_db, dropped, pool2, day="2026-09-11")
+    assert state.who_held(crosswalked_db, as_of="2026-09-11", season=2026,
+                          espn_player_id="1005") is None
+
+    # ESPN answers 200 with an empty players array on the next run of the day.
+    with pytest.raises(state.SnapshotCollapse, match="degraded pool"):
+        state.ingest_player_state(crosswalked_db, [], retrieved_as_of="2026-09-11",
+                                  season=2026, roster={}, scoring_period=3)
+
+    # The stored day is untouched: the drop still reads as a drop.
+    assert state.who_held(crosswalked_db, as_of="2026-09-11", season=2026,
+                          espn_player_id="1005") is None
+    assert len(state.get_free_agents(crosswalked_db, as_of="2026-09-11", season=2026)) == len(pool2)
+
+
+def test_collapse_guard_is_a_floor_not_an_equality(crosswalked_db, league_world):
+    """Normal churn (ESPN pruning a few players) must still write."""
+    payload, pool = league_world(pool_size=40)
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    smaller, pool_smaller = league_world(pool_size=36)   # -10%, well above the floor
+    counts = _ingest(crosswalked_db, smaller, pool_smaller, day="2026-09-11")
+    assert counts["players"] == 36
+
+
+def test_collapsed_roster_view_cannot_mark_the_league_as_free_agency(crosswalked_db, league_world):
+    """An empty mRoster used to rewrite every rostered player as a free agent."""
+    holdings = {str(1000 + i): (i % 10) + 1 for i in range(20)}
+    payload, pool = league_world(holdings=holdings)
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+
+    stripped, pool2 = league_world(holdings=holdings)
+    for team in stripped["teams"]:
+        team["roster"] = {"entries": []}              # ESPN drops/flushes mRoster
+    with pytest.raises(state.SnapshotCollapse, match="mass free agency"):
+        _ingest(crosswalked_db, stripped, pool2, day="2026-09-11")
+
+    assert state.who_held(crosswalked_db, as_of="2026-09-10", season=2026,
+                          espn_player_id="1000") == 1
+
+
+def test_allow_shrink_overrides_the_guard(crosswalked_db, league_world):
+    payload, pool = league_world(pool_size=40)
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    tiny, pool_tiny = league_world(pool_size=5)
+    state.ingest_league_state(crosswalked_db, tiny, retrieved_as_of="2026-09-11", season=2026)
+    counts = state.ingest_player_state(
+        crosswalked_db, pool_tiny, retrieved_as_of="2026-09-11", season=2026,
+        roster=state.roster_index(tiny), scoring_period=3, allow_shrink=True,
+    )
+    assert counts["players"] == 5
+
+
+def test_empty_team_list_never_deletes_the_days_standings(crosswalked_db, league_world):
+    payload, pool = league_world()
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    empty = {"scoringPeriodId": 3, "teams": [], "schedule": []}
+    with pytest.raises(state.SnapshotCollapse, match="ZERO teams"):
+        state.ingest_league_state(crosswalked_db, empty, retrieved_as_of="2026-09-10", season=2026)
+    assert len(state.get_team_state(crosswalked_db, as_of="2026-09-10", season=2026)) == 10
+
+
+def test_ingest_is_atomic_when_the_write_fails(crosswalked_db, league_world):
+    """A crash between the DELETE and the insert must not leave the day empty —
+    that day is unrecoverable, ESPN serves no history."""
+    payload, pool = league_world(holdings={"1000": 4})
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+
+    with patch.object(base, "upsert", side_effect=sqlite3.InterfaceError("boom")):
+        with pytest.raises(sqlite3.InterfaceError):
+            state.ingest_player_state(
+                crosswalked_db, pool, retrieved_as_of="2026-09-10", season=2026,
+                roster=state.roster_index(payload), scoring_period=3,
+            )
+    assert crosswalked_db.execute(
+        "SELECT COUNT(*) FROM league_player_state WHERE retrieved_as_of = '2026-09-10'"
+    ).fetchone()[0] == len(pool)
+    assert state.who_held(crosswalked_db, as_of="2026-09-10", season=2026,
+                          espn_player_id="1000") == 4
 
 
 def test_pool_and_roster_disagreement_is_counted_and_roster_wins(crosswalked_db, league_world):
@@ -474,3 +577,81 @@ def test_formatters_render_evidence(crosswalked_db, league_world):
     assert "no observed snapshots" in state.format_timeline([])
     assert "no roster rows" in state.format_roster([])
     assert "no free agents" in state.format_free_agents([])
+
+
+# ------------------------------------------ reconciliation + stamp discipline
+
+
+def test_conflict_counted_when_pool_says_free_agent_but_roster_says_held(
+    crosswalked_db, league_world
+):
+    """The direction that matters most for drop detection — a half-flushed DROP —
+    used to be resolved silently with conflicts=0."""
+    payload, pool = league_world(holdings={"1003": 6})
+    for entry in pool:
+        if entry["id"] == 1003:
+            entry["onTeamId"] = 0          # pool has already flushed the drop
+            entry["status"] = "FREEAGENT"
+    counts = _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    assert counts["conflicts"] == 1
+    assert state.who_held(crosswalked_db, as_of="2026-09-10", season=2026,
+                          espn_player_id="1003") == 6   # mRoster still wins
+
+
+def test_absent_onteamid_is_not_counted_as_a_disagreement(crosswalked_db, league_world):
+    """An entry with no onTeamId asserts nothing; it must not spam the counter."""
+    payload, pool = league_world(holdings={"1003": 6})
+    for entry in pool:
+        entry.pop("onTeamId", None)
+    counts = _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    assert counts["conflicts"] == 0
+
+
+def test_write_stamps_are_validated_like_reads(crosswalked_db, league_world):
+    """A malformed stamp used to write a whole day that no accessor could see:
+    the as-of gate compares dates lexically, so '2026-9-8' <= '2026-09-15' is False."""
+    payload, pool = league_world()
+    for bad in ("2026-9-8", "nonsense!!", None):
+        with pytest.raises((ValueError, TypeError)):
+            state.ingest_player_state(crosswalked_db, pool, retrieved_as_of=bad,
+                                      season=2026, roster={}, scoring_period=3)
+        with pytest.raises((ValueError, TypeError)):
+            state.ingest_league_state(crosswalked_db, payload, retrieved_as_of=bad, season=2026)
+    assert crosswalked_db.execute("SELECT COUNT(*) FROM league_player_state").fetchone()[0] == 0
+
+
+def test_event_timestamps_use_the_local_day_not_utc():
+    """Every other date here is a local calendar day; deriving the event day in
+    UTC stamped evening events a day late (knowable_as_of > retrieved_as_of)."""
+    from datetime import datetime
+
+    local_evening = datetime(2026, 9, 15, 20, 0, 0).astimezone()
+    ms = int(local_evening.timestamp() * 1000)
+    assert state._epoch_ms_to_iso(ms, date_only=True) == "2026-09-15"
+    assert state._epoch_ms_to_iso(ms).startswith("2026-09-15T20:00:00")
+
+
+def test_transaction_knowable_day_matches_the_local_event_day(crosswalked_db):
+    from datetime import datetime
+
+    local_evening = datetime(2026, 9, 15, 20, 0, 0).astimezone()
+    ms = int(local_evening.timestamp() * 1000)
+    rows = state.map_transaction(
+        {"id": "TX9", "teamId": 4, "type": "FREEAGENT", "status": "EXECUTED",
+         "scoringPeriodId": 2, "proposedDate": ms, "processDate": ms,
+         "items": [{"type": "ADD", "playerId": 1001}]},
+        season=2026,
+    )
+    state.ingest_transactions(crosswalked_db, rows, retrieved_as_of="2026-09-15", season=2026)
+    stored = crosswalked_db.execute("SELECT * FROM league_transactions").fetchone()
+    assert stored["knowable_as_of"] == "2026-09-15"
+    assert stored["knowable_as_of"] <= stored["retrieved_as_of"]
+    assert state.get_transactions(crosswalked_db, as_of="2026-09-15", season=2026)
+
+
+def test_activity_trade_names_the_acquiring_team():
+    topic = {"id": "T1", "date": 1788000000000, "messages": [
+        {"messageTypeId": 244, "targetId": 1001, "from": 3, "to": 7},
+    ]}
+    row = state.map_activity_topic(topic, season=2026)[0]
+    assert (row["action"], row["team_id"]) == ("TRADE", 7)

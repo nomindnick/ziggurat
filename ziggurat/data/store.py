@@ -18,6 +18,20 @@ def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
     return conn
 
 
+def open_db(path: str | Path) -> sqlite3.Connection:
+    """Connect AND bring the schema up to date — the safe default for any command.
+
+    ``connect`` alone creates an empty file if none exists and never migrates, so
+    a read against a database written before a newer migration dies with a raw
+    ``no such table``. Commands that only read should still migrate: the cost is
+    nil on an up-to-date database and the alternative is a traceback in the
+    operator's face (item 3.1 audit finding).
+    """
+    conn = connect(path)
+    apply_schema(conn)
+    return conn
+
+
 def _schema_version(conn: sqlite3.Connection) -> int:
     has_meta = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"

@@ -19,10 +19,15 @@ not capture is gone permanently. Two consequences are built in here:
 import logging
 from datetime import datetime, timezone
 
-from ziggurat.data.nfl import base
+from ziggurat.data.asof import normalize_as_of
 from ziggurat.league import source, state
 
 logger = logging.getLogger("ziggurat.league.sync")
+
+# Recorded in league_sync_runs.error when a run was deliberately back-stamped, so
+# format_status can flag that day as fabricated rather than counting it as
+# genuine point-in-time coverage.
+_BACKFILL_MARKER = "BACKFILLED:"
 
 
 def _utc_now() -> str:
@@ -42,15 +47,41 @@ def run_sync(
     espn_s2,
     swid,
     retrieved_as_of,
+    today=None,
     include_transactions: bool = True,
+    allow_shrink: bool = False,
+    allow_backfill: bool = False,
 ) -> dict:
     """Pull and persist one full league-state snapshot. Returns the run summary.
 
     Raises after recording the run when the SNAPSHOT itself fails (so a cron exits
     nonzero and the operator finds out); an optional-part failure downgrades the
     run to ``partial`` instead.
+
+    ``retrieved_as_of`` is validated (not merely truncated) — an unparseable stamp
+    used to write a whole day that no accessor could ever see, because the as-of
+    gate compares date strings lexically and ``'2026-9-8' <= '2026-09-15'`` is
+    False.
+
+    BACK-STAMPING IS REFUSED by default. ESPN only ever serves CURRENT state, so
+    writing it under a past ``retrieved_as_of`` does not recover that day — it
+    fabricates it, stamping today's rosters and ownership percentages as though
+    they were knowable then, and simultaneously erases the day from the gap report
+    that exists to say history is missing. ``today`` is passed in explicitly (no
+    implicit "now" in the package); ``allow_backfill`` overrides, and a forced run
+    is MARKED so ``format_status`` can keep telling the truth about it.
     """
-    stamp = base.iso_date(retrieved_as_of)
+    stamp = normalize_as_of(retrieved_as_of).isoformat()
+    if today is not None:
+        today = normalize_as_of(today).isoformat()
+        if stamp != today and not allow_backfill:
+            raise ValueError(
+                f"refusing to stamp a snapshot {stamp} on a run made {today}: ESPN serves "
+                "only CURRENT league state, so a back-stamped run fabricates history "
+                "rather than recovering it (and hides the gap). Pass --allow-backfill "
+                "if you really mean to write today's state under that date."
+            )
+    backfilled = today is not None and stamp != today
     run_id = state.start_run(conn, season=season, retrieved_as_of=stamp, started_at=_utc_now())
     counts: dict[str, int] = {}
     warnings: list[str] = []
@@ -70,13 +101,24 @@ def run_sync(
         counts.update(state.ingest_league_state(conn, payload, retrieved_as_of=stamp, season=season))
         player_counts = state.ingest_player_state(
             conn, pool, retrieved_as_of=stamp, season=season,
-            roster=roster, scoring_period=scoring_period,
+            roster=roster, scoring_period=scoring_period, allow_shrink=allow_shrink,
         )
         counts["players"] = player_counts["players"]
         counts["conflicts"] = player_counts["conflicts"]
         counts["rostered"] = len(roster)
         counts["scoring_period"] = scoring_period
         conn.commit()
+
+        # The snapshot is safe. A collapsed crosswalk does NOT discard it (gsis_id
+        # is derived and backfillable; the snapshot is not) — it downgrades the run.
+        coverage = player_counts.get("gsis_coverage")
+        if coverage is not None and coverage < state._MIN_GSIS_COVERAGE:
+            warnings.append(
+                f"espn->gsis crosswalk coverage {coverage:.0%} below "
+                f"{state._MIN_GSIS_COVERAGE:.0%} — snapshot written, gsis_id needs backfill"
+            )
+        if backfilled:
+            warnings.append(f"{_BACKFILL_MARKER} snapshot stamped {stamp} on a run made {today}")
     except Exception as exc:  # snapshot failed — the day is lost; make it loud
         state.finish_run(conn, run_id, status="failed", finished_at=_utc_now(),
                          counts=counts, error=f"{type(exc).__name__}: {exc}")
@@ -135,7 +177,8 @@ def format_status(conn, *, season: int, through) -> str:
     days = state.snapshot_days(conn, season=season)
     gaps = state.snapshot_gaps(conn, season=season, through=through)
 
-    lines = [f"league sync status — season {season} (through {base.iso_date(through)})"]
+    lines = [f"league sync status — season {season} "
+             f"(through {normalize_as_of(through).isoformat()})"]
     if last_any is None:
         lines.append("  NEVER RUN — no league history is being captured.")
         return "\n".join(lines)
@@ -156,4 +199,9 @@ def format_status(conn, *, season: int, through) -> str:
         lines.append("  (ESPN serves no historical league state; missing days are unrecoverable.)")
     else:
         lines.append("  MISSING DAYS : none")
+
+    faked = state.backfilled_days(conn, season=season, marker=_BACKFILL_MARKER)
+    if faked:
+        lines.append(f"  BACK-STAMPED : {len(faked)} — {', '.join(faked)}")
+        lines.append("  (these days hold live state written under a past date; NOT point-in-time.)")
     return "\n".join(lines)

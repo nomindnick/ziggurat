@@ -11,6 +11,7 @@ can never be recovered:
     plausible-but-wrong day.
 """
 
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -170,7 +171,7 @@ class _FakeLeague:
 
 def test_fetch_league_state_rejects_a_payload_without_teams():
     with patch.object(source, "_client", return_value=_FakeLeague({"status": {}})):
-        with pytest.raises(RuntimeError, match="no 'teams' key"):
+        with pytest.raises(RuntimeError, match="carries no teams"):
             source.fetch_league_state(league_id=1, season=2026, espn_s2="x", swid="y")
 
 
@@ -259,26 +260,30 @@ def test_cli_sync_status_and_reads(tmp_path, league_world):
     conn.close()
 
     payload, pool = league_world(holdings={"1000": 4}, slots={"1000": 0})
+    # No --as-of: the scheduled path stamps TODAY, which is the only stamp the
+    # sync accepts without --allow-backfill.
+    today = date.today().isoformat()
     patches = list(_patched_sources(payload, pool))
     patches.append(patch("ziggurat.cli.main.load_espn_credentials", return_value=CREDS))
     for p in patches:
         p.start()
     try:
         result = runner.invoke(app, ["league", "sync", "--season", "2026",
-                                     "--as-of", "2026-09-10", "--path", str(db_path)])
+                                     "--path", str(db_path)])
         assert result.exit_code == 0, result.output
         assert "[ok]" in result.output
 
         status = runner.invoke(app, ["league", "status", "--season", "2026",
-                                     "--through", "2026-09-10", "--path", str(db_path)])
+                                     "--through", today, "--path", str(db_path)])
         assert status.exit_code == 0 and "MISSING DAYS : none" in status.output
+        assert "BACK-STAMPED" not in status.output
 
         roster = runner.invoke(app, ["league", "roster", "--team", "4", "--season", "2026",
-                                     "--as-of", "2026-09-10", "--path", str(db_path)])
+                                     "--as-of", today, "--path", str(db_path)])
         assert roster.exit_code == 0 and "QB" in roster.output
 
         fa = runner.invoke(app, ["league", "free-agents", "--season", "2026",
-                                 "--as-of", "2026-09-10", "--limit", "5", "--path", str(db_path)])
+                                 "--as-of", today, "--limit", "5", "--path", str(db_path)])
         assert fa.exit_code == 0 and "%OWN" in fa.output
 
         holdings = runner.invoke(app, ["league", "holdings", "--player-id", "1000",
@@ -294,7 +299,7 @@ def test_cli_sync_surfaces_a_failed_run(tmp_path):
     with patch("ziggurat.cli.main.load_espn_credentials", return_value=CREDS), \
          patch.object(source, "fetch_league_state", side_effect=RuntimeError("cookies expired")):
         result = runner.invoke(app, ["league", "sync", "--season", "2026",
-                                     "--as-of", "2026-09-10", "--path", str(db_path)])
+                                     "--path", str(db_path)])
     assert result.exit_code != 0  # a cron must see a nonzero exit
 
     conn = connect(db_path)
@@ -319,3 +324,144 @@ def test_repo_boundary_fixture_stays_public():
         assert set(entry["player"]["ownership"]) == {
             "percentOwned", "percentStarted", "percentChange",
         }
+
+
+# --------------------------------------- audit fixes: guards on the sync path
+
+
+def test_backfill_is_refused_by_default(crosswalked_db, league_world):
+    """ESPN serves only CURRENT state, so back-stamping fabricates a day rather
+    than recovering it — and silently closes the gap report that exists to say
+    the day is missing."""
+    payload, pool = league_world()
+    patches = _patched_sources(payload, pool)
+    for p in patches:
+        p.start()
+    try:
+        with pytest.raises(ValueError, match="fabricates history"):
+            sync.run_sync(crosswalked_db, season=2026, retrieved_as_of="2026-09-01",
+                          today="2026-09-10", **CREDS)
+    finally:
+        for p in patches:
+            p.stop()
+    assert crosswalked_db.execute("SELECT COUNT(*) FROM league_player_state").fetchone()[0] == 0
+
+
+def test_forced_backfill_is_marked_in_the_status_report(crosswalked_db, league_world):
+    payload, pool = league_world()
+    patches = _patched_sources(payload, pool)
+    for p in patches:
+        p.start()
+    try:
+        summary = sync.run_sync(crosswalked_db, season=2026, retrieved_as_of="2026-09-01",
+                                today="2026-09-10", allow_backfill=True, **CREDS)
+    finally:
+        for p in patches:
+            p.stop()
+    assert summary["status"] == "partial"
+    report = sync.format_status(crosswalked_db, season=2026, through="2026-09-10")
+    assert "BACK-STAMPED : 1 — 2026-09-01" in report
+    assert "NOT point-in-time" in report
+
+
+def test_degraded_pool_fails_the_run_and_keeps_the_stored_day(crosswalked_db, league_world):
+    payload, pool = league_world(holdings={"1000": 4})
+    _run(crosswalked_db, payload, pool, day="2026-09-10")
+
+    patches = [
+        patch.object(source, "fetch_league_state", return_value=payload),
+        patch.object(source, "fetch_player_pool", return_value=[]),   # ESPN 200, empty
+        patch.object(source, "fetch_transactions", return_value=[]),
+        patch.object(source, "fetch_activity", return_value=[]),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with pytest.raises(state.SnapshotCollapse):
+            sync.run_sync(crosswalked_db, season=2026, retrieved_as_of="2026-09-10", **CREDS)
+    finally:
+        for p in patches:
+            p.stop()
+
+    run = state.last_run(crosswalked_db, season=2026, status=None)
+    assert run["status"] == "failed" and "SnapshotCollapse" in run["error"]
+    assert state.who_held(crosswalked_db, as_of="2026-09-10", season=2026,
+                          espn_player_id="1000") == 4
+    assert crosswalked_db.execute(
+        "SELECT COUNT(*) FROM league_player_state WHERE retrieved_as_of='2026-09-10'"
+    ).fetchone()[0] == len(pool)
+
+
+def test_crosswalk_collapse_downgrades_to_partial_but_keeps_the_snapshot(db, league_world):
+    """No players table: gsis_id is derived and backfillable, the snapshot is not."""
+    payload, pool = league_world(holdings={"1000": 4})
+    summary = _run(db, payload, pool)
+    assert summary["status"] == "partial"
+    assert summary["players"] == len(pool)
+    run = state.last_run(db, season=2026, status=None)
+    assert "crosswalk coverage" in run["error"]
+    assert state.who_held(db, as_of="2026-09-10", season=2026, espn_player_id="1000") == 4
+
+
+def test_empty_teams_payload_is_refused_at_the_seam():
+    with patch.object(source, "_client", return_value=_FakeLeague({"teams": []})):
+        with pytest.raises(RuntimeError, match="carries no teams"):
+            source.fetch_league_state(league_id=1, season=2026, espn_s2="x", swid="y")
+
+
+def test_requests_run_under_a_bounded_socket_timeout():
+    """espn_api passes no timeout to requests; an unbounded hang would park the
+    oneshot service forever and silently stop the cadence."""
+    import socket
+
+    seen = {}
+
+    class _Recording(_FakeLeague):
+        def __init__(self):
+            super().__init__({"teams": [{"id": 1}]})
+
+            class _Req:
+                def league_get(self, params=None, headers=None, extend=None):
+                    seen["timeout"] = socket.getdefaulttimeout()
+                    return {"teams": [{"id": 1}]}
+
+            self.espn_request = _Req()
+
+    before = socket.getdefaulttimeout()
+    with patch.object(source, "_client", return_value=_Recording()):
+        source.fetch_league_state(league_id=1, season=2026, espn_s2="x", swid="y")
+    assert seen["timeout"] == source._SOCKET_TIMEOUT
+    assert socket.getdefaulttimeout() == before   # restored, not leaked
+
+
+def test_read_commands_work_on_a_database_predating_migration_005(tmp_path):
+    """CLAUDE.md tells the operator to run `league status` on the sync machine;
+    on any pre-005 database it used to die with a raw sqlite traceback."""
+    from ziggurat.data.store import connect
+    from ziggurat.paths import MIGRATIONS_DIR, SCHEMA_PATH
+
+    db_path = tmp_path / "old.sqlite"
+    conn = connect(db_path)
+    conn.executescript(SCHEMA_PATH.read_text())
+    for migration in sorted(MIGRATIONS_DIR.glob("*.sql"))[:3]:      # -> schema_version 4
+        conn.executescript(migration.read_text())
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')")
+    conn.commit()
+    conn.close()
+
+    for argv in (
+        ["league", "status", "--season", "2026", "--path", str(db_path)],
+        ["league", "free-agents", "--season", "2026", "--as-of", "2026-09-10", "--path", str(db_path)],
+        ["league", "roster", "--team", "1", "--season", "2026", "--as-of", "2026-09-10",
+         "--path", str(db_path)],
+        ["league", "holdings", "--player-id", "1000", "--season", "2026", "--path", str(db_path)],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, f"{argv} -> {result.output}"
+
+
+def test_missing_database_file_does_not_traceback(tmp_path):
+    result = runner.invoke(app, ["league", "status", "--season", "2026",
+                                 "--path", str(tmp_path / "nope.sqlite")])
+    assert result.exit_code == 0
+    assert "NEVER RUN" in result.output
