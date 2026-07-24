@@ -483,3 +483,25 @@ def test_sync_league_binding_cannot_be_bypassed_by_empty_league(cockpit):
             urllib.request.urlopen(req, timeout=10)
         assert ei.value.code == 400
     assert _get(base, "/api/state")["overall_pick"] == 2  # nothing leaked in
+
+
+def test_sync_fix_swaps_the_slot_to_espns_pick(cockpit):
+    # Rehearsal finding: the operator committed one player in the cockpit but
+    # drafted another in ESPN — the conflict banner's one-click repair must
+    # swap the slot to ESPN's version.
+    base, session = cockpit
+    _post(base, "/api/pick", {"player_id": "RB-0"})           # cockpit says RB0
+    _sync_post(base, session, [{"overall": 1, "player": "WR0"}])  # ESPN says WR0
+    sync = _get(base, "/api/state")["sync"]
+    assert sync["conflicts"] and sync["conflicts"][0]["overall"] == 1
+
+    out = _post(base, "/api/sync/fix", {"overall": 1})
+    assert out["ok"] and out["fixed"]["player_id"] == "WR-0"
+    state = _get(base, "/api/state")
+    assert state["picks"][0]["player_id"] == "WR-0"
+    assert state["sync"]["conflicts"] == []
+    assert "RB-0" not in state["taken"]
+
+    # fixing a slot with no recorded conflict is a clean 400
+    code, body = _post_err(base, "/api/sync/fix", {"overall": 5})
+    assert code == 400 and "no sync conflict" in body["error"]

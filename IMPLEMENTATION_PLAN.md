@@ -630,9 +630,22 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > deadlock + cross-room contamination) then a re-audit of the fixes
 > (FIX-MINOR; 3 residuals found and fixed: empty-league bypass — live-proven,
 > anchor-drift blinding the id gate, same-name-twin commits). All fixed with
-> regression tests. Suite 537. REMAINING: end-to-end validation in a live
-> practice draft (userscript in Tampermonkey + cockpit + real room) — that
-> run doubles as the first counted rehearsal. Engine + tooling outcomes of this checkpoint (reachability
+> regression tests. Suite 537.
+>
+> **End-to-end dress rehearsal RUN 2026-07-24 (practice draft, sync live):
+> 142 picks recorded hands-free in ~9 min, zero undos/edits; engine roster
+> shape excellent (K R9/DST R10 divergence play, QB2 deferred to R14).**
+> Three defects found and fixed: (1) BOARD GAP — 45 ESPN-draftable players
+> (deep rookie Ks etc.) missing from the projections board made their picks
+> UNENTERABLE, damming sync at pick 143 of 160 → `load_board` now unions the
+> full ESPN universe as zero-VOR entries (0 missing on the real board);
+> (2) dual-writer UX — with sync live the operator's own-turn commit buttons
+> created cockpit-vs-ESPN conflicts → sync-aware UI ("draft him in ESPN —
+> recorded automatically", quick strip stands down, search stays as guarded
+> fallback) + one-click "Use ESPN's pick" conflict repair (`/api/sync/fix`);
+> (3) D/ST display names unsearchable in ESPN ("HOU D/ST" vs "Texans") →
+> ESPN-search hints on recommendations. Suite 539. Rehearsal 1 of 2 counts
+> once these fixes see one clean re-run. Engine + tooling outcomes of this checkpoint (reachability
 > discount, web cockpit, quick-pick strip) are already landed and audited.
 > **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
 > draft scheduling.

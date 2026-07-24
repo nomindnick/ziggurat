@@ -11,7 +11,7 @@ import pytest
 
 from ziggurat.core.valuation import DEFAULT_ROSTER as ROSTER
 from ziggurat.data.nfl import projections
-from ziggurat.data.nfl.espn_ranks import ingest_espn_ranks
+from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks, ingest_espn_ranks
 from ziggurat.data.store import apply_schema, connect
 from ziggurat.draft.bots import (
     FollowEspnRank,
@@ -294,3 +294,26 @@ def test_thin_board_fails_loud_never_silently_illegal(make_draft_board):
             assert min_to_complete(counts, ROSTER) == 0
             assert counts.get("K", 0) <= 1
             assert counts.get("DST", 0) <= 1
+
+
+def test_load_board_unions_the_full_espn_universe(tmp_path):
+    # Dress-rehearsal finding (2026-07-24): ESPN can draft players the
+    # projections board has never heard of (deep rookie kickers), and an
+    # off-board pick cannot be ENTERED — damming the sync feed. Every
+    # ESPN-universe skill player must be on the board, zero-valued when the
+    # house has no projection for him.
+    conn = _build_board_db(tmp_path / "board.sqlite")
+    board = load_board(conn, as_of="2026-08-01", season=2026)
+    espn = get_espn_draft_ranks(conn, as_of="2026-08-01", season=2026)
+    conn.close()
+
+    ids = {e.player_id for e in board}
+    for r in espn:
+        if r["espn_id"] is not None:
+            assert str(r["espn_id"]) in ids, f"{r['player']} missing from board"
+    # union entries carry zero house value and never a fabricated projection
+    extras = [e for e in board if e.house_points == 0.0 and e.vor == 0.0]
+    assert extras, "expected at least one ESPN-only union entry in the fixture"
+    for e in extras:
+        assert e.position in ("QB", "RB", "WR", "TE", "DST", "K")
+        assert e.espn_overall_rank >= 1

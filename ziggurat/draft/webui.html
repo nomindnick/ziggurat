@@ -175,6 +175,20 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
 let BOARD = [], TAKEN = new Set(), STATE = null;
 let SUGG = [], HI = 0, EDITING = null, POS_TAB = "ALL";
 let QUICK = [];  // rival turn: likely picks; operator turn: the top recs — keys 1-6 commit
+const syncLive = () => !!(STATE && STATE.sync && STATE.sync.active);
+// ESPN's player search knows team NICKNAMES, not our abbr-style D/ST names —
+// "HOU D/ST" is unfindable, "Texans" isn't (rehearsal finding).
+const DST_NICK = {ARI:"Cardinals",ATL:"Falcons",BAL:"Ravens",BUF:"Bills",CAR:"Panthers",
+  CHI:"Bears",CIN:"Bengals",CLE:"Browns",DAL:"Cowboys",DEN:"Broncos",DET:"Lions",
+  GB:"Packers",HOU:"Texans",IND:"Colts",JAX:"Jaguars",KC:"Chiefs",LA:"Rams",
+  LAC:"Chargers",LV:"Raiders",MIA:"Dolphins",MIN:"Vikings",NE:"Patriots",
+  NO:"Saints",NYG:"Giants",NYJ:"Jets",PHI:"Eagles",PIT:"Steelers",SF:"49ers",
+  SEA:"Seahawks",TB:"Buccaneers",TEN:"Titans",WAS:"Commanders"};
+function espnSearchName(e) {
+  if (e.position === "DST") return DST_NICK[e.team] || e.name;
+  const parts = (e.name || "").split(" ");
+  return parts.length > 1 ? parts.slice(1).join(" ") : e.name;  // last name
+}
 const POSITIONS = ["ALL", "RB", "WR", "QB", "TE", "DST", "K"];
 
 async function api(path, body) {
@@ -241,13 +255,24 @@ function renderState(s) {
       s.recs.slice(1, 3).map(a =>
         `<div class="alt">next: <span class="altname">${esc(a.name)}</span> (${esc(a.position)}, score ${a.pick_score})</div>`).join("");
     const bar = rec.querySelector(".takebar");
-    s.recs.slice(0, 3).forEach((cand, i) => {
-      const b = document.createElement("button");
-      b.className = i === 0 ? "primary take1" : "";
-      b.textContent = `${i + 1} · Draft ${cand.name}`;
-      b.onclick = () => commit(cand);
-      bar.appendChild(b);
-    });
+    if (syncLive()) {
+      // Sync records whatever you draft in ESPN — committing here too would
+      // make the cockpit a second writer and manufacture a conflict
+      // (rehearsal finding). Tell the operator where to act instead.
+      const d = document.createElement("div");
+      d.style.cssText = "padding:10px 12px;border-radius:6px;background:var(--mine);font-size:15px";
+      d.innerHTML = `Draft him <b>in ESPN</b> — search “<b>${esc(espnSearchName(r))}</b>”. ` +
+        `The cockpit records it automatically.`;
+      bar.appendChild(d);
+    } else {
+      s.recs.slice(0, 3).forEach((cand, i) => {
+        const b = document.createElement("button");
+        b.className = i === 0 ? "primary take1" : "";
+        b.textContent = `${i + 1} · Draft ${cand.name}`;
+        b.onclick = () => commit(cand);
+        bar.appendChild(b);
+      });
+    }
   }
   $("contin").textContent = (s.contingencies || []).join("  ");
   $("posture").style.display = s.posture ? "block" : "none";
@@ -288,10 +313,25 @@ function renderSync(sync) {
     blk.style.display = "none";
   }
   if (sync && sync.conflicts.length) {
-    const d = document.createElement("div");
-    d.style.cssText = "font-size:12px;color:var(--warn);margin-top:4px";
-    d.textContent = sync.conflicts[sync.conflicts.length - 1];
-    line.appendChild(d);
+    for (const c of sync.conflicts.slice(-3)) {
+      const d = document.createElement("div");
+      d.style.cssText = "font-size:12px;color:var(--warn);margin-top:4px;display:flex;gap:8px;align-items:center";
+      d.append(c.message + " ");
+      const b = document.createElement("button");
+      b.className = "primary";
+      b.style.cssText = "font-size:12px;padding:3px 8px";
+      b.textContent = "Use ESPN's pick";
+      b.onclick = async () => {
+        try {
+          const out = await api("/api/sync/fix", { overall: c.overall });
+          flash(`Pick ${out.overall} fixed → ${out.fixed.name}`, true);
+          await refresh();
+        } catch (e) { flash(e.message, false); }
+        $("q").focus();
+      };
+      d.appendChild(b);
+      line.appendChild(d);
+    }
   }
 }
 function renderQuick(s) {
@@ -301,6 +341,19 @@ function renderQuick(s) {
   // a visible name against ESPN's ticker instead of reproducing it by keyboard.
   const el = $("quick"); el.innerHTML = "";
   if (!s || s.complete) { QUICK = []; return; }
+  if (syncLive()) {
+    // Sync is the writer — manual quick commits would double-enter picks and
+    // manufacture conflicts. The search box stays live as the emergency
+    // fallback (the expected-overall guard protects it).
+    QUICK = [];
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = s.is_operator_turn
+      ? "Your pick — make it in ESPN; the cockpit records it automatically."
+      : "Sync is recording rival picks from the ESPN room automatically.";
+    el.appendChild(hint);
+    return;
+  }
   if (s.is_operator_turn) {
     // your turn: keys 1-3 take the engine's recs (buttons live in the rec panel)
     QUICK = s.recs.slice(0, 3);

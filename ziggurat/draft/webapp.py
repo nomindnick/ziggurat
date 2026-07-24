@@ -137,7 +137,11 @@ class WebCockpit:
     # verify path then dedupes it away — self-healing by design).
     _sync_pending: dict[int, ParsedPick] = field(default_factory=dict, init=False)
     _sync_blocked: tuple[ParsedPick, str] | None = field(default=None, init=False)
-    _sync_conflicts: dict[int, str] = field(default_factory=dict, init=False)
+    # overall -> (display message, the ESPN-side ParsedPick) so the UI can
+    # offer a one-click "use ESPN's pick" repair (rehearsal finding).
+    _sync_conflicts: dict[int, tuple[str, ParsedPick]] = field(
+        default_factory=dict, init=False
+    )
     _sync_received: int = field(default=0, init=False)
     # Epoch: a fresh random id per cockpit RUN. The userscript clears its
     # sent-set whenever the epoch changes, so acceptance never has to be
@@ -338,7 +342,8 @@ class WebCockpit:
             pass
         self._sync_conflicts[pick.overall] = (
             f"pick {pick.overall}: cockpit has {held.name or held.player_id}, "
-            f"ESPN shows {pick.name} — click the pick in the log to fix it"
+            f"ESPN shows {pick.name}",
+            pick,
         )
         while len(self._sync_conflicts) > _MAX_CONFLICTS_SHOWN:
             self._sync_conflicts.pop(next(iter(self._sync_conflicts)))
@@ -463,8 +468,41 @@ class WebCockpit:
                  "reason": blocked[1]}
                 if blocked is not None else None
             ),
-            "conflicts": [self._sync_conflicts[k] for k in sorted(self._sync_conflicts)],
+            "conflicts": [
+                {"overall": k, "message": self._sync_conflicts[k][0]}
+                for k in sorted(self._sync_conflicts)
+            ],
         }
+
+    def sync_fix(self, overall: int) -> dict[str, Any]:
+        """One-click conflict repair: replace the cockpit's pick at ``overall``
+        with what ESPN recorded there, when that resolves confidently. The
+        held (wrong) player is released from ``taken`` for the resolution so
+        the swap is legal. Falls back to a clear error telling the operator to
+        use the edit flow when confidence fails."""
+        with self._lock:
+            entry_conflict = self._sync_conflicts.get(int(overall))
+            if entry_conflict is None:
+                raise CockpitError(f"no sync conflict recorded for pick {overall}")
+            _msg, pick = entry_conflict
+            held = self.session.picks[int(overall) - 1]
+            taken = set(self.session.taken) - {held.player_id}
+            res = resolve_synced_pick(
+                self.resolver, self.session.board, pick, taken=taken
+            )
+            if not res.confident or res.entry is None:
+                raise CockpitError(
+                    f"couldn't auto-fix pick {overall} ({res.reason}) — click "
+                    "the pick in the log and search for the right player"
+                )
+            try:
+                self.session.edit_pick(int(overall), player_id=res.entry.player_id)
+            except Exception as exc:
+                raise CockpitError(str(exc)) from exc
+            self._sync_conflicts.pop(int(overall), None)
+            self._drain_sync()
+            self._recompute()
+            return {"ok": True, "fixed": _entry_json(res.entry), "overall": int(overall)}
 
     def posture_action(self, action: str) -> dict[str, Any]:
         with self._lock:
@@ -609,6 +647,11 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
                         payload.get("overall", 0), str(payload.get("player_id", ""))
                     )
                 )
+            elif url.path == "/api/sync/fix":
+                ov = payload.get("overall")
+                self._run(lambda: cockpit.sync_fix(
+                    ov if type(ov) is int else 0
+                ))
             elif url.path == "/api/autodraft":
                 self._run(cockpit.autodraft)
             elif url.path == "/api/posture":

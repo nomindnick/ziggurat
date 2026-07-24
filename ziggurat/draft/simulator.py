@@ -431,4 +431,38 @@ def load_board(
                 team=team,
             )
         )
+
+    # BOARD COMPLETENESS (dress-rehearsal finding, 2026-07-24): ESPN can draft
+    # players the projections-based board has never heard of (deep rookie
+    # kickers especially — 45 such players on the real 2026 pool). A pick that
+    # is not on the board CANNOT be entered, which dams the sync feed and
+    # manual entry alike. Union the rest of the ESPN universe in as
+    # zero-value entries: enterable, resolvable, rank-ordered after everything
+    # real, and never recommended (vor 0, points 0, deep rank).
+    used_ids = {e.player_id for e in board}
+    tail = 0
+    for r in espn_rows:
+        eid = r["espn_id"]
+        if eid is None or str(eid) in used_ids:
+            continue  # DST rows (team-keyed, already on board) or already present
+        pos = str(r["position"] or "").upper()
+        pos = "DST" if pos in ("D/ST", "DEF") else pos
+        rank = r["overall_rank"]
+        if rank is None:
+            tail += 1
+            rank = _FALLBACK_BASE + len(board) + tail
+        team = r["team"]
+        board.append(
+            BoardEntry(
+                player_id=str(eid),
+                name=r["player"],
+                position=pos,
+                espn_overall_rank=int(rank),
+                house_points=0.0,
+                vor=0.0,
+                team=(base.TEAM_ALIASES.get(str(team).upper(), str(team).upper())
+                      if team else None),
+            )
+        )
+        used_ids.add(str(eid))
     return tuple(board)
