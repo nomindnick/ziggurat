@@ -334,12 +334,23 @@ class WebCockpit:
             held.name and normalize_query(held.name) == normalize_query(pick.name)
         )
         ids_agree = pick.espn_id is not None and held.player_id == pick.espn_id
-        if names_agree or (ids_agree and not pick.name):
+        # Leniency (rehearsal 2 finding): the operator CONFIRMED the held pick,
+        # so verify exists to catch a WRONG PLAYER, not a name variant. If the
+        # held player is among the resolver's own candidates for ESPN's name
+        # ("Kenny Gainwell" -> Kenneth Gainwell via the surname tier), the two
+        # sides agree on identity — no phantom conflict.
+        plausible = False
+        if not names_agree and held.player_id not in (None, ""):
+            try:
+                res = self.resolver.resolve(pick.name)
+                plausible = any(
+                    c.player_id == held.player_id for c in res.candidates
+                )
+            except Exception:
+                plausible = False
+        if names_agree or plausible or (ids_agree and not pick.name):
             self._sync_conflicts.pop(pick.overall, None)
             return
-        if ids_agree and not names_agree:
-            # id says same player, text disagrees — still surface it.
-            pass
         self._sync_conflicts[pick.overall] = (
             f"pick {pick.overall}: cockpit has {held.name or held.player_id}, "
             f"ESPN shows {pick.name}",

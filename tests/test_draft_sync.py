@@ -234,3 +234,47 @@ def test_same_name_twins_block_instead_of_committing_the_elite():
     pick = parse_payload_pick({"overall": 1, "player": "Twin PlayerBUFQB"})
     res = resolve_synced_pick(resolver, board, pick)
     assert not res.confident and "2 different players" in res.reason
+
+
+def test_diminutive_first_name_commits():
+    # Rehearsal 2 (2026-07-24): ESPN "Kenny X" vs the board's "Kenneth X"
+    # is the same person, not drift — the gate must commit.
+    board = (BoardEntry("400", "Kenneth Stonefield", "RB", 60, 80.0, 20.0, "PHI"),)
+    resolver = NameResolver(board)
+    pick = parse_payload_pick({"overall": 1, "player": "Kenny StonefieldPHIRB"})
+    res = resolve_synced_pick(resolver, board, pick)
+    assert res.confident and res.entry.player_id == "400"
+
+
+def test_prefix_diminutives_commit_both_directions():
+    board = (BoardEntry("401", "Christopher Wexley", "TE", 70, 70.0, 10.0, "DEN"),)
+    resolver = NameResolver(board)
+    pick = parse_payload_pick({"overall": 1, "player": "Chris WexleyDENTE"})
+    assert resolve_synced_pick(resolver, board, pick).confident
+
+
+def test_pure_nickname_still_blocks():
+    # "Hollywood"-class pure nicknames are NOT diminutives — refuse, confirm.
+    board = (BoardEntry("402", "Marquise Vale", "WR", 40, 90.0, 30.0, "KC"),)
+    resolver = NameResolver(board)
+    pick = parse_payload_pick({"overall": 1, "player": "Hollywood ValeKCWR"})
+    assert not resolve_synced_pick(resolver, board, pick).confident
+
+
+def test_diminutive_leeway_never_bridges_different_surnames():
+    board = (BoardEntry("403", "Kenneth Marsh", "RB", 45, 85.0, 25.0, "PHI"),)
+    resolver = NameResolver(board)
+    pick = parse_payload_pick({"overall": 1, "player": "Kenny MarlowPHIRB"})
+    assert not resolve_synced_pick(resolver, board, pick).confident
+
+
+def test_diminutive_twins_still_block():
+    # Two entries both passing the gate (Kenny/Kenneth twins) must refuse.
+    board = (
+        BoardEntry("404", "Kenneth Dunmore", "RB", 45, 85.0, 25.0, "PHI"),
+        BoardEntry("405", "Kenny Dunmore", "RB", 200, 20.0, 1.0, "PHI"),
+    )
+    resolver = NameResolver(board)
+    pick = parse_payload_pick({"overall": 1, "player": "Kenny DunmorePHIRB"})
+    res = resolve_synced_pick(resolver, board, pick)
+    assert not res.confident and "different players" in res.reason

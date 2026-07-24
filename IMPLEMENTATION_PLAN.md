@@ -645,7 +645,20 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > fallback) + one-click "Use ESPN's pick" conflict repair (`/api/sync/fix`);
 > (3) D/ST display names unsearchable in ESPN ("HOU D/ST" vs "Texans") →
 > ESPN-search hints on recommendations. Suite 539. Rehearsal 1 of 2 counts
-> once these fixes see one clean re-run. Engine + tooling outcomes of this checkpoint (reachability
+> once these fixes see one clean re-run.
+>
+> **Re-run 2026-07-24 — ALL 160 PICKS recorded end-to-end; COUNTS as
+> rehearsal 1 of 2.** One finding: ESPN display-name diminutives ("Kenny
+> Gainwell" vs the board's nflverse "Kenneth Gainwell") blocked the commit
+> (correct refuse), but after the operator's correct manual entry the sync
+> retry raised a PHANTOM conflict on a right pick, and "Use ESPN's pick"
+> couldn't auto-fix an unresolvable nickname. Fixed both layers: the commit
+> gate's name identity now accepts diminutive first names (curated pairs +
+> a y/ie-stripped >=3-char prefix rule; surnames still exact; twins still
+> block; pure nicknames like "Hollywood" still refuse), and the verify path
+> accepts a held pick when it appears among the resolver's candidates for
+> ESPN's name (verify catches WRONG PLAYERS, not name variants). Suite 545.
+> Rehearsal 2 of 2 remains — ideally on the draft-day machine. Engine + tooling outcomes of this checkpoint (reachability
 > discount, web cockpit, quick-pick strip) are already landed and audited.
 > **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
 > draft scheduling.

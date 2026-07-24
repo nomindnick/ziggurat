@@ -505,3 +505,32 @@ def test_sync_fix_swaps_the_slot_to_espns_pick(cockpit):
     # fixing a slot with no recorded conflict is a clean 400
     code, body = _post_err(base, "/api/sync/fix", {"overall": 5})
     assert code == 400 and "no sync conflict" in body["error"]
+
+
+def test_verify_accepts_a_diminutive_variant_without_phantom_conflict(tmp_path, make_draft_board):
+    # Rehearsal 2: operator manually entered the (correct) board player after
+    # a nickname-variant pick blocked; sync's retry then flagged a phantom
+    # conflict on a RIGHT pick. Verify must accept when the held player is
+    # among the resolver's candidates for ESPN's name.
+    from ziggurat.draft.bots import BoardEntry
+    from ziggurat.draft.webapp import WebCockpit
+
+    board = make_draft_board() + (
+        BoardEntry("kg-1", "Kenneth Stonefield", "RB", 900, 5.0, 0.0, "PHI"),
+    )
+    session = DraftSession.start(
+        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "v.jsonl", rollouts=8,
+    )
+    cockpit = WebCockpit(session=session)
+    cockpit.pick("kg-1")  # operator's (correct) manual entry at overall 1
+    out = cockpit.sync_apply(
+        {"league": "1", "picks": [{"overall": 1, "player": "Kenny StonefieldPHIRB"}]}
+    )
+    assert out["conflicts"] == 0
+    assert cockpit._sync_state()["conflicts"] == []
+    # a genuinely DIFFERENT player at that slot still conflicts
+    out = cockpit.sync_apply(
+        {"league": "1", "picks": [{"overall": 1, "player": "Totally OtherPHIRB"}]}
+    )
+    assert out["conflicts"] == 1

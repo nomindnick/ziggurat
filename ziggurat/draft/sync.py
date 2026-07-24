@@ -191,6 +191,21 @@ def _consistent(entry: BoardEntry, pick: ParsedPick) -> bool:
 
 _NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
 
+# Curated diminutive pairs the prefix rule below can't derive (rehearsal 2,
+# 2026-07-24: ESPN "Kenny Gainwell" vs the board's nflverse "Kenneth
+# Gainwell"). Both directions are checked; pure nicknames (Hollywood, Tank,
+# Bucky) are deliberately ABSENT — those still block for a human confirm.
+_DIMINUTIVES = frozenset(
+    frozenset(p) for p in [
+        ("mike", "michael"), ("steve", "stephen"), ("steve", "steven"),
+        ("jim", "james"), ("jimmy", "james"), ("drew", "andrew"),
+        ("jake", "jacob"), ("bob", "robert"), ("bobby", "robert"),
+        ("bill", "william"), ("billy", "william"), ("ted", "theodore"),
+        ("tony", "anthony"), ("hank", "henry"), ("chuck", "charles"),
+        ("nate", "nathaniel"), ("nate", "nathan"), ("zeke", "ezekiel"),
+    ]
+)
+
 
 def _core_name(s: str | None) -> str:
     """Punctuation/accent/generational-suffix-blind canonical name form."""
@@ -199,14 +214,46 @@ def _core_name(s: str | None) -> str:
     return " ".join(t for t in normalize_query(s).split() if t not in _NAME_SUFFIXES)
 
 
+def _first_compatible(a: str, b: str) -> bool:
+    """First-name identity up to common diminutives: exact, a curated pair,
+    or a >=3-char prefix relationship after stripping a trailing y/ie
+    ("kenny"->"kenn" prefixes "kenneth"; "chris" prefixes "christopher")."""
+    if a == b:
+        return True
+    if frozenset((a, b)) in _DIMINUTIVES:
+        return True
+    def stem(t: str) -> str:
+        if t.endswith("ie"):
+            return t[:-2]
+        if t.endswith("y"):
+            return t[:-1]
+        return t
+    sa, sb = stem(a), stem(b)
+    shorter, longer = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
+    return len(shorter) >= 3 and longer.startswith(shorter)
+
+
 def _same_name(a: str | None, b: str | None) -> bool:
     """The commit-gate name identity: 'Marvin Harrison Jr.' == 'Marvin
-    Harrison', "Ja'Marr" == "JaMarr", but 'Dylan Stone' != 'Aaron Stone'.
-    Nickname drift (ESPN 'Hollywood Brown' vs board 'Marquise Brown')
+    Harrison', "Ja'Marr" == "JaMarr", 'Kenny Gainwell' == 'Kenneth Gainwell'
+    (diminutive first names), but 'Dylan Stone' != 'Aaron Stone'. Pure
+    nickname drift (ESPN 'Hollywood Brown' vs board 'Marquise Brown')
     deliberately FAILS — that pick blocks for a one-click confirm rather than
-    risking a guess."""
+    risking a guess. Same-surname collisions stay safe: the resolution
+    ladder's twin check blocks whenever more than one entry passes the gate."""
     ca, cb = _core_name(a), _core_name(b)
-    return ca != "" and ca == cb
+    if ca == "" or cb == "":
+        return False
+    if ca == cb:
+        return True
+    ta, tb = ca.split(), cb.split()
+    if len(ta) < 2 or len(tb) < 2:
+        return False
+    # surname (and any middle tokens) must match exactly; only the FIRST name
+    # gets diminutive leeway.
+    if ta[1:] != tb[1:]:
+        return False
+    return _first_compatible(ta[0], tb[0])
 
 
 def _entry_matches_pick(entry: BoardEntry, pick: ParsedPick) -> bool:
