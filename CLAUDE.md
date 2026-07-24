@@ -124,12 +124,23 @@ Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins 
   `intel/research/tui-2.4-recon.md`. Suite green (460). Rich REPL vs Textual
   and rapidfuzz deliberately deferred to Checkpoint-2 rehearsal evidence.
 
-Next: **Checkpoint 2 draft dress rehearsals** (two full-speed runs under a
-real 60-s clock; strategy-from-slot once ESPN schedules the draft), then
-Phase 3 in-season operations. Calendar anchors:
-draft expected mid-to-late August 2026, still unscheduled (monitor ESPN —
-2 of 10 seats still invite-pending as of 2026-07-21; re-snapshot the room near
-draft day); NFL Week 1 ~Sept 10 (Phase 3 must precede it).
+**Checkpoint 2 — partially held 2026-07-24, remainder DEFERRED to a
+pre-draft-day gate (operator decision).** Rehearsals surfaced and fixed two
+structural findings: the engine's lineup-reachability discount (bench QB/TE
+stacking — the 2.2 tournament metric was blind to bench value) and the burst
+pick-entry problem (Rich REPL → `ziggurat draft-web` live-search web cockpit →
+quick-pick strip; transcription reframed as one-press verification). ESPN
+live-sync spike: NEGATIVE — REST views freeze during live drafts and flush
+atomically at completion (draft auto-import works post-draft; the draft-room
+PAGE renders picks live, so DOM-scrape sync is the open candidate — testable
+in free mock lobbies). Remaining before draft day: two clean full-speed
+rehearsals, strategy-from-slot once ESPN schedules, near-day room re-snapshot
++ board refresh. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
+
+Next: **Phase 3 in-season operations** (begins now — hard deadline ~NFL Week 1,
+~Sept 10; weeks 1–3 are the richest waiver season). Calendar anchors: draft
+expected mid-to-late August 2026, still unscheduled (monitor ESPN — 2 of 10
+seats still invite-pending as of 2026-07-21).
 
 Update this section whenever a phase or checkpoint closes.
 

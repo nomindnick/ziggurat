@@ -594,6 +594,22 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > grading), and a scratch test league is the ideal rehearsal venue — real
 > ESPN draft room, real 60 s clock, cockpit alongside. Full findings:
 > `intel/research/espn-live-draft-sync-spike.md`.
+>
+> **DEFERRED (operator decision, 2026-07-24).** The league's real draft is
+> still unscheduled and the operator is not maintaining a test league, so the
+> checkpoint's remaining items move to a PRE-DRAFT-DAY gate rather than
+> blocking now: (1) two clean full-speed rehearsals (public mock lobbies;
+> focus = operator flow management, input via the quick-pick strip),
+> (2) strategy-from-slot the moment ESPN schedules the draft, (3) near draft
+> day: re-snapshot the room, refresh the board, re-verify on the draft-day
+> machine. Candidate follow-up before those rehearsals: DOM-scrape sync — the
+> draft-room PAGE renders picks live even though the REST API doesn't; a
+> userscript MutationObserver → authenticated cockpit endpoint would automate
+> rival-pick entry and IS testable in free public mock lobbies (unlike the
+> API spike). Engine + tooling outcomes of this checkpoint (reachability
+> discount, web cockpit, quick-pick strip) are already landed and audited.
+> **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
+> draft scheduling.
 
 ---
 
