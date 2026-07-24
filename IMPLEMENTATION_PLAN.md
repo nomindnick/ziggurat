@@ -602,11 +602,17 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > focus = operator flow management, input via the quick-pick strip),
 > (2) strategy-from-slot the moment ESPN schedules the draft, (3) near draft
 > day: re-snapshot the room, refresh the board, re-verify on the draft-day
-> machine. Candidate follow-up before those rehearsals: DOM-scrape sync — the
-> draft-room PAGE renders picks live even though the REST API doesn't; a
-> userscript MutationObserver → authenticated cockpit endpoint would automate
-> rival-pick entry and IS testable in free public mock lobbies (unlike the
-> API spike). Engine + tooling outcomes of this checkpoint (reachability
+> machine. Follow-up before those rehearsals: DOM-scrape sync — **VALIDATED live
+> 2026-07-24** in a league-specific ESPN practice draft (real draft room, the
+> real league's settings, vs autos, repeatable on demand from the mock-draft
+> lobby): a MutationObserver on the Pick History panel captured 16 consecutive
+> autopicks at ~1.5 s cadence, zero misses, correct player + drafting team.
+> Constraint: rows render only while the Pick History tab is active, but
+> re-activation re-renders ALL rows, so a dedupe-by-pick-number harvester
+> back-fills anything missed — flipping tabs pauses sync, never loses it.
+> Selector spec + protocol in `intel/research/espn-live-draft-sync-spike.md`
+> (addendum). Next build: the userscript + authenticated cockpit sync
+> endpoint, then an end-to-end mock-lobby rehearsal. Engine + tooling outcomes of this checkpoint (reachability
 > discount, web cockpit, quick-pick strip) are already landed and audited.
 > **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
 > draft scheduling.
