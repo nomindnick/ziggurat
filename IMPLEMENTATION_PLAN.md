@@ -528,7 +528,30 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 ### ✦ Checkpoint 2: Draft dress rehearsal (gate for draft day)
 At least two full-speed rehearsals against the sim under a real 60-second clock — operator at the keyboard, tool recommending, picks entered by hand. Fix what breaks; rehearse again if the fixes were structural. Also: strategy selection from the actual draft slot once the league schedules the draft.
 **Checkpoint notes:**
-> _[To be completed]_
+> _In progress._ **Board refreshed 2026-07-24** (projections + ESPN board at
+> `retrieved_as_of` 2026-07-24; the pull tripped the espn_ranks drift tripwire on
+> ONE sparse row — ESPN ships the odd fringe player with only an ELIMINATION
+> block — guard moved to snapshot-level coverage, commit c5b800c).
+>
+> **Rehearsal 1 held 2026-07-24** (slot 5, sim rivals via `a`, no clock — a
+> mechanics blitz: 160 picks in ~7 min, zero undos/edits, resolver clean). It
+> exposed a REAL engine defect (operator follows rec #1 blindly, so Rule 6
+> carries everything): the additive score used FULL VOR for lineup-unreachable
+> picks → QB2 in R7 and QB3 in R13 of a 1-QB league. The 2.3 tournament could
+> not see it: its starting-lineup metric scores ALL bench picks zero. **Fix:**
+> lineup-reachability fraction on positive score components (QB .25, RB/WR .60,
+> TE .50, K/DST 0; 1.0 while startable incl. open flex), plus a plain-language
+> injury-insurance reason. Replay: R7 flips to the open WR2 starter, Burrow
+> demoted with the reason displayed. Post-fix tournament (10 slots, n=40 eng /
+> 300 base, R=64): all slots positive, worst +28.1 vs FollowVor / +146.9 vs
+> FollowESPN (means; house-projected, self-graded as before). Adversarial audit:
+> CLEAN (determinism/replay, legality, K/DST play, TUI contract all verified;
+> 9 findings, none a defect). Known residual: final-round picks still run into
+> the QB=3/TE=3 caps (bench-blind metric can't grade the tail; Phase 4 grades
+> realized). Rehearsal 1 does NOT count toward the two-rehearsal gate (no
+> clock + structural fix) — next: two timed rehearsals on the fixed engine,
+> one with a mid-draft kill + `--resume`; strategy-from-slot still blocked on
+> ESPN scheduling the draft (2 seats invite-pending as of 2026-07-21).
 
 ---
 

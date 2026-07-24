@@ -10,13 +10,17 @@ a :class:`~ziggurat.draft.bots.Picker` that scores every legal, under-cap,
 window-allowed candidate by an **additive, one-ply, survival-timed VONA score in
 VOR-point units** (D1)::
 
-    pick_score(p) = vor(p)                                    # value  (from the 2.1 board, Rule 2)
+    pick_score(p) = frac * vor(p)                             # value  (from the 2.1 board, Rule 2)
                   + b_need * need_fill(p, round)              # positional need (round-conditioned = the archetype knob)
-                  + b_vona * urgency(pos)                     # board state: survival-timed scarcity
-                  + b_risk * risk_sign(round) * dispersion(pos)  # floor-early / ceiling-late
+                  + frac * b_vona * urgency(pos)              # board state: survival-timed scarcity
+                  + frac * b_risk * risk_sign(round) * dispersion(pos)  # floor-early / ceiling-late
 
 with ``urgency(pos) = max(0, VONA(pos)) * (1 - S_next(best_now(pos)))`` where
-``VONA(pos) = vor(best_now(pos)) - E[best available VOR at pos at your next pick]``.
+``VONA(pos) = vor(best_now(pos)) - E[best available VOR at pos at your next pick]``,
+and ``frac`` the LINEUP-REACHABILITY fraction (Checkpoint-2 fix, 2026-07-24):
+1.0 while the candidate can still reach the lineup, else the position's
+``_BENCH_VALUE_FRACTION`` insurance share — applied only to POSITIVE components
+(a discount must never make a player score better).
 
 NO SCORING CONSTANT enters here (Rule 2): ``vor`` comes from ``valuation.py`` →
 ``scoring.py``. The only numeric priors the engine introduces are strategy/room
@@ -85,6 +89,24 @@ POSITIONAL_DISPERSION_PRIOR: Mapping[str, float] = MappingProxyType(
 # ("0 for a position already full" — D1). Small, tunable.
 _DEPTH_BASE = 0.35
 _DEPTH_DECAY = 0.5
+
+# Lineup-reachability discount (Checkpoint-2 rehearsal-1 finding, 2026-07-24).
+# VOR is season points over replacement, but points only score from a LINEUP
+# slot: once a candidate's position is lineup-saturated (dedicated starters
+# filled AND no open flex he's eligible for), his VOR is realized only through
+# a starter injury or a trade. The rehearsal exposed the failure this causes at
+# full VOR: QB2 in round 7 and QB3 in round 13 of a 1-QB league (the item-2.2
+# tournament could not catch it — its starting-lineup metric scores ALL bench
+# picks zero, so it had no gradient between a useful bench and a dead one).
+# Flex-eligible bench (RB/WR/TE) keeps more: bye-week and injury churn route
+# them into the lineup routinely. K/DST keep nothing — a second is never worth
+# a roster slot (the legality layer already blocks it; 0.0 is defense in depth).
+_BENCH_VALUE_FRACTION: Mapping[str, float] = MappingProxyType(
+    {"QB": 0.25, "RB": 0.60, "WR": 0.60, "TE": 0.50, "K": 0.0, "DST": 0.0}
+)
+# Below this fraction the discount is structural (the player can NEVER start
+# behind a healthy starter), so the recommendation says so out loud (Rule 6).
+_INSURANCE_NOTE_MAX_FRACTION = 0.5
 
 # risk_sign(round) schedule (design Part IV): floor-early / ceiling-late.
 #  * rounds <= 3   -> -1.0  (penalize downside dispersion; an early bust is
@@ -274,20 +296,35 @@ class PickRec:
 # --------------------------------------------------------------- need / dispersion
 
 
-def _base_need(pos: str, counts: Mapping[str, int], roster: RosterStructure) -> float:
-    """need_fill BEFORE the round schedule: 1.0 for an open starter/flex slot, a
-    fast-decaying weight for legal depth, ~0 once a position is full (D1)."""
-    have = counts.get(pos, 0)
-    if have < roster.starters.get(pos, 0):
-        return 1.0  # fills an open dedicated starter
+def _startable_now(pos: str, counts: Mapping[str, int], roster: RosterStructure) -> bool:
+    """True when a ``pos`` pick can still reach the lineup: an open dedicated
+    starter slot, or flex-eligibility with the flex not yet covered by surplus."""
+    if counts.get(pos, 0) < roster.starters.get(pos, 0):
+        return True
     if pos in roster.flex_positions:
         surplus = sum(
             max(0, counts.get(p, 0) - roster.starters.get(p, 0)) for p in roster.flex_positions
         )
         if surplus < roster.flex_slots:
-            return 1.0  # fills the open flex, and this position is flex-eligible
-    beyond = max(0, have - roster.starters.get(pos, 0))
+            return True
+    return False
+
+
+def _base_need(pos: str, counts: Mapping[str, int], roster: RosterStructure) -> float:
+    """need_fill BEFORE the round schedule: 1.0 for an open starter/flex slot, a
+    fast-decaying weight for legal depth, ~0 once a position is full (D1)."""
+    if _startable_now(pos, counts, roster):
+        return 1.0
+    beyond = max(0, counts.get(pos, 0) - roster.starters.get(pos, 0))
     return _DEPTH_BASE * (_DEPTH_DECAY ** beyond)
+
+
+def _value_fraction(pos: str, counts: Mapping[str, int], roster: RosterStructure) -> float:
+    """Share of a candidate's lineup-points value the roster can still realize:
+    1.0 while he can reach the lineup, else the position's insurance fraction."""
+    if _startable_now(pos, counts, roster):
+        return 1.0
+    return _BENCH_VALUE_FRACTION.get(pos, 0.5)
 
 
 def _need_fill(
@@ -518,7 +555,18 @@ class PickEngine:
             need = self.b_need * _need_fill(pos, ctx.round, counts, ctx.roster, self.need_schedule)
             urg = self.b_vona * urgency.get(pos, 0.0)
             rk = self.b_risk * risk_sign(ctx.round) * _dispersion(pos)
-            score = c.vor + need + urg + rk
+            # Lineup-reachability discount: VOR, urgency, and the late-round
+            # ceiling bonus all argue in lineup points, so a candidate who cannot
+            # reach the lineup keeps only his insurance fraction of the POSITIVE
+            # parts. Negative parts are never shrunk — a discount must not make
+            # a player score BETTER.
+            frac = _value_fraction(pos, counts, ctx.roster)
+            score = (
+                (c.vor * frac if c.vor > 0 else c.vor)
+                + need
+                + urg * frac
+                + (rk * frac if rk > 0 else rk)
+            )
             scored.append((score, c, urgency.get(pos, 0.0), vona_by_pos.get(pos, 0.0)))
 
         # Tie-break total order (D2): higher pick_score, then higher vor, then lower
@@ -594,6 +642,14 @@ class PickEngine:
         if surv:
             reasons.append(surv)
         reasons.append(need_note)
+        # Rule 6: when the score was structurally discounted (a backup at a
+        # position that can never flex into the lineup), say so in plain words.
+        frac = _value_fraction(pos, counts, ctx.roster)
+        if frac <= _INSURANCE_NOTE_MAX_FRACTION and pos not in ctx.roster.flex_positions:
+            reasons.append(
+                f"a backup {pos} can't enter your lineup while your starter is "
+                f"healthy, so his value here is counted as injury insurance only"
+            )
         reasons.append(risk_note)
         if not reasons:  # defensive — reasons must never be empty (Rule 6)
             reasons.append(f"best available value at {pos}")

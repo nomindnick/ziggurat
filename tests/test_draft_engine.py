@@ -382,3 +382,74 @@ def test_engine_rollout_knobs_thread_into_default_provider(make_draft_board):
     assert seen.get("rollouts") == 16
     assert seen.get("kappa") == 1.0
     assert seen.get("priors") is priors
+
+
+# ------------------------------------------- lineup-reachability discount (C2)
+
+
+def _saturated_own():
+    """QB1 + RB2 + WR2 + TE2: every dedicated starter filled, flex covered by
+    the TE surplus — any further QB/RB/WR/TE pick is pure bench."""
+    return [
+        _entry("q1", "QB", 1, 50.0), _entry("r1", "RB", 2, 60.0),
+        _entry("r2", "RB", 3, 55.0), _entry("w1", "WR", 4, 45.0),
+        _entry("w2", "WR", 5, 40.0), _entry("t1", "TE", 6, 35.0),
+        _entry("t2", "TE", 7, 20.0),
+    ]
+
+
+def test_bench_qb_discounted_below_bench_rb():
+    # Rehearsal-1 finding (2026-07-24): a high-VOR backup QB in a 1-QB league
+    # must NOT outscore a moderate bench RB — the QB can never reach the lineup.
+    board = [_entry("qb2", "QB", 10, 35.0), _entry("rb3", "RB", 30, 19.0)]
+    ctx = _mid_draft_ctx(board, _saturated_own(), round_num=7, overall_pick=65)
+    eng = PickEngine(b_vona=0.0, b_risk=0.0, survival=StubSurvival())
+    recs = eng.recommend(ctx, top=2)
+    assert recs[0].position == "RB", (
+        "bench QB outscored bench RB — lineup-reachability discount not applied"
+    )
+
+
+def test_negative_vor_is_never_shrunk_by_the_discount():
+    # frac applies only to POSITIVE value: a bench QB with vor=-10 keeps the
+    # full -10 (shrinking it would make a WORSE player score better).
+    # NOTE: this pin is identical with the discount absent — it discriminates
+    # only against the shrink-negatives-too variant; the sibling tests catch a
+    # full revert (audit 2026-07-24).
+    board = [_entry("qb2", "QB", 10, -10.0)]
+    ctx = _mid_draft_ctx(board, _saturated_own(), round_num=7, overall_pick=65)
+    eng = PickEngine(b_vona=0.0, b_risk=0.0, survival=StubSurvival())
+    rec = eng.recommend(ctx, top=1)[0]
+    assert rec.pick_score == pytest.approx(-10.0 + 25.0 * 0.35)
+
+
+def test_positive_bench_qb_vor_keeps_only_the_insurance_fraction():
+    board = [_entry("qb2", "QB", 10, 40.0)]
+    ctx = _mid_draft_ctx(board, _saturated_own(), round_num=7, overall_pick=65)
+    eng = PickEngine(b_vona=0.0, b_risk=0.0, survival=StubSurvival())
+    rec = eng.recommend(ctx, top=1)[0]
+    assert rec.pick_score == pytest.approx(40.0 * 0.25 + 25.0 * 0.35)
+
+
+def test_flex_eligible_te_with_open_flex_keeps_full_value():
+    # TE2 while the flex is OPEN is startable — no discount. Own roster: all
+    # dedicated starters filled but zero surplus, so the flex slot is open.
+    own = [
+        _entry("q1", "QB", 1, 50.0), _entry("r1", "RB", 2, 60.0),
+        _entry("r2", "RB", 3, 55.0), _entry("w1", "WR", 4, 45.0),
+        _entry("w2", "WR", 5, 40.0), _entry("t1", "TE", 6, 35.0),
+    ]
+    board = [_entry("te2", "TE", 10, 30.0)]
+    ctx = _mid_draft_ctx(board, own, round_num=7, overall_pick=65)
+    eng = PickEngine(b_vona=0.0, b_risk=0.0, survival=StubSurvival())
+    rec = eng.recommend(ctx, top=1)[0]
+    assert rec.pick_score == pytest.approx(30.0 + 25.0)  # full vor + open-flex need
+
+
+def test_bench_qb_reason_names_the_insurance_discount():
+    # Rule 6: when a backup QB IS the recommendation, the discount is said aloud.
+    board = [_entry("qb2", "QB", 10, 35.0)]
+    ctx = _mid_draft_ctx(board, _saturated_own(), round_num=7, overall_pick=65)
+    eng = PickEngine(b_vona=0.0, b_risk=0.0, survival=StubSurvival())
+    rec = eng.recommend(ctx, top=1)[0]
+    assert any("injury insurance" in r for r in rec.reasons)
