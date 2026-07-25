@@ -835,11 +835,686 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > transaction/activity mappers follow espn_api's parsers and remain
 > **unverified against a non-empty feed** until real transactions exist.
 
+### 3.1b [Build] NFL data refresh cadence
+**Inserted 2026-07-24 by the 3.2 recon workflow** (numbered `3.1b` rather than
+renumbering 3.2–3.7, which are cross-referenced from CLAUDE.md and throughout this plan).
+
+**Why this exists.** Recon for 3.2 probed the live DB and found **14 empty tables** —
+`schedules`, `weekly_stats`, `injuries`, `depth_charts`, `snap_counts`, `team_defense`,
+`game_odds`, `game_weather`, `adp_rankings`, `ngs_*`. The 1.4/1.5 **ingesters exist and
+are tested**; what does not exist is any way to *run* them on a schedule:
+
+- **No CLI command exists for any NFL ingestion.** `ziggurat/cli/main.py` exposes `db`,
+  `intel`, `mock-draft`, `draft-board`, `draft-web`, `league` — and nothing else. The
+  `pull_*` functions are reachable only from tests and ad-hoc Python.
+- **`pull_projections` is called from nowhere in production code**
+  (`ziggurat/data/nfl/projections.py:256`). The only systemd unit runs `ziggurat league sync`.
+
+The failure mode is silent and Rule-1-invisible: in November, 3.2 would price Week 10 off
+a July projection snapshot with a perfectly valid `knowable_as_of`. Nothing complains —
+the data is not leaked, merely stale. This sits **upstream of 3.2, 3.3, and 3.5**: the
+candidate generator reads `weekly_stats`/`snap_counts` for usage deltas, and the streaming
+ranker reads `game_odds`/`game_weather`. All three would be built against empty tables.
+
+**Goal:** A `ziggurat ingest` CLI over the existing 1.4/1.5 `pull_*` functions, wired into
+the existing systemd cadence with per-source frequencies (projections weekly; injuries and
+depth charts daily in-season; `weekly_stats`/`snap_counts`/`team_defense` after games
+complete; `schedules`/`players` seasonally), a run log and gap report mirroring
+`league_sync_runs`, and a one-time population of the empty tables. Carries forward the 3.1
+lesson explicitly: **a degraded or empty upstream pull must never destroy good data** —
+floors checked before any delete, and network calls bounded by timeouts so a hung pull
+cannot silently kill the cadence under `Type=oneshot`.
+
+**Done when:** `weekly_stats`, `injuries`, `depth_charts`, and `schedules` are populated
+for the current season; a scheduled run refreshes them with no manual step; and a status
+command reports per-source staleness (last successful pull per source) so 3.2's staleness
+banner has a real source to read.
+
+**Done-when amendment (2026-07-24, build step).** `depth_charts` is **struck from the
+done-when and the cadence, and recorded as BLOCKED** — see the "what the build found"
+section below. It is a table + accessor rewrite, not a column remap, and 3.2 already
+deferred its only consumer. `weekly_stats` and `injuries` were also broken against live
+upstream and were fixed here. Note that `injuries` and `weekly_stats` **cannot** be
+populated for 2026 at all before ~Sept 10 (upstream 404 / client-side season guard), so
+the population half of the done-when is calendar-bound for those two; `schedules` is
+populatable today.
+
+**Update — mechanism built & tested 2026-07-24; population is the operator's step.**
+> **The build found three of the fourteen 1.4/1.5 ingesters ALREADY BROKEN against live
+> upstream data while the suite was green** (624 passed). Independently re-verified before
+> touching anything: `pull_injuries` raised `ValueError: missing required columns
+> ['date_modified']` (nflverse dropped the column from the 2025+ release — 2024 has it,
+> 2025 does not); `pull_depth_charts` raised for every season (upstream replaced the weekly
+> table with a **daily snapshot panel** keyed on a `dt` timestamp, no `season`, no `week`,
+> IDP rows included — 554,215 × 12 for 2025); `pull_weekly_stats` raised
+> `IntegrityError: NOT NULL constraint failed: weekly_stats.player_id` (22 all-zero
+> placeholder rows in `stats_player_week_2025`). **The fixtures under `tests/fixtures/nfl/`
+> are frozen 2023 frames, which is the only reason `require_columns` — designed to fail
+> loud — never fired.** "The ingesters exist and are tested" was false in practice.
+>
+> **Landed:**
+> - **`ziggurat/data/nfl/refresh.py`** — the `league/sync.py` analogue: a frozen
+>   `SourceSpec` registry (15 sources) carrying group, phases, interval, `perishable`,
+>   `needs_schedules`, `needs_credentials`, `replaces_partition` and `blocked`; `decide` /
+>   `plan_ingest` (pure, no network — `--dry-run` and the real run share it so they cannot
+>   disagree); `run_ingest`; the run log; and `source_freshness` / `format_status`.
+> - **Migration `006_nfl_ingest_runs.sql`** (`schema_version` 6), one row per source per
+>   run. Deliberately NOT `league_sync_runs`: `state.last_run` filters on season only with
+>   no source column, so the first NFL row there would silently become "when did the league
+>   last sync" — a test guards that.
+> - **`ziggurat ingest {run,status,sources}`** with `--group / --source / --season /
+>   --as-of / --dry-run / --allow-shrink / --allow-backfill`. Exits nonzero on a failed
+>   source, zero on merely-skipped.
+> - **`ziggurat/net.py`** — `bounded_socket()` + `HTTP_TIMEOUT`, lifted out of
+>   `league/source.py` so all four ESPN/HTTP seams share one mechanism.
+> - **Three systemd unit pairs + `scripts/install-nfl-ingest.sh`** (daily 07:20, weekly
+>   Thu 08:20, gameday 16:20; `TimeoutStartSec=1800` on each; installer checks
+>   `loginctl Linger` and warns loudly rather than only printing a hint, which is what the
+>   3.1 installer did and it was evidently not acted on — Linger is still `no` on this box).
+>
+> **Data-destruction floor (the item's most important property).** `ingest_espn_ranks` is
+> the ONLY delete-then-write path in `ziggurat/data/nfl/`, and it reproduced the item-3.1
+> destroy-the-day bug exactly: probed live, a 20-player degraded response replaced a stored
+> 1,026-player **same-day** board, and an empty response wiped it to zero — the
+> editorial-coverage guard sat behind `if rows:` while the `DELETE` ran unconditionally.
+> Worse than it looks, because the DELETE is scoped to (season, TODAY) and today's
+> partition is the one `draft-board`/`draft-web`/`valuation --espn` read; after a wipe
+> `get_espn_draft_ranks` silently falls back to the previous day's snapshot **per
+> board_key**, so the cockpit still renders as a stale/mixed hybrid with nothing reporting
+> the substitution. Fixed with `BoardCollapse` + `_check_board_size` **before** the delete
+> (floor 0.75 of the last stored snapshot, measured against a yardstick that deliberately
+> includes today's own earlier run), an unconditional empty-board refusal not covered by
+> `--allow-shrink`, and the whole replacement moved into one `with conn:` transaction.
+> Nine tests, headlined by
+> `test_degraded_same_day_pull_is_refused_and_the_stored_board_survives`.
+>
+> **The other three defect classes, all measured on this codebase, all designed out:**
+> (a) **unbounded network hangs** — `source.import_sleeper_projections`,
+> `weather.fetch_open_meteo` and `espn_source.fetch_player_universe` had NO timeout;
+> the first two now pass `timeout=`, the third is wrapped in `bounded_socket()`, with
+> applied-and-restored tests; (b) **a failed source's partial rows riding the next
+> source's commit** — measured leaving `weekly_stats` permanently holding week 1 only
+> (1,070 of 19,421 rows) with valid stamps, run log saying `failed`, table reading fresh;
+> `run_ingest` now rolls back before the next source touches the connection; (c) **"wrote
+> 0 rows" logged as success** — six ingesters drop 100% of their rows when `schedules` is
+> empty (19,421/19,421) and raise nothing, so dependencies are checked in code
+> (`skipped`, never a happy zero) and `base.note_drops` now feeds a `collect_drops()`
+> tally the run log records, making `0 written + N dropped` a `failed`.
+>
+> **What was deliberately NOT copied from 3.1: the missing-days gap report.** ESPN serves
+> no league history, so "unrecoverable" is literally true there. Every nflverse source is a
+> whole-season file re-downloaded in full, so a missed NFL run is staleness. Reusing that
+> alarm would train the operator to ignore the one report where the words are true — a test
+> asserts the NFL status output contains neither "unrecoverable" nor "missing days". Only
+> the four genuinely perishable sources (`projections`, `adp_rankings`, `espn_ranks`,
+> `game_weather` forecast) get loss language, and only once they have actually expired.
+>
+> **`depth_charts` — BLOCKED, recorded, not faked.** The new upstream shape is a dated
+> daily panel; the stored table cannot hold it, and `base.select_as_of` cannot express
+> "newest `dt` per key at `as_of`" (it resolves MAX(`retrieved_as_of`) per key, and one
+> pull carries 126 `dt` days under a single retrieval stamp), so the accessor needs a new
+> query shape too. The registry carries the full reason, `ingest status` prints it, and
+> a test asserts every source is either pullable or explicitly blocked. **Follow-on item:**
+> rewrite the table to store one dated snapshot per (season, team, gsis_id, pos_abb) —
+> arguably ingesting only the LATEST `dt` per pull, mirroring `league_player_state` — plus
+> the matching accessor. Strictly better than the old shape when done (a real publish
+> timestamp as knowledge time, and no `schedules` dependency).
+>
+> **Cadence, pinned to MEASURED upstream publish times, not to a wish.** daily (07:20):
+> `players`, `schedules`, `projections`, `adp_rankings`, `espn_ranks` (preseason),
+> `game_odds` + `injuries` (in-season). weekly (Thu 08:20): `weekly_stats`, `snap_counts`,
+> `team_defense`, `ngs_*` — Thursday because NFL stat corrections land Mon–Wed, and the
+> whole-season file self-heals every earlier week. gameday (16:20): `game_weather`
+> forecast, restricted to weeks inside a 10-day horizon (Open-Meteo 400s beyond ~16 days —
+> measured +16d OK, +20d 400). Season **phase** and the projection week range are derived
+> from the `schedules` table, never from the wall clock and never from
+> `nflreadpy.get_current_season()`, which returns **2025** until 2026-09-10 and would have
+> quietly refreshed last season all summer.
+>
+> **Recorded, not fixed (out of scope, no consumer harmed):** `game_odds` is invisible to
+> any pre-kickoff reader (`knowable_as_of` = gameday), so 3.5 needs a pre-game regime like
+> weather's forecast/archive split before the closing line is usable; `adp_rankings`
+> collapses one duplicate FantasyPros row per scrape and derives `season` from
+> `scrape_date[:4]` rather than `asof.nfl_season_of`; the Sleeper projections payload
+> carries `injury_status` / `news_updated` / `game_id` that the mapper discards (a cheap
+> future injury fast lane now that nflverse injuries are a post-season artifact); nothing
+> yet re-captures the stale `tests/fixtures/nfl/*.parquet` or adds an opt-in
+> network-marked contract test, which is the only thing that would have caught these three
+> breakages the day upstream shipped them.
+>
+> **Not done (calendar-bound / operator step):** the tables are NOT populated — that is
+> deliberately a separate operator-run step (`ziggurat ingest run --dry-run` first, then
+> without it). `weekly_stats`, `snap_counts`, `injuries`, `team_defense` and `ngs_*` cannot
+> be populated for 2026 before ~Sept 10 regardless (upstream 404s / nflreadpy's client-side
+> season guard); `run_ingest` records those as `upstream_absent`, not `failed`, so seven
+> weeks of expected absence does not desensitize the operator. The timers are written but
+> NOT installed on this box. Suite green (690, up from 624).
+>
+> ---
+>
+> **AUDIT ROUND (four adversarial auditors, 2026-07-24). 28 findings; ALL judged real and
+> fixed, none refuted outright (two recommendations were partially declined — recorded
+> below). Suite green: 732 passed, up from 690.** The build's own summary above overstated
+> two things, and both corrections are now in the code rather than only here.
+>
+> **The two headline corrections — both reproduced by the auditors on a COPY of the live
+> DB, and both re-verified as fixed the same way:**
+>
+> 1. **"Every other NFL table is append-only, so it needs no floor" was half true, and the
+>    wrong half was load-bearing.** Append-only protects against a pull that is MISSING
+>    ROWS. It does not protect against a pull whose VALUES arrived empty, because
+>    `select_as_of` resolves the newest row PER KEY: a same-key row with null ids is not
+>    absent, it WINS. Measured: `ingest_players` with the id columns served empty (a
+>    column-present/values-null upstream regression, which `require_columns` cannot see)
+>    took every crosswalk to zero — `espn_by_gsis` 7,897 → 0, `gsis_by_pfr` 7,784 → 0,
+>    `ids_by_fantasypros` 4,709 → 0, sleeper→gsis 6,149 → 0 — with the good rows still
+>    physically present underneath, the run logged `ok`, and no repair command in the
+>    codebase. Fixed with `players.CrosswalkCollapse`: per-column non-null **coverage rate**
+>    (not count — a truncated pull is genuinely harmless and was verified so) against the
+>    last stored snapshot, floor 0.75, checked BEFORE the write, `allow_shrink` override.
+>    Re-verified on the live copy: 7,897 → refused → 7,897.
+> 2. **`bounded_socket()` never bounded the seam it was written for.**
+>    `socket.setdefaulttimeout()` applies only to sockets created without an explicit
+>    timeout, and `requests` always passes one — with no `timeout=` argument it hands
+>    urllib3 `Timeout(connect=None, read=None)`, and urllib3 calls `sock.settimeout(None)`,
+>    discarding the default. Reproduced against a local accept-and-never-reply server:
+>    `with net.bounded_socket(3): requests.get(blackhole)` was still blocked when killed at
+>    40 s. So item 3.1's league-sync hang fix was equally ineffective, and only
+>    `TimeoutStartSec` was doing any work. Fixed with `net.bounded_espn()`, which swaps the
+>    `requests` module object inside `espn_api.requests.espn_requests` for a shim that
+>    injects `timeout=` (an explicit timeout still wins) and restores it on exit; both ESPN
+>    seams (`data/nfl/espn_source.py`, `league/source.py`) use it. Measured after the fix:
+>    `ReadTimeout` in 3.0 s. The guarding test is now real — it points the seam at a
+>    blackhole socket and asserts it raises inside N seconds, instead of asserting the value
+>    of a global that nothing reads.
+>
+> **Everything else that was fixed, grouped by what it broke:**
+> - **Fences that did not fence.** `run_ingest(today=None)` defaulted `today` to the stamp,
+>   making `stamp != today` trivially false — the documented "back-stamping is refused by
+>   default" path did not refuse (8 of the item's own tests never passed `today`). `today`
+>   is now required, and the check is hoisted into `refresh.resolve_stamp`, which BOTH the
+>   dry run and the real run call, so `--dry-run --as-of <past>` reports the refusal instead
+>   of printing a clean plan the real command then died on with a raw traceback (now `error:
+>   …`, exit 2). `valuation --espn --as-of <past day>` bypassed the orchestrator's copy
+>   entirely and DESTROYED that day's stored board (auditor case E, reproduced live:
+>   2026-07-21 partition 1025 → overwritten by the 07-24 board, which
+>   `get_espn_draft_ranks(as_of='2026-07-21')` then served as that day's ranks). The refusal
+>   moved into `pull_espn_ranks` itself, so every caller inherits it, and the command now
+>   goes through `espn_ranks.ensure_board`, which READS a stored past board rather than
+>   refusing outright (a future `as_of` still pulls — it deletes nothing and under-claims
+>   knowledge, so it cannot leak).
+> - **The floor measured the wrong things.** `_board_size` used `MAX(retrieved_as_of)` while
+>   the DELETE targets `stamp`, so a 600-row write cleared a floor computed from a 500-row
+>   CURRENT board and wiped a 2,051-row historical partition; the yardstick is now the
+>   larger of the two partitions. And it compared `len(rows)` (pre-dedup) against a stored
+>   post-dedup count, so a key-collapsing response would clear the floor, collapse the board
+>   onto a handful of keys, and still log `rows_written=1026`; it now compares distinct
+>   `board_key`s, re-counts the stored partition INSIDE the transaction (rolling back if it
+>   fell), and returns the STORED count.
+> - **Statuses that reported success.** A 99.7%-dropped pull (67 written / 19,354 dropped,
+>   measured against the real nflverse file) was `partial`, which was excluded from the
+>   failure list, the exit code AND the staleness verdict — it read `fresh` and `no
+>   failures`. Now a drop RATIO above 20% is `failed`. `_is_upstream_absent` was a bare
+>   substring scan (`"404"`, `"no such file"`, `"not found"`, …) over any exception from any
+>   source, so a `FileNotFoundError` from an unwritable cache — and, sharpest, espn_ranks'
+>   OWN drift guard, whose message reads "only 404/2051 mapped rows…" — were downgraded to
+>   an expected absence and exited 0. Now classified on exception TYPE plus an anchored
+>   pattern (`ValueError` matching `^season must be between`; HTTP status 404 from
+>   `.response.status_code`/`.code`; `ConnectionError` matching nflreadpy's wrapped
+>   `404 Client Error`), and an absence is REFUSED for a source that already succeeded this
+>   season (a 404 after a success is a renamed release, not an absence). `PROBLEM_STATUSES`
+>   + `refresh.run_failed()` are now one definition the CLI calls (rule 3) — the exit code
+>   and `format_run`'s PROBLEMS line had already drifted apart over `empty`, so an empty pull
+>   of a PERISHABLE source was reported to systemd as success and never retried.
+> - **The staleness report lied in three ways.** `last_run` ignored the `season` column
+>   entirely, so one `ingest run --season 2025` backfill made 2026 read `fresh 0d` against a
+>   table with zero 2026 rows (reproduced end-to-end through the CLI), and after the March
+>   season rollover the units' pinned `--season` would report last season's pulls as this
+>   season's for months. It also had no upper bound, so `status --through <past day>` was
+>   answered from FUTURE runs with a negative age that pinned the verdict at `fresh` forever.
+>   Both are now in the WHERE clause (and in the migration's index), with an assert that the
+>   age is never negative. And `format_status` rendered no failure channel at all: a source
+>   that succeeded once and then failed every run printed a bare `fresh`, and a run
+>   SIGTERM'd by `TimeoutStartSec` left an orphaned `running` row nothing ever reported. The
+>   report now carries a `last try` column, `LAST ATTEMPT FAILED` / `RUN NEVER FINISHED`
+>   blocks with the recorded error, and `start_run` reaps an older `running` row as
+>   `abandoned`.
+> - **The gameday timer never refreshed the games being played.** `weather_weeks` selected
+>   on the week's FIRST kickoff, so a week left the request set the moment its Thursday game
+>   started; on the Saturday and Sunday of a game week the unit fetched only NEXT week, and
+>   forecast mode is perishable, so the freshest forecast a Sunday lineup call could ever
+>   read was three days old. Verified against the real 2025 schedule (week 5 absent on
+>   10-03/04/05). Now selects on the week's LAST gameday, matching `current_week`.
+>   `game_weather` also gained the `preseason` phase so week 1's run-up is captured at all —
+>   the phase flips only ON week 1's Thursday.
+> - **`interval_days` was decorative.** Nothing read it but the report, so the weekly group
+>   ran on a fixed `OnCalendar=Thu` and an nflverse outage outlasting the unit's three
+>   restarts cost a whole in-season week of `weekly_stats`/`snap_counts` — while `ingest
+>   status` still said `fresh` (age 7 ≤ interval 7). `decide()` now consults the run log:
+>   a source whose last SUCCESSFUL pull is inside its interval records `fresh` and is
+>   skipped, the weekly timer fires DAILY, and a failed Thursday retries Friday while a
+>   successful Thursday keeps the anchor. `--force` overrides. `schedules` moved to a 1-day
+>   interval (flex scheduling moves kickoffs ~12 days out and six sources stamp off it).
+> - **systemd.** `After=network-online.target` is a NO-OP in a user unit (verified:
+>   `LoadState=not-found`), and with `Persistent=true` the catch-up fires exactly when the
+>   network is most likely down; replaced in all four units — including item 3.1's, which
+>   carried the same line — with a bounded `ExecStartPre` name-resolution wait that never
+>   fails the unit. `StartLimitIntervalSec` (1800) was not larger than `TimeoutStartSec`
+>   (1800), so the restart limiter could never engage against a HANG (a start killed at
+>   t=1800 and retried at t=2100 has aged out of the window); now 10800 (7200 for the league
+>   unit). **The league-sync unit therefore needs `scripts/install-league-sync.sh` re-run on
+>   any box where it is already installed.**
+> - **Smaller, but real:** `--source` silently overrode `--group` (now refused); a mid-loop
+>   `game_weather` failure logged `rows_written=0` after earlier weeks had already committed
+>   (now a `PartialPull` carrying the real count); `valuation --espn` had no `--allow-shrink`
+>   and would die in a traceback on a legitimate `BoardCollapse` (both fixed); the CLI read
+>   registry attributes to decide about credentials (now `refresh.needs_credentials`).
+> - **Tests that did not test what they were named for.** The run-log durability test
+>   re-read through the SAME in-memory connection, where an uncommitted INSERT is fully
+>   visible — it passed with `start_run`'s `conn.commit()` deleted; it now uses a file-backed
+>   DB and a SECOND connection. The CLI staleness test asserted only that source names were
+>   printed; it now asserts the verdicts, the last-ok date, the row count, the failure block
+>   and the cross-season case. The registry "inventory" tests were set-comprehension
+>   restatements of the constants; a behavioural test now asserts no module in
+>   `ziggurat/data/nfl/` outside `espn_ranks.py` contains a `DELETE FROM`.
+>
+> **Partially declined (recorded so they are not re-litigated):**
+> - *"Drop `current_week`; it is dead code."* Kept. It is item 3.2's seam (3.2's recon
+>   explicitly recorded that no current-week source existed and that a guess must raise) and
+>   it is tested. The real hazard the finding identified — that it and its three siblings
+>   read `schedules` with NO as-of gate and take `today` rather than `as_of` — is addressed
+>   where the next reader will meet it: an `OPERATIONAL READ — no as-of gate; never call
+>   this from a decision path` line in each of the four docstrings, not only in a section
+>   comment fifty lines above.
+> - *"Mark `injuries` `blocked` like `depth_charts`."* Declined: whether the 2026 feed
+>   resumes cannot be known before September, and recording a block we are not sure of is a
+>   different kind of lie. The underlying complaint — that six sources would sit in a
+>   `NEVER PULLED` alarm for eighteen weeks and train the operator to ignore the report — is
+>   fixed generally instead: a source that has never succeeded and whose last attempt was
+>   `upstream_absent` now reports the distinct verdict `awaiting`, listed under
+>   `NOT PUBLISHED UPSTREAM YET`, not under `NEVER PULLED`.
+>
+> **Still unverified / deferred after this round (honest list):**
+> - **The tables are still NOT populated** and the timers are still NOT installed on this
+>   box (`Linger=no`). Both remain the operator's step.
+> - **Nothing here has met real games.** The gameday-weather window, the in-season phase
+>   transitions, the weekly interval anchor and the `upstream_absent`→`ok` transition around
+>   ~Sept 10 are all tested against synthetic schedules and reasoning about upstream, not
+>   against a played week. First real proof is Week 1.
+> - **The stale fixtures are still stale.** `tests/fixtures/nfl/*.parquet` are frozen 2023
+>   frames — the sole reason `require_columns` never fired on the three broken ingesters.
+>   The opt-in network-marked contract test that would catch the next upstream break the day
+>   it ships is still not written.
+> - **`depth_charts` remains BLOCKED** (table + accessor rewrite), and `players`' new
+>   coverage floor is calibrated against ONE observed snapshot — if DynastyProcess
+>   legitimately drops an id column, the first run refuses and the operator needs
+>   `--allow-shrink`.
+> - The 20% drop ceiling and the 0.75 coverage/board floors are judgement calls checked
+>   against measured normal drop rates (0.1%–3.6%), not against an observed bad day.
+>
+> **FIRST LIVE RUN — 2026-07-24, operator-run, and it found three defects the whole
+> four-auditor round had missed.** All three are one failure mode: *a guard that fires on
+> healthy data*. That is the exact way this system gets its reports ignored, which is the
+> reasoning that (correctly) kept the league sync's gap report out of this module — so it
+> matters more than the cosmetic look of it. DB backed up to `data/backups/` first; suite
+> 624 → **739**; the population itself succeeded (`players` 7,732, `schedules` 272,
+> `projections` 57,910, `adp_rankings` 4,699, `espn_ranks` 1,026).
+> - **`adp_rankings` failed at 35% on a completely healthy pull.** Its "drops" were
+>   1,692 IDP rows — which this league cannot start, so filtering them is CORRECT — plus
+>   861 rows the ingester's own line comment described as *"kept (NULL gsis_id), not
+>   dropped"* and then reported to `note_drops` anyway. Fixed: `note_drops(..., by_design=
+>   True)` tallies a rules-driven filter separately and only unintentional drops reach the
+>   ceiling; new `base.note_incomplete()` records kept-but-missing-a-field rows without
+>   touching the ratio. Re-run on identical data: `ok`.
+> - **The failure message printed two different denominators in one sentence.** It read
+>   `dropped 2553/11090 (35%)` — but 2553/11090 is 23%; the ratio actually tested is
+>   `dropped/(written+dropped)`. `tally['total']` is a SUM across `note_drops` calls, so for
+>   any ingester reporting twice it exceeds the rows that ever existed. Now one denominator.
+> - **`game_weather` reported a standing `LAST ATTEMPT FAILED` for a correct no-op.** Outside
+>   the ~10-day forecast wall there is no week to fetch, and `weather_weeks`' own docstring
+>   already called that *"a legitimate 'nothing to do' rather than a failure"* — but the run
+>   path had no way to say so, returned `STATUS_EMPTY`, and `run_failed()` counts empty as a
+>   problem (rightly, for a perishable source). It would have alarmed daily from July to
+>   September. Fixed with a `SourceSpec.applicable` predicate evaluated inside `decide()` —
+>   so `--dry-run` reports it too, per that function's stated purity contract — and
+>   `source_freshness` consults the same predicate, so the verdict reads `n/a` rather than
+>   `never`. This is the phase gate's own principle at one notch finer granularity.
+>
+> **Timers installed on this box 2026-07-24** (daily 07:20, weekly 08:20, gameday 16:20,
+> deliberately non-overlapping on the DB), and `install-league-sync.sh` re-run to pick up
+> the corrected `ExecStartPre`/`StartLimitIntervalSec`. All four fire. **`Linger` is still
+> OFF** — until `loginctl enable-linger` is run, every timer dies at logout, and a missed
+> daily run costs a `projections`/`adp_rankings` snapshot that cannot be re-pulled.
+> Post-run status: 5 fresh, 9 `n/a`, 1 `blocked` — exactly one alarm, and it is a true one.
+
 ### 3.2 [Build] Marginal valuation
 **Goal:** Roster-context value per SPEC: starting-lineup improvement over remaining season, positional depth, bye coverage, playoff-week schedules, and **conditional-distribution bench valuation** (handcuff contingent value; no median-only drops of lottery tickets). Drop candidates ranked by marginal value.
 **Done when:** for a synthetic roster, add/drop recommendations visibly change as roster context changes, with reasons.
+**Recon complete 2026-07-24** (11-agent workflow; full note in gitignored
+`intel/research/marginal-valuation-3.2-design.md`). Findings that reshape the item:
+- **Weekly projections are a flat season rate, not week-specific forecasts.** Measured
+  median week-to-week CV excluding byes: WR 0.98%, TE 1.06%, QB 1.10%, RB 1.57% — versus
+  **DEF 6.6%** (12.0% on projected points). Skill-position projections carry no opponent
+  signal; the only real movement is the bye-week zero. **Consequence:** an uncapped
+  "best available free agent" baseline makes a *second defense* the top add on nearly any
+  roster (15 of 16 best-replacements returned `LA D/ST`). Requires position caps and a
+  written-down static-roster assumption (the objective silently assumed no streaming).
+- Availability weights must be a normalized distribution (the naive form gave `w0 = −0.290`
+  on a 17-man roster); the objective produces exact ties that need a stated tiebreak ladder;
+  and **no "current week" source exists in the DB** (`scoring_period = 0` on every row), so
+  `weeks=None` must raise rather than guess.
+- Greedy lineup solve is optimal here (**0 mismatches in 300** random rosters); a capped
+  swap scan runs in **0.61 s**, Monte Carlo as the estimator would be ~11 min (rejected as
+  estimator, kept as test oracle). Bye derivation gives 32 teams over weeks 1–17 but **16**
+  over weeks 10–17 — an `assert == 32` would crash.
+- Availability rates and handcuff uplifts (**WR uplift is −0.14 — no WR handcuff effect
+  exists**) were calibrated against nflverse history pulled over the network, not from this
+  DB; they ship as **labeled hypotheses** with source and `n` in every reason string. Note
+  that item 5.2's promotion ladder is still a placeholder, so nothing yet stops a labeled
+  hypothesis from hardening into a "rule" by default.
+- **Scope decisions (operator, 2026-07-24):** do **not** rewire `draft/simulator.py` to
+  import a new `core/lineup.py` — that package passed a two-rehearsal gate and runs live in
+  ~3 weeks with no rollback window; write the seater fresh and let the duplication delete
+  itself with the package (Rule 8). Depth-chart ingester deferred (v1 handcuff link rides on
+  projection ordering). `format_swaps` / `--swaps` CLI move to 3.4, but the swap **matrix**
+  stays in 3.2 (same scan as the drop board; splitting the computation is how the add and
+  drop boards start disagreeing).
 **Update:**
-> _[To be completed]_
+> **Built & tested 2026-07-24** (design implemented as written; suite 739 → **794**).
+> Two new permanent modules plus one thin CLI command:
+> - **`ziggurat/core/lineup.py`** — the per-week starting-lineup seater, written FRESH
+>   (Rule 8 / the operator's scope decision; `ziggurat/draft/` is untouched, and its two
+>   ancestors are named in the module docstring). The structural difference that makes it
+>   in-season rather than draft-time: **points arrive as a parameter**, not off a
+>   `house_points` attribute, so bye coverage and availability are COMPUTED per week rather
+>   than approximated by a constant. `draft/engine.py`'s `_BENCH_VALUE_FRACTION` and
+>   `_startable_now` are deliberately NOT ported (their K/DST entries are 0.0, which would
+>   price every streaming move at exactly zero marginal value while 3.5 builds a streaming
+>   ranker — two modules, contradictory advice, no error anywhere). The brute-force optimum
+>   ships as a TEST ORACLE (`tests/test_lineup.py`), re-running the recon's greedy-vs-exhaustive
+>   comparison on 150 random rosters every suite run, and greedy REFUSES a multi-flex or
+>   superflex structure rather than silently returning a suboptimal total.
+> - **`ziggurat/core/marginal.py`** — the objective exactly as designed: `V(K) = Σ_w E_S[
+>   lineup(K,w,S)]`, `marginal(p|R) = V(R) − max_{f∈F∪{∅}, caps} V((R\{p})∪{f})`, with
+>   normalized independent-Bernoulli one-out weights, `POSITION_CAPS` (DST/K hard 1),
+>   `STREAMED_POSITIONS` on a current-week horizon, the QB/RB/TE-only handcuff coupling,
+>   structural bye coverage, a separately-reported weeks-15-17 subtotal, the tiebreak ladder,
+>   and raise-don't-guess week resolution. Both assumptions (A1 static roster, A2
+>   projections-are-conditional-on-playing) are written into the module docstring and A1 is
+>   printed above every board.
+> - **`ziggurat/core/valuation.py` extended** — `weekly_lines()` / `weekly_points()` (the ONE
+>   identity spine, so the season board and the marginal board cannot drift apart),
+>   `canon_position` promoted public, `RosterStructure` gains `bench_slots=7` / `ir_slots=1`
+>   + `active_slots`. `build_valuation` now consumes the shared spine; verified
+>   behaviour-preserving on the live DB (3,219 groups, season total 50203.9682 identical) and
+>   by its existing 12 tests. **`ziggurat/league/state.py`** gains `resolve_own_team()` so no
+>   module hard-codes the operator's team id.
+> - **`ziggurat marginal`** (thin, Rule 3) — `--as-of --season --team --from-week --last-week
+>   --top --reasons --pool-limit --source --path`. No `--swaps` (3.4's).
+>
+> **Verified by running, not inferred:** on a scratch copy of the live DB with a simulated
+> post-draft league (10 × 16, one IR occupant), the full CLI path runs in **7.4 s** wall
+> clock (budget 30 s) over weeks 4-17 with 32 teams' byes mapped; the drop board reads −1.6
+> to +small with the D/ST correctly the most droppable row and NO D/ST stacking anywhere.
+> Week resolution raises today (`scoring_period` is 0 on every row and `schedules` is not
+> knowable until Aug 1) and resolves correctly from `schedules` at a September `as_of`; the
+> staleness banner fires (58 days) on a July snapshot pricing a September decision.
+>
+> **Two defects the build found and fixed that the design did not anticipate:**
+> 1. **Greedy seated NEGATIVE-projection players.** An empty slot scores 0, so a
+>    below-zero D/ST bracket is worth benching — greedy-take-the-best is only optimal
+>    against the exhaustive optimum once that case is handled. Caught by the oracle sweep,
+>    which is precisely why the oracle is a test and not a comment.
+> 2. **A permanently empty starting slot dominated every row** (measured on the live sim:
+>    with no D/ST rostered, the best add for all 15 drop candidates was a D/ST, at +76 each
+>    — arithmetically right, and unreadable). Now stated once, in words, as a board note.
+>    Also fixed: a streamed row read "starts in 13 of your 1 remaining weeks" because the
+>    starts profile came from the full-window model.
+>
+> **Deviations from the design, with reasons:**
+> - `fill_lineup` takes an explicit `positions` mapping; §7.3's signature could not seat
+>   without it.
+> - `weekly_lines()` (a richer sibling) carries the per-week points AND the identity/driver
+>   totals, so `build_valuation` and `marginal` share ONE pass over 57k rows; the design's
+>   stated `weekly_points()` ships as a thin projection of it.
+> - `build_board()` is the single public entry point that returns rows + swaps + byes +
+>   model + banner together; `build_marginal` / `build_swaps` are the design's stated
+>   wrappers over it (calling them separately would scan twice).
+> - `pool_limit` (default 30/position, plus the best few of every bye week) — NOT in the
+>   design, needed because the pre-draft pool is the whole 1,026-player universe. Within a
+>   position a higher projection dominates a lower one whenever they share a bye, so the
+>   bye-week carve-out is what keeps the pruning safe; `--pool-limit 0` disables it.
+> - A minimal `format_swaps` is kept as a debug renderer (12 lines, docstring says 3.4 owns
+>   real swap presentation). The design cut it; the reason it cut it was scope, and the risk
+>   it named was the *computation* splitting, which has not happened.
+> - Availability bucket multipliers are a SCALAR per bucket (early 0.70 / mid 1.00 / playoff
+>   1.45) derived by ratio transfer within one measured cohort, rather than per-position
+>   playoff cells — mixing probe-2 and probe-3 cohorts in one table would have quoted a
+>   precision neither supports. Derivation is written next to the constant.
+> - Handcuff coupling fires only when BOTH the starter and his backup are on the roster
+>   being valued (the scenario set is your own roster, per §1.3's weight arithmetic). A
+>   rostered backup whose starter is on another team therefore gets no contingent credit —
+>   said out loud in that row's reasons rather than silently priced. **Deferred: extending
+>   the scenario set to linked starters on other rosters** (it is real lottery-ticket value;
+>   it also changes the weights and is unmeasured).
+>
+> **Plan amendments recorded here (Rule 7):**
+> - **Playoff-week MATCHUP STRENGTH for skill players is deferred out of Phase 3's valuation
+>   layer** to 3.3/3.5-after-ingestion or Phase 4. Measured median playoff tilt +0.00%
+>   (p05 −1.00%, p95 +0.93%, max |tilt| 1.4%), against skill-position week-to-week CV of
+>   0.84–1.57% — the signal is indistinguishable from rounding, and a confident,
+>   novice-facing "favourable weeks 15-17 schedule" sentence built on rounding error is the
+>   single most dangerous thing this item could have shipped. The weeks-15-17 SUBTOTAL is
+>   reported; `playoff_weight=1.0` is the seam for real playoff odds from 5.1.
+> - **Pre-deletion checklist for `ziggurat/draft/` (do this BEFORE the package is deleted
+>   after draft day):** port `draft/resolver.py` (620 lines of fuzzy name resolution,
+>   curated alias + diminutive maps, measured zero silent wrong autos) into the permanent
+>   tree. 3.2 does not need it — it joins on `gsis_id`/`espn_player_id` — but 3.3 and 3.6
+>   will, its only non-draft dependency is `base.TEAM_ALIASES`, and the curated maps cannot
+>   be re-derived. `tests/test_draft_boundary.py` now also fails a LAZY import of
+>   `ziggurat.draft` from `core/`, `league/`, `data/` or `llm/` (the CLI keeps its exemption),
+>   which the import-time scanner allowed.
+> - The `depth_charts` ingester rewrite (v1 handcuff link rides on projection ordering) and
+>   `weekly_stats`-fitted availability rates stay deferred; both are recorded in the design
+>   note's §11.1 with their landing items.
+>
+> **What is NOT validated:** every availability rate and handcuff uplift is a LABELED
+> HYPOTHESIS fitted on nflverse 2021-2025 and quoted with its source in the reason
+> strings — none is fitted to 2026, and item 5.2's promotion ladder is still a placeholder,
+> so nothing but `test_every_quoted_prior_carries_its_hypothesis_label` stops one hardening
+> into a rule. The done-when is met on a synthetic roster; the real roster arrives with the
+> August draft and needs no code change (only `on_team_id` / `lineup_slot` /
+> `acquisition_*` differ). Design + the full "refuted / deliberately not changed" table:
+> gitignored `intel/research/marginal-valuation-3.2-design.md`.
+>
+> ---
+>
+> **AUDIT & FIX ROUND — 2026-07-24 (four adversarial auditors, 30 findings).** Suite
+> 794 → **832**. Everything below is a defect the build shipped, not a design change;
+> each fix carries a test that failed before it. The suite now runs in **2m31s**
+> against 72 s at 796 tests — the depth-3 reporting pass is ~10x depth 1, and
+> `tests/test_marginal.py` alone accounts for 83 s of it.
+>
+> **1 CRITICAL — a partly-projected player priced as near-worthless and topped the
+> board.** The unpriceable gate tested the POINT SUM, and the feed's bye row is
+> byte-identical to its "no forecast" row (team set, `opponent` NULL, every stat NULL).
+> Measured on the live feed: **A.J. Brown, 99.31% owned, carries a real week-1 line and
+> sixteen empty weeks**; his sum was 14.13, not 0.0, so he cleared the gate, priced at
+> −24.4 over 17 weeks and read `never reaches your starting lineup ... drop him and add
+> Jordan Love and you would GAIN 24.4`, with nothing anywhere disclosing the gap. The gate
+> was also a knife edge — narrow the window past his one good week and he WAS flagged, so
+> the behaviour flipped on the window. Fix: `WeeklyLine` now carries `played_weeks` (weeks
+> whose row carried an OPPONENT — the only signal that separates "no forecast" from "bye"),
+> and coverage against `COVERAGE_FLOOR = 0.75` decides priceability. Census over the live
+> universe, weeks 1-17: **525 identities cover 16 of 16 playable weeks, 4 cover 15, exactly
+> 2 cover ONE** — the floor sits clear of both clusters. Verified on the live DB: he now
+> lands in `CANNOT VALUE — only 1 of 16 weeks forecast` at BOTH windows.
+>
+> **6 MAJOR, all fixed:**
+> - **The truncation error was bounded on the wrong quantity.** The design measured
+>   one-out truncation at +1.4% on the LEVEL `V(K)` and the suite asserted `rel=0.03` on
+>   `V(K)` — but the shipped number is a DIFFERENCE whose bench-depth content lives almost
+>   entirely in the ≥2-out mass the truncation discards. Reproduced on a live post-draft
+>   roster over weeks 8-17 against an exact 2^15 enumerator: `V(R)` +1.9%, but a deep RB
+>   priced **−1.28 truncated against −3.25 exact**. Fix: **two estimators, deliberately.**
+>   The SEARCH (roster × pool, ~2,900 `V()` calls) stays at one-out — that cost argument is
+>   the design's and it stands. Everything the board REPORTS (16 rows, the decomposition,
+>   and the retained swap matrix) is re-priced at `REPORT_DEPTH = 3`: measured −1.28 → −2.97
+>   against −3.25 exact, `V(R)` bias 1.9% → 0.37%. It must be a DETERMINISTIC estimator:
+>   common-random-number Monte Carlo is unbiased and costs the same, but sampling noise
+>   **destroys the exact-tie band the §1.5 ladder exists to resolve** (caught by the tie test
+>   going red). `value_monte_carlo` was rewritten with common random numbers and kept as the
+>   oracle. New test bounds the REPORTED marginal against it **in points**, per row, and
+>   asserts the search estimator alone would not clear that bar.
+> - **The decomposition was a probability-mass split wearing a mechanism's label.**
+>   `lineup_component` was `w0 × base` and `contingent_component` absorbed the rest, so
+>   ~55-60% of EVERY row landed in the column the reason calls "weeks somebody on your
+>   roster is hurt" — including for players with no linked backup, and including a D/ST,
+>   which the model states can never be unavailable. Measured on the live board: Chris Olave
+>   reported `lineup +5.89` against a true all-healthy delta of **+16.37**, and Dak Prescott
+>   reported `lineup −6.42` against **+20.19**. Fix: `lineup_component` is now the real
+>   all-healthy lineup delta and `contingent_component` is the residual — the value that
+>   exists ONLY because somebody might be hurt. Pinned by meaning, not by sum: a zero-rate
+>   availability model must drive every `contingent_component` to 0.0, a D/ST-for-D/ST swap
+>   must be 0.0, and `lineup_component` must equal a hand-computed `fill_lineup` delta. (The
+>   old `test_the_decomposition_sums_to_the_number_it_explains` asserted `a+b+c == a+b+c`
+>   and could never fail.)
+> - **A season-ending injury was priced as ONE missed week.** `injury_status` was applied
+>   only at `current_week`; every later week fell back to the position base rate, so a player
+>   ESPN reports `INJURY_RESERVE` was modelled ~91% likely to play in each remaining week and
+>   **no reason mentioned his designation at all**. Measured: ACTIVE +59.11 / OUT +52.21 /
+>   INJURY_RESERVE +52.21, indistinguishable, one week each. Fix: `absence_curve` propagates
+>   the design's own §5.5 measurement forward (P(back) 28.8% at W+1, 46.8% W+2, 54.5% W+3,
+>   plateau ~62%, ~38% never return), floored at the base rate; same roster now reads
+>   ACTIVE +59.11 / OUT +30.69. A reason naming the designation and the assumption is
+>   MANDATORY, and `INJURY_RESERVE`/`SUSPENSION` carry a second line saying the curve was
+>   fitted on Out weeks and does not really cover them.
+> - **The static-roster caveat printed above every board stated the bias BACKWARDS.** The
+>   note said A1 "understates any slot you would simply stream" while the module docstring
+>   and design §1.1 both say **over-valued**. It is the one operator-facing sentence that
+>   exists to protect a novice from the A1 artifact, and it pointed at exactly the adds the
+>   board is already too optimistic about. Now: "OVER-VALUES ... treat a positive number on a
+>   bench body as an UPPER BOUND", with "a backup quarterback" added to the examples (the
+>   case that dominates a one-QB roster), and the direction word asserted.
+> - **Every availability reason quoted a sample size lifted from a different study.**
+>   `n_by_position = {QB 101, RB 103, WR 36, TE 116}` is verbatim the HANDCUFF event study's
+>   pair counts (design §5.1); the probe-3 availability table has no `n` at all. A wrong `n`
+>   is worse than none — it looks checkable and is not, and "WR miss rate, n=36" is absurd on
+>   its face. Deleted; the rate now ships its COHORT description instead, with a test that
+>   the string carries no `n=` and that the handcuff model keeps its own (real) one.
+> - **The staleness banner warned off the NEWEST pull, so one refreshed row silenced it.**
+>   `ingest_projections` ends in an upsert — it never replaces the partition — so a player
+>   who falls out of the feed keeps his last-known rows forever and `select_as_of` keeps
+>   serving them. Reproduced: re-stamp every projection to November except one rostered WR
+>   and the 109-day warning disappears. Fix: the warning gap is computed from the OLDEST
+>   vintage on the board, and any entry whose own vintage lags the board's newest by more
+>   than `STALE_BANNER_DAYS` gets a mandatory `STALE:` reason naming the date.
+> - **In-season week resolution returned the week that had already finished, on the two
+>   waiver days the cadence is built around.** Step 3 picked `max(week whose FIRST gameday
+>   <= as_of)`. Real 2026 boundaries: week 1 is 09-09..09-14, week 2 starts 09-17 — so
+>   Tuesday 09-15 and Wednesday 09-16 both resolved to **weeks 1-17**, pricing a played week
+>   into every board and handing D/ST and K (current-week horizon, and the ONE position with
+>   real week-to-week variation) last week's matchup. Fix: resolve to the first week whose
+>   LAST gameday is on or after `as_of`; pinned at the Tuesday/Wednesday boundary.
+>
+> **11 MINOR / 2 NOTE, all fixed:** the tie reason named a rung the neighbours did not
+> differ on (the real break was alphabetical — now the ladder only claims a rung somebody
+> differs on, and an all-square tie says "alphabetical and means nothing"); the availability
+> prior quoted only the FIRST week's bucket (now the range actually used, `6-13%/wk (6% in
+> weeks 3-6, 9% in 7-14, 13% in 15-17)`); the drop board sorted a ONE-WEEK D/ST number
+> against a fourteen-week one under "lowest is most droppable" (streamed slots now print in
+> their own labelled block, plus a `per wk` column); one unpriceable roster body silently
+> suppressed the structural-hole note (`fill_lineup` seats a 0-point player into an empty
+> slot — the check now runs over the priceable roster only); unpriceable roster players
+> could never be the DROP side of a swap, so 3.4 would have planned around the obviously
+> correct drop (they now emit swap rows flagged `drop_unpriceable`, with the gain labelled an
+> upper bound); the handcuff "X is NOT on your roster" disclaimer was gated on pool
+> membership rather than roster membership, so it vanished in exactly the case where the
+> starter has just been dropped by another manager; `never reaches your starting lineup — you
+> have 0 better DSTs ahead of him` blamed competition when the cause was a bye; 507 of 866
+> free agents were dropped from the add board with no disclosure while the pruning note read
+> "168 of 359" (now counted and named, most-owned first); `bye_component` silently absorbed
+> the REPLACEMENT's bye (now named in its own reason); `--last-week` was a silent no-op
+> without `--from-week` (threaded through `build_board` into `resolve_weeks`);
+> `--pool-limit` defaulted to `None`, making `DEFAULT_POOL_LIMIT` dead code and `0` a no-op
+> (now defaults to 30, `0` means the whole pool); `scenario_weights` silently returned
+> "everybody healthy" if handed any `p >= 1.0`, discarding every other player's scenario;
+> `playoff_subtotal` accumulated unweighted while the total it is a share of was weighted,
+> so the sentence "weeks 15-17 account for +X" would have gone false the moment the
+> advertised `playoff_weight` seam was used.
+>
+> **Test-coverage findings (mutation-tested by the auditors) — all closed.** Deleting the
+> tiebreak ladder, throwing away the entire free-agent pool, deleting `_prune_pool`'s
+> bye-week carve-out, inverting the swap sort, hard-zeroing `playoff_subtotal`, ignoring
+> `playoff_weight`, relabelling the decomposition columns, dropping `TEAM_ALIASES` from the
+> roster seam, and reporting the oldest pull instead of the newest all left the suite GREEN.
+> Added: order-independent tie ordering; a direct `_prune_pool` test plus a
+> pruned-vs-whole-pool board equality; swap ordering and `swap_limit` truncation; the
+> playoff subtotal and a `playoff_weight=2.0` run that must NOT move a no-playoff-weeks
+> window; the Rule-2 DST/K coupling guard asserted **through a board** with a hostile
+> `HandcuffModel` (the old test restated a one-line method); the `schedules` bye path, which
+> becomes production from 2026-08-01 and had **zero** coverage, plus the design's D3
+> cross-check (both sources, 32 teams, identical) and the `>1 missing week` branch; an
+> LAR/LA D/ST join; a two-vintage banner; `base.latest_truth(build_marginal)`; roster-context
+> cases 14(c) and 14(d); and Rule-1 leakage tests for the three accessors that shipped
+> without one — `resolve_own_team`, `weekly_lines`, `weekly_points`. The performance test's
+> 30 s assert on a fixture ~100x smaller than the real board was scaled to 5 s (the real
+> number is measured by hand: **10.8 s** over weeks 8-17 and **16.9 s** over 1-17 on a
+> live-DB post-draft simulation, against the 30 s budget).
+>
+> **One design change the fix round made on its own: the swap matrix is now LAZY.**
+> Re-pricing every (add, drop) pair at depth 3 costs more than the whole rest of the
+> scan, and `ziggurat marginal` never prints it — the matrix is 3.4's input.
+> `MarginalBoard.swaps` therefore resolves on first access, from the same scan state
+> at the same depth, so the two boards still cannot drift onto different estimators.
+> Measured on the live-DB post-draft simulation: `ziggurat marginal` **4.3 s** over
+> weeks 8-17 and **6.4 s** over 1-17 (was 10.8 / 16.9 with the matrix eager), and
+> `build_swaps` — which does materialise it — 10.1 s for 112 swaps. Budget 30 s.
+>
+> **`bye_map` hardened while fixing the coverage finding:** `schedules` was preferred
+> whenever it returned ANY row, so a half-ingested table left every team "unknown" while a
+> complete, correct projections-derived map sat unused in the same database. It is now
+> preferred only when COMPLETE; otherwise both are derived and the one resolving more teams
+> wins, with a loud note. On a healthy full-span table the second derivation never runs.
+>
+> **Refuted and deliberately NOT changed** (recorded so they are not re-litigated):
+> - **"the truncation reorders the top of the drop board"** — the specific reorder the
+>   auditor showed was an `Eagles D/ST` (ONE-week horizon) against a WR (fourteen-week
+>   horizon), i.e. the incommensurable-units finding, not truncation. Re-run under exact
+>   enumeration on a live post-draft roster, the ordering of the comparable rows was
+>   **unchanged at every rank**. The magnitude finding is real and fixed; the ranking claim
+>   was misattributed.
+> - **"`lineup_component` reports exactly `w0` of the real effect"** — the measured ratios
+>   are 0.36-0.47 while `w0` is 0.18, because the before- and after-rosters have different
+>   `w0`. The substance (a probability slice, not a mechanism) is right and is fixed; the
+>   arithmetic characterisation is not, and the fix is not "divide by `w0`".
+> - **"extend the enumeration to two-out for the drop-board pass only"** — half-adopted and
+>   deliberately overshot. Depth 2 recovers only ~55% of the gap; depth 3 recovers ~85% and
+>   still fits the budget. Rejected outright: running the SEARCH at any depth above 1
+>   (measured ~9x, which blows the 30 s budget), and using Monte Carlo anywhere the output is
+>   sorted (it dissolves the tie band).
+> - **"stop presenting the marginal as a magnitude the operator can act on"** — rejected.
+>   Removing the number removes the recommendation; the number was made accurate instead.
+> - **`test_the_same_handcuff_is_valuable_on_a_thin_roster_and_worthless_on_a_deep_one`'s
+>   `== 0.00` assertion was relaxed to `< 0.5` and `< thin/10`.** The recon's exact 0.00 was
+>   itself an artifact of one-out truncation: behind three better backs the handcuff DOES
+>   reach the lineup when the starter and two others are out at once, which depth 3
+>   enumerates. Measured 0.16 over 15 weeks. The football claim — worth an order of magnitude
+>   less on the deep roster — is unchanged and is what is now asserted.
+>
+> **Deferred (unchanged or newly recorded):** `INJURY_RESERVE` gets the Out-fitted return
+> curve because no IR-specific curve was ever measured — the row says so out loud rather
+> than inventing one; the depth-chart v2 handcuff link and `weekly_stats`-fitted availability
+> rates stay deferred with their landing items; extending the scenario set to linked starters
+> on OTHER rosters is still open.
+>
+> **Still unverified until real games are played:** every availability and uplift constant,
+> including the new `absence_curve`; the `schedules` bye path and the live-status boundary
+> now have tests but have never run on a real in-season day; `roster_status` FREEAGENT vs
+> WAIVERS is still all-FREEAGENT pre-draft; and the whole board has only ever been priced off
+> a PRESEASON projection snapshot — 3.1b's refresh cadence is what makes the in-season
+> numbers real, and the staleness banner is the only thing standing between a July snapshot
+> and a November decision.
 
 ### 3.3 [Build] Candidate generator & signals
 **Goal:** High-recall breakout candidate scan from usage deltas and opportunity shocks (injury/depth-chart triggers), plus TD-regression flags. Output: ranked weekly candidate list with the signal evidence attached. (Precision re-ranking arrives in Phase 4 if the podcast arm earns deployment.)

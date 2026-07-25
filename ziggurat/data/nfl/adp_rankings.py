@@ -115,8 +115,11 @@ def ingest_adp_rankings(conn, df, *, retrieved_as_of: str) -> int:
         kept.append(row)
 
     idp_dropped = len(rows) - len(kept)
-    base.note_drops("adp_rankings", idp_dropped, len(rows), why="IDP position (not startable)")
     base.note_drops(
+        "adp_rankings", idp_dropped, len(rows),
+        why="IDP position (not startable)", by_design=True,
+    )
+    base.note_incomplete(
         "adp_rankings", unresolved, len(kept),
         why="unresolved FantasyPros crosswalk id (kept, NULL gsis_id)",
     )

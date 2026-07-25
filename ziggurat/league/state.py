@@ -674,6 +674,40 @@ def get_team_state(conn, *, as_of, season, team_id=None, view: base.AsOfView = "
     )
 
 
+class OwnTeamUnresolved(RuntimeError):
+    """The operator's own league team could not be identified from the SWID."""
+
+
+def resolve_own_team(conn, *, as_of, season, swid, view: base.AsOfView = "historical") -> int:
+    """The operator's own ``team_id``, matched on ``league_teams.primary_owner``.
+
+    Package-layer glue so the CLI stays thin (Rule 3) and so no module hard-codes
+    a team number: the id is a fact about the synced league, not a constant. The
+    SWID is a private credential — it is matched, never echoed into output or logs
+    (Rule 5). Raises rather than defaulting, because silently valuing SOMEONE
+    ELSE'S roster is a wrong answer the operator cannot smell (Rule 6).
+    """
+    token = str(swid or "").strip().upper()
+    rows = get_team_state(conn, as_of=as_of, season=season, view=view)
+    matches = [r["team_id"] for r in rows
+               if str(r["primary_owner"] or "").strip().upper() == token]
+    if len(matches) == 1:
+        return int(matches[0])
+    if not rows:
+        raise OwnTeamUnresolved(
+            f"no league_teams rows at as_of={as_of}: run `ziggurat league sync` first, "
+            "or pass --team explicitly."
+        )
+    if not matches:
+        raise OwnTeamUnresolved(
+            "the SWID in .env does not match any team owner in this league snapshot; "
+            "pass --team explicitly."
+        )
+    raise OwnTeamUnresolved(
+        f"the SWID in .env matches {len(matches)} teams; pass --team explicitly."
+    )
+
+
 def get_player_state(
     conn,
     *,

@@ -76,3 +76,36 @@ def test_unresolvable_rows_dropped_without_schedules(db, nfl_fixture):
     n = weekly_stats.ingest_weekly_stats(db, df, retrieved_as_of="2023-10-20")
     assert n == 0
     assert weekly_stats.get_weekly_stats(db, as_of="2023-10-20", season=2023) == []
+
+
+def test_null_player_id_rows_are_dropped_not_fatal(db, nfl_fixture):
+    """nflverse ships all-zero placeholder rows with a NULL player_id — measured
+    2026-07-24: 22 of 19,421 rows in stats_player_week_2025, one per week.
+
+    player_id is this table's NOT NULL primary key, so leaving them in made the
+    WHOLE pull raise IntegrityError mid-executemany. That is worse than it looks:
+    on a shared connection the partially-inserted rows stayed in the open
+    transaction and the NEXT ingester's commit persisted them, leaving a
+    permanently truncated week-1-only table with valid stamps on every row.
+    """
+    _load_schedules(db, nfl_fixture)
+    df = nfl_fixture("weekly_stats").copy().reset_index(drop=True)
+    good = len(df)
+    df.loc[0, "player_id"] = None
+
+    n = weekly_stats.ingest_weekly_stats(db, df, retrieved_as_of="2023-10-20")
+    assert n == good - 1, "the null-key row is dropped; every other row still lands"
+    assert db.execute("SELECT COUNT(*) c FROM weekly_stats WHERE player_id IS NULL") \
+             .fetchone()["c"] == 0
+
+
+def test_the_null_player_id_drop_is_counted_not_silent(db, nfl_fixture):
+    from ziggurat.data.nfl import base
+
+    _load_schedules(db, nfl_fixture)
+    df = nfl_fixture("weekly_stats").copy().reset_index(drop=True)
+    df.loc[0, "player_id"] = None
+    df.loc[1, "player_id"] = None
+    with base.collect_drops() as tally:
+        weekly_stats.ingest_weekly_stats(db, df, retrieved_as_of="2023-10-20")
+    assert tally["dropped"] >= 2

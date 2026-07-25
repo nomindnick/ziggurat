@@ -84,3 +84,35 @@ def test_missing_date_modified_falls_back_to_own_team_gameday_not_week_first(db,
     # And it stays hidden the day before that team plays (no leak).
     before = (date.fromisoformat(team_gameday) - timedelta(days=1)).isoformat()
     assert injuries.get_injuries(db, as_of=before, season=2023, week=6, gsis_id=late["gsis_id"]) == []
+
+
+def test_a_release_without_date_modified_still_ingests(db, nfl_fixture):
+    """VERIFIED 2026-07-24 against live nflverse: the 2025+ injury release no
+    longer carries ``date_modified`` at all (2024 has it, 2025 does not — the
+    upstream feed died after 2024 and 2025 exists only as a post-season bulk
+    backfill). require_columns therefore raised on EVERY pull, and the frozen
+    2023 fixture hid it: the suite stayed green over a broken production path.
+
+    The column is optional now; every row falls back to the team-gameday anchor,
+    which is coarser but still leakage-safe.
+    """
+    schedules.ingest_schedules(db, nfl_fixture("schedules"), retrieved_as_of="2023-08-01")
+    df = nfl_fixture("injuries").drop(columns=["date_modified"])
+    n = injuries.ingest_injuries(db, df, retrieved_as_of="2023-10-20")
+    assert n > 0
+
+    game_dates = base.game_date_map(db)
+    rows = injuries.get_injuries(db, as_of="2023-11-01", season=2023, week=6)
+    assert rows
+    for row in rows:
+        assert row["date_modified"] is None
+        assert row["knowable_as_of"] == game_dates[(2023, 6, row["team"])]
+
+
+def test_a_release_missing_a_genuinely_required_column_still_fails_loud(db, nfl_fixture):
+    """Only date_modified is optional. Real drift must still be a red build."""
+    import pytest
+
+    df = nfl_fixture("injuries").drop(columns=["report_status"])
+    with pytest.raises(ValueError, match="report_status"):
+        injuries.ingest_injuries(db, df, retrieved_as_of="2023-10-20")

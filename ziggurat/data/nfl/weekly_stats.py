@@ -45,6 +45,16 @@ def ingest_weekly_stats(conn, df, *, retrieved_as_of: str) -> int:
     via the difference between the frame length and the return value).
     """
     base.require_columns(df, _COLUMNS, source="weekly_stats")
+    # nflverse ships all-zero placeholder rows with a NULL player_id (measured
+    # 2026-07-24: 22 of 19,421 rows in stats_player_week_2025, one per week).
+    # player_id is the NOT NULL primary key here, so leaving them in made the
+    # WHOLE pull raise IntegrityError mid-executemany — which, on a shared
+    # connection, left a partial week-1-only table for the next source's commit
+    # to persist (item 3.1b). Drop them the way every other unresolvable key is
+    # dropped: counted, never silent.
+    total = len(df)
+    df = df.dropna(subset=["player_id"])
+    base.note_drops("weekly_stats", total - len(df), total, why="null player_id")
     gdm = base.game_date_map(conn)
 
     def _knowable(r):

@@ -655,3 +655,50 @@ def test_activity_trade_names_the_acquiring_team():
     ]}
     row = state.map_activity_topic(topic, season=2026)[0]
     assert (row["action"], row["team_id"]) == ("TRADE", 7)
+
+
+# ---------------------------------------------- resolve_own_team (item 3.2)
+
+
+def test_resolve_own_team_requires_as_of_and_gates_leakage(crosswalked_db, league_world):
+    """Rule 1: every accessor ships a leakage test. This one decides WHOSE roster
+    the marginal board values, so a snapshot it should not be able to see must not
+    silently resolve a team."""
+    payload, pool = league_world()
+    _ingest(crosswalked_db, payload, pool, day="2026-09-15")
+
+    with pytest.raises(TypeError):
+        state.resolve_own_team(crosswalked_db, season=2026, swid="{OWNER-4}")
+
+    assert state.resolve_own_team(
+        crosswalked_db, as_of="2026-09-15", season=2026, swid="{OWNER-4}") == 4
+    with pytest.raises(state.OwnTeamUnresolved):
+        state.resolve_own_team(
+            crosswalked_db, as_of="2026-09-14", season=2026, swid="{OWNER-4}")
+
+    # retrieval time is gated too: a row pulled AFTER the as-of date is invisible
+    _ingest(crosswalked_db, payload, pool, day="2026-09-20")
+    crosswalked_db.execute("DELETE FROM league_teams WHERE retrieved_as_of = '2026-09-15'")
+    crosswalked_db.commit()
+    with pytest.raises(state.OwnTeamUnresolved):
+        state.resolve_own_team(
+            crosswalked_db, as_of="2026-09-15", season=2026, swid="{OWNER-4}")
+
+
+def test_resolve_own_team_refuses_rather_than_guessing(crosswalked_db, league_world):
+    """Silently valuing SOMEONE ELSE'S roster is a wrong answer the operator
+    cannot smell (Rule 6), so an unmatched or ambiguous SWID raises."""
+    payload, pool = league_world()
+    _ingest(crosswalked_db, payload, pool, day="2026-09-15")
+    with pytest.raises(state.OwnTeamUnresolved) as exc:
+        state.resolve_own_team(
+            crosswalked_db, as_of="2026-09-15", season=2026, swid="{NOBODY}")
+    assert "--team" in str(exc.value)
+
+    crosswalked_db.execute(
+        "UPDATE league_teams SET primary_owner = '{OWNER-4}' WHERE team_id IN (4, 5)")
+    crosswalked_db.commit()
+    with pytest.raises(state.OwnTeamUnresolved) as exc:
+        state.resolve_own_team(
+            crosswalked_db, as_of="2026-09-15", season=2026, swid="{OWNER-4}")
+    assert "2 teams" in str(exc.value)

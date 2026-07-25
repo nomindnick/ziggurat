@@ -2,11 +2,13 @@
 
 import json
 import shutil
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
+from ziggurat.cli import main as main_module
 from ziggurat.cli.main import app
 from ziggurat.data.nfl import espn_source, projections
 from ziggurat.data.store import apply_schema, connect
@@ -206,3 +208,171 @@ def test_smoke_exercises_the_three_spines():
     # the RB line prices through the house rules: 80*0.1 + 6 + 5 + 42*0.1 = 23.2.
     assert "23.2 pts (house rules)" in result.output
     assert "echo" in result.output
+
+
+def test_valuation_espn_reads_a_past_board_instead_of_overwriting_it(tmp_path, monkeypatch):
+    """`valuation --espn --as-of <past day>` used to live-pull and back-stamp,
+    DELETING that day's stored board (perishable — ESPN serves no history) and
+    manufacturing a retrieval-time leak. It now reads what was stored."""
+    db_path = tmp_path / "val.sqlite"
+    _build_valuation_db(db_path)
+    monkeypatch.setenv("SWID", "{TEST-SWID}")
+    monkeypatch.setenv("ESPN_S2", "test-s2-cookie")
+    with patch.object(espn_source, "fetch_player_universe") as fetch:
+        result = runner.invoke(
+            app,
+            ["valuation", "--as-of", "2020-08-01", "--season", "2026",
+             "--path", str(db_path), "--espn", "--league-id", "123456"],
+        )
+    assert result.exit_code == 0, result.output
+    fetch.assert_not_called()
+
+
+def test_valuation_espn_reports_a_board_collapse_legibly(tmp_path, monkeypatch):
+    """A draft-adjacent command must not die in a traceback when the new floor
+    refuses a degraded board."""
+    from ziggurat.cli import main
+    from ziggurat.data.nfl import espn_ranks
+
+    db_path = tmp_path / "val.sqlite"
+    _build_valuation_db(db_path)
+    monkeypatch.setenv("SWID", "{TEST-SWID}")
+    monkeypatch.setenv("ESPN_S2", "test-s2-cookie")
+    # patch the CLI's OWN binding: `from ... import ensure_board` copied the name.
+    with patch.object(main, "ensure_espn_board",
+                      side_effect=espn_ranks.BoardCollapse("refusing to write an EMPTY board")):
+        result = runner.invoke(
+            app,
+            ["valuation", "--as-of", date.today().isoformat(), "--season", "2026",
+             "--path", str(db_path), "--espn", "--league-id", "123456"],
+        )
+    assert result.exit_code == 1
+    assert "refusing to write an EMPTY board" in result.output
+    assert "Traceback" not in result.output
+
+
+def _build_marginal_db(db_path):
+    """A temp facts DB with a projected universe and a drafted team 10 (item 3.2)."""
+    conn = connect(db_path)
+    apply_schema(conn)
+    specs = [
+        ("Cli Passer", "QB", "TEN", 20.0, 6, 10),
+        ("Cli Runner", "RB", "ATL", 18.0, 11, 10),
+        ("Cli Runner Two", "RB", "BUF", 12.0, 7, 10),
+        ("Cli Catcher", "WR", "DAL", 17.0, 8, 10),
+        ("Cli Catcher Two", "WR", "DEN", 15.0, 9, 10),
+        ("Cli Tight", "TE", "IND", 10.0, 13, 10),
+        ("Cli Kicker", "K", "KC", 8.0, 14, 10),
+        ("Cli Defense", "D/ST", "MIA", 7.0, 5, 10),
+        ("Cli Spare", "WR", "NYJ", 6.0, 12, None),
+    ]
+    for i, (name, pos, team, pts, bye, on_team) in enumerate(specs):
+        is_dst = pos == "D/ST"
+        gsis = None if is_dst else f"00-C{i:04d}"
+        espn_id = str(-17000 - i) if is_dst else str(7000 + i)
+        if not is_dst:
+            conn.execute(
+                "INSERT INTO players (gsis_id, sleeper_id, espn_id, name, retrieved_as_of, "
+                "knowable_as_of) VALUES (?, ?, ?, ?, '2026-09-15', '2026-09-15')",
+                (gsis, f"C{i}", espn_id, name),
+            )
+        for week in range(1, 18):
+            on_bye = week == bye
+            if on_bye and is_dst:
+                continue
+            stat = "sacks" if is_dst else ("pat_made" if pos == "K" else "rushing_yards")
+            value = None if on_bye else (pts * 10.0 if stat == "rushing_yards" else pts)
+            conn.execute(
+                f"INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+                f"season_type, position, team, opponent, {stat}, retrieved_as_of, "
+                f"knowable_as_of) VALUES ('sleeper_rotowire', ?, ?, 2026, ?, 'regular', ?, "
+                f"?, ?, ?, '2026-09-15', '2026-09-15')",
+                (f"C{i}", gsis, week, "DEF" if is_dst else pos, team,
+                 None if on_bye else "OPP", value),
+            )
+        conn.execute(
+            "INSERT INTO league_player_state (season, espn_player_id, gsis_id, player, "
+            "position, pro_team, on_team_id, roster_status, lineup_slot, injury_status, "
+            "percent_owned, scoring_period, retrieved_as_of, knowable_as_of) VALUES "
+            "(2026, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 20.0, 4, '2026-09-15', '2026-09-15')",
+            (espn_id, gsis, name, pos, team, on_team,
+             "ONTEAM" if on_team else "FREEAGENT", "BE" if on_team else None),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_marginal_prints_a_drop_board_with_its_caveats(tmp_path):
+    db_path = tmp_path / "marginal.sqlite"
+    _build_marginal_db(db_path)
+    result = runner.invoke(app, ["marginal", "--path", str(db_path), "--as-of",
+                                 "2026-09-15", "--season", "2026", "--team", "10",
+                                 "--from-week", "4"])
+    assert result.exit_code == 0, result.output
+    assert "drop board" in result.output
+    # Rule 6: the static-roster assumption is printed above every board, and the
+    # staleness banner says which pull the numbers came from.
+    assert "NO OTHER MOVES ALL SEASON" in result.output
+    assert "projections: pulled 2026-09-15" in result.output
+    assert "Cli Runner" in result.output
+
+
+def test_marginal_refuses_to_guess_the_current_week(tmp_path):
+    """`--from-week` omitted, with no scoring period and no readable schedules:
+    the command must fail legibly rather than pricing a whole season."""
+    db_path = tmp_path / "marginal.sqlite"
+    _build_marginal_db(db_path)
+    conn = connect(db_path)
+    conn.execute("UPDATE league_player_state SET scoring_period = 0")
+    conn.commit()
+    conn.close()
+    result = runner.invoke(app, ["marginal", "--path", str(db_path), "--as-of",
+                                 "2026-09-15", "--season", "2026", "--team", "10"])
+    assert result.exit_code == 1
+    assert "--from-week" in result.output
+
+
+def test_marginal_prunes_the_pool_by_default_and_says_so(tmp_path):
+    """``--pool-limit`` defaulted to None and was passed straight through, so
+    ``DEFAULT_POOL_LIMIT`` was unreachable from the only user-facing entry point,
+    ``--pool-limit 0`` meant what the default already meant, and the disclosure
+    note about a narrowed scan never appeared."""
+    from ziggurat.core.marginal import DEFAULT_POOL_LIMIT
+
+    db_path = tmp_path / "marginal.sqlite"
+    _build_marginal_db(db_path)
+    seen = {}
+    real = main_module.build_board
+
+    def spy(*args, **kwargs):
+        seen["pool_limit"] = kwargs.get("pool_limit")
+        seen["last_week"] = kwargs.get("last_week")
+        return real(*args, **kwargs)
+
+    with patch.object(main_module, "build_board", spy):
+        runner.invoke(app, ["marginal", "--path", str(db_path), "--as-of",
+                            "2026-09-15", "--season", "2026", "--team", "10",
+                            "--from-week", "4"])
+        assert seen["pool_limit"] == DEFAULT_POOL_LIMIT
+        runner.invoke(app, ["marginal", "--path", str(db_path), "--as-of",
+                            "2026-09-15", "--season", "2026", "--team", "10",
+                            "--from-week", "4", "--pool-limit", "0"])
+        assert seen["pool_limit"] is None
+
+
+def test_marginal_last_week_is_not_a_silent_no_op(tmp_path):
+    """``--last-week`` was consumed only inside the ``--from-week`` branch and
+    ``build_board`` had no parameter to forward it to, so
+    ``ziggurat marginal --last-week 14`` priced through week 17 with no error and
+    no hint the flag had been dropped."""
+    db_path = tmp_path / "marginal.sqlite"
+    _build_marginal_db(db_path)
+    conn = connect(db_path)
+    conn.execute("UPDATE league_player_state SET scoring_period = 4")
+    conn.commit()
+    conn.close()
+    result = runner.invoke(app, ["marginal", "--path", str(db_path), "--as-of",
+                                 "2026-09-15", "--season", "2026", "--team", "10",
+                                 "--last-week", "14"])
+    assert result.exit_code == 0, result.output
+    assert "weeks 4-14" in result.output

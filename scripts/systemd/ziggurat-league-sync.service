@@ -15,18 +15,29 @@
 [Unit]
 Description=Ziggurat league-state snapshot (ESPN rosters, standings, matchups, FA pool)
 Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
-# Do not fire on a cold boot before the network is up.
-After=network-online.target
 # Rate limit for the Restart= below. These live in [Unit], not [Service]
 # (systemd >= 229); putting them under [Service] is silently ignored.
 StartLimitBurst=3
-StartLimitIntervalSec=1800
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec), or the limiter can
+# never engage against a HANG (item 3.1b audit): a start killed at t=600 and
+# retried at t=780 has aged out of a 1800s window before the third attempt.
+StartLimitIntervalSec=7200
 
 [Service]
 Type=oneshot
 WorkingDirectory=@REPO@
 # The season is PINNED rather than derived, so a January run cannot drift to the
 # wrong season number. Update it (or re-run the installer) each new season.
+# `After=network-online.target` was here and is a NO-OP in a USER unit — that
+# target is a system unit and the user manager has no such unit, so systemd
+# silently ignores the ordering (item 3.1b audit; verified `systemctl --user show
+# network-online.target -p LoadState` -> not-found). With Persistent=true the
+# catch-up fires the moment the user manager starts, which is exactly when the
+# network is most likely down. Wait for name resolution explicitly, bounded, and
+# never fail the unit on it — Restart=on-failure is the real backstop.
+# NOTE: re-run scripts/install-league-sync.sh to pick this up on a box where the
+# unit is already installed.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts lm-api-reads.fantasy.espn.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
 ExecStart=@REPO@/.venv/bin/ziggurat league sync --season @SEASON@
 # ESPN is occasionally flaky; retry a couple of times (rate-limited by the
 # StartLimit* keys above) before conceding the run — a genuinely expired cookie

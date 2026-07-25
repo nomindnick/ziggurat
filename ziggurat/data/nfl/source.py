@@ -14,6 +14,8 @@ from importlib import import_module
 
 import pandas as pd
 
+from ziggurat import net
+
 
 def _client():
     try:
@@ -121,5 +123,7 @@ def import_sleeper_projections(season, week, season_type: str = "regular"):
     query += [("position[]", pos) for pos in _SLEEPER_PROJECTION_POSITIONS]
     url = f"{base_url}?{urllib.parse.urlencode(query)}"
     req = urllib.request.Request(url, headers={"User-Agent": "ziggurat/1.5"})
-    with urllib.request.urlopen(req) as resp:  # noqa: S310 (fixed https host)
+    # Bounded (item 3.1b): this runs ONCE PER WEEK inside the scheduled pull, and
+    # an unbounded urlopen under systemd Type=oneshot parks the cadence forever.
+    with urllib.request.urlopen(req, timeout=net.HTTP_TIMEOUT) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))

@@ -423,3 +423,52 @@ def test_value_view_flags_are_report_specific_not_market():
     assert flags["eQ"] == valuation.ALIGNED
     assert all(r.flag in valuation.VALUE_FLAGS for r in view)
     assert all("MARKET" not in r.flag for r in view)
+
+
+# ------------------------------- the shared spine's own accessors (item 3.2)
+
+
+def test_weekly_lines_and_weekly_points_require_as_of_and_gate_leakage(db):
+    """``weekly_lines`` / ``weekly_points`` are PUBLIC as-of accessors added by
+    item 3.2, and Rule 1 says every accessor ships a leakage test. ``weekly_lines``
+    is exercised transitively through ``build_valuation``; ``weekly_points`` had no
+    caller and no test at all, which is untested public surface a future author
+    will pick up."""
+    for fn in (valuation.weekly_lines, valuation.weekly_points):
+        with pytest.raises(TypeError):
+            fn(db, season=2026)
+
+    _stub_player(db, sleeper_id="100", gsis_id="00-QB")
+    projections.ingest_projections(db, _fixture_rows(), retrieved_as_of="2026-08-01")
+
+    assert valuation.weekly_lines(db, as_of="2026-07-31", season=2026) == {}
+    assert valuation.weekly_points(db, as_of="2026-07-31", season=2026) == {}
+
+    lines = valuation.weekly_lines(db, as_of="2026-08-01", season=2026)
+    points = valuation.weekly_points(db, as_of="2026-08-01", season=2026)
+    assert lines and set(points) == set(lines)
+    for key, line in lines.items():
+        assert points[key] == dict(line.points)
+
+
+def test_weekly_lines_reports_which_weeks_the_feed_actually_forecast(db):
+    """``points`` cannot distinguish "worth zero" from "we have no forecast": the
+    feed emits the SAME shape (team set, opponent NULL, every stat NULL) for a bye
+    and for a player it does not cover. ``played_weeks`` is the only signal that
+    separates them, and item 3.2's unpriceable gate stands on it."""
+    _stub_player(db, sleeper_id="100", gsis_id="00-QB")
+    rows = _fixture_rows()
+    qb = [r for r in rows if r["player_id"] == "100"]
+    assert qb
+    blank = copy.deepcopy(qb[0])
+    blank["week"] = 9
+    blank["opponent"] = None
+    blank["stats"] = {}
+    projections.ingest_projections(db, rows + [blank], retrieved_as_of="2026-08-01")
+
+    line = valuation.weekly_lines(db, as_of="2026-08-01", season=2026)[("SKILL", "00-QB")]
+    assert 9 in line.points and line.points[9] == 0.0     # the row IS there
+    assert 9 not in line.played_weeks                     # ...but it forecasts nothing
+    assert line.played_weeks == frozenset(
+        int(r["week"]) for r in qb if r.get("opponent")
+    )

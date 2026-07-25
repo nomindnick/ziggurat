@@ -33,6 +33,7 @@ import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ziggurat import net
 from ziggurat.data.nfl import base
 
 # ------------------------------------------------------------------ stadium ref
@@ -134,7 +135,9 @@ def fetch_open_meteo(lat, lon, date, tz, *, mode) -> dict:
     }
     url = f"{host}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"User-Agent": "ziggurat/1.5"})
-    with urllib.request.urlopen(req) as resp:  # noqa: S310 (fixed https hosts)
+    # Bounded (item 3.1b): one call PER OUTDOOR GAME, so an unbounded urlopen is
+    # ~13 chances a week to park the scheduled run under Type=oneshot.
+    with urllib.request.urlopen(req, timeout=net.HTTP_TIMEOUT) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))
 
 

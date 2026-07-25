@@ -49,15 +49,78 @@ class RosterStructure:
 
     ``starters`` are DEDICATED (non-flex) slots per team; ``flex_slots`` are the
     additional RB/WR/TE slots pooled empirically across ``flex_positions``.
+
+    ``bench_slots`` / ``ir_slots`` were added by item 3.2 (§7.7): the real roster
+    is **16 active slots + 1 IR slot**, not "≤16", and ESPN blocks every
+    transaction while a roster is illegal — so the waiver module (3.4) needs the
+    active-slot count and the IR allowance to be stated somewhere. Both are
+    additive with defaults, so no 2.1/2.2/2.3 behaviour changes.
     """
 
     teams: int = 10
     starters: Mapping[str, int] = _DEFAULT_STARTERS
     flex_slots: int = 1
     flex_positions: frozenset[str] = frozenset({"RB", "WR", "TE"})
+    bench_slots: int = 7
+    ir_slots: int = 1
+
+    @property
+    def starting_slots(self) -> int:
+        """Slots that score in a given week (9 here: 7 dedicated + 1 flex + ...)."""
+        return sum(self.starters.values()) + self.flex_slots
+
+    @property
+    def active_slots(self) -> int:
+        """Roster slots that count against legality (starters + flex + bench).
+
+        IR is deliberately NOT counted — an IR occupant is off the active roster.
+        """
+        return self.starting_slots + self.bench_slots
 
 
 DEFAULT_ROSTER = RosterStructure()
+
+
+@dataclass(frozen=True)
+class WeeklyLine:
+    """One player's per-week house points plus the identity spine (item 3.2).
+
+    ``points`` is week -> house points for the weeks that HAVE a projection row.
+    A missing week means "no row" — which for a skill player's bye is a row full
+    of NULLs scoring 0.0, and for a D/ST bye is no row at all (item 3.2 §2.5).
+    Consumers must treat "missing" as 0.0 points and derive bye/availability
+    SEPARATELY, never from the points value.
+
+    ``played_weeks`` is the weeks whose row carried an OPPONENT — i.e. the weeks
+    the feed actually forecast a game for this player. It is NOT the same as
+    ``points.keys()`` and the difference is load-bearing: the feed publishes
+    bye-SHAPED rows (team set, opponent NULL, every stat NULL, scoring 0.0) both
+    for a real bye AND for a player it simply has no forecast for. A player with
+    more than one such week in a span has MISSING COVERAGE, not a bye — measured
+    on the live 2026 feed, A.J. Brown (99.3% owned) carries a real week-1 line and
+    16 bye-shaped weeks, which scored him as near-worthless. Consumers must check
+    coverage against ``played_weeks``, never against the point sum.
+
+    ``retrieved_as_of`` carries the snapshot day(s) the points came from — the
+    staleness banner's input (a July projection pricing a November decision is
+    Rule-1-invisible: that snapshot really is the newest thing <= as_of).
+    """
+
+    key: tuple
+    position: str                       # canonical QB/RB/WR/TE/DST/K
+    gsis_id: str | None
+    source_player_id: str | None
+    espn_id: str | None
+    team: str | None
+    player: str | None
+    points: Mapping[int, float]
+    totals: Mapping[str, float]         # reason-string drivers (receptions, ...)
+    retrieved_as_of: frozenset[str]
+    played_weeks: frozenset[int] = frozenset()
+
+    @property
+    def season_points(self) -> float:
+        return sum(self.points.values())
 
 
 @dataclass(frozen=True)
@@ -104,7 +167,7 @@ class ValueDivergenceRow:
 # --------------------------------------------------------------- position canon
 
 
-def _canon_position(pos) -> str | None:
+def canon_position(pos) -> str | None:
     """Canonical QB/RB/WR/TE/DST/K, or None for a non-league position.
 
     Uses scoring.py's frozensets (rule 2): DEF/D/ST -> DST, PK -> K.
@@ -119,6 +182,12 @@ def _canon_position(pos) -> str | None:
     if p in scoring.KICKER_POSITIONS:
         return "K"
     return None
+
+
+# Item 3.2 promoted this to the public surface (core/marginal.py and the CLI both
+# canonicalize positions). The private name stays as an alias so no 2.x caller
+# breaks.
+_canon_position = canon_position
 
 
 def _num(value) -> float:
@@ -217,6 +286,143 @@ def _driver_reason(canon: str, totals: dict, rules: scoring.ScoringRules) -> str
     return ""
 
 
+def weekly_lines(
+    conn,
+    *,
+    as_of,
+    season,
+    weeks: Iterable[int] | None = None,
+    source: str = "sleeper_rotowire",
+    rules: scoring.ScoringRules = scoring.HOUSE_RULES,
+    view: base.AsOfView = "historical",
+) -> dict[tuple, WeeklyLine]:
+    """The ONE identity spine: player key -> per-week house points + identity.
+
+    Extracted by item 3.2 so the season board (``build_valuation``) and the
+    in-season marginal board (``core/marginal.py``) cannot drift onto two
+    different spines — a player present on one board and absent from the other is
+    an invisible failure.
+
+    Rule 1: ``as_of``/``view`` are keyword-only and THREAD STRAIGHT INTO
+    ``get_projections``; this layer never widens the gate. Rule 2: every point is
+    priced through ``scoring.score`` on that week's OWN row (per-week-then-sum —
+    the non-linear D/ST brackets make sum-then-score wrong).
+
+    Grouping: D/ST by ``TEAM_ALIASES``-normalized team (league state normalizes
+    LAR->LA while the projection feed stores LAR verbatim; joining raw loses the
+    Rams), skill by ``gsis_id``, falling back to ``source_player_id`` so two
+    uncrosswalked rookies never merge.
+    """
+    week_set = set(DEFAULT_WEEKS if weeks is None else weeks)
+    rows = projections.get_projections(
+        conn, as_of=as_of, season=season, source=source, view=view
+    )
+    names = _resolve_names(conn)
+    espn_ids = base.espn_by_gsis(conn)
+
+    acc: dict[tuple, dict] = {}
+    for r in rows:
+        st = r["season_type"]
+        if st is None or str(st).strip().lower() != "regular":
+            continue
+        week = r["week"]
+        if week not in week_set:
+            continue
+        raw_pos = r["position"]
+        canon = canon_position(raw_pos)
+        if canon is None:
+            continue
+
+        team = base.TEAM_ALIASES.get(
+            str(r["team"]).strip().upper(), str(r["team"]).strip().upper()
+        ) if r["team"] is not None else None
+
+        if canon == "DST":
+            key = ("DST", team)
+        elif r["gsis_id"] is not None:
+            key = ("SKILL", r["gsis_id"])
+        else:
+            key = ("SPID", r["source_player_id"])
+
+        a = acc.get(key)
+        if a is None:
+            a = {
+                "canon": canon,
+                "gsis_id": r["gsis_id"],
+                "source_player_id": r["source_player_id"],
+                "team": team,
+                "points": {},
+                "retrieved": set(),
+                "played": set(),
+                "totals": {"receptions": 0.0, "bracket_pts": 0.0, "kick_pts": 0.0},
+            }
+            acc[key] = a
+
+        stat = dict(r)
+        pts = scoring.score(raw_pos, stat, rules)
+        a["points"][week] = a["points"].get(week, 0.0) + pts
+        a["retrieved"].add(r["retrieved_as_of"])
+        opp = r["opponent"]
+        if opp is not None and str(opp).strip():
+            a["played"].add(week)
+        if canon in scoring.OFFENSE_POSITIONS:
+            a["totals"]["receptions"] += _num(r["receptions"])
+        elif canon == "DST":
+            # bracket contribution = full - events (public API only, no constants).
+            no_brackets = dict(stat)
+            no_brackets["points_allowed"] = None
+            no_brackets["yards_allowed"] = None
+            a["totals"]["bracket_pts"] += pts - scoring.score(raw_pos, no_brackets, rules)
+        elif canon == "K":
+            a["totals"]["kick_pts"] += pts
+        if a["team"] is None and team is not None:
+            a["team"] = team
+
+    out: dict[tuple, WeeklyLine] = {}
+    for key, a in acc.items():
+        gsis = a["gsis_id"]
+        canon = a["canon"]
+        if canon == "DST":
+            player = f"{a['team']} D/ST" if a["team"] else "D/ST"
+        else:
+            player = names.get(gsis)
+        out[key] = WeeklyLine(
+            key=key,
+            position=canon,
+            gsis_id=gsis,
+            source_player_id=a["source_player_id"],
+            espn_id=None if canon == "DST" else espn_ids.get(gsis),
+            team=a["team"],
+            player=player,
+            points=a["points"],
+            totals=a["totals"],
+            retrieved_as_of=frozenset(x for x in a["retrieved"] if x is not None),
+            played_weeks=frozenset(a["played"]),
+        )
+    return out
+
+
+def weekly_points(
+    conn,
+    *,
+    as_of,
+    season,
+    weeks: Iterable[int] | None = None,
+    source: str = "sleeper_rotowire",
+    rules: scoring.ScoringRules = scoring.HOUSE_RULES,
+    view: base.AsOfView = "historical",
+) -> dict[tuple, dict[int, float]]:
+    """``{player_key: {week: house points}}`` — the design's stated §7.4 surface,
+    a thin projection of :func:`weekly_lines` for callers that need only points."""
+    return {
+        key: dict(line.points)
+        for key, line in weekly_lines(
+            conn, as_of=as_of, season=season, weeks=weeks, source=source,
+            rules=rules, view=view,
+        ).items()
+    }
+
+
 def build_valuation(
     conn,
     *,
@@ -240,99 +446,38 @@ def build_valuation(
     crosswalk is unresolved, so distinct rookies/DEF never merge) and DST by
     normalized team, then prices VOR off ``replacement_levels``.
     """
-    week_set = set(DEFAULT_WEEKS if weeks is None else weeks)
-    rows = projections.get_projections(
-        conn, as_of=as_of, season=season, source=source, view=view
+    lines = weekly_lines(
+        conn, as_of=as_of, season=season, weeks=weeks, source=source,
+        rules=rules, view=view,
     )
-
-    names = _resolve_names(conn)
-    espn_ids = base.espn_by_gsis(conn)
-
-    # group_key -> accumulator
-    groups: dict[tuple, dict] = {}
-    for r in rows:
-        st = r["season_type"]
-        if st is None or str(st).strip().lower() != "regular":
-            continue
-        if r["week"] not in week_set:
-            continue
-        raw_pos = r["position"]
-        canon = _canon_position(raw_pos)
-        if canon is None:
-            continue
-
-        team = base.TEAM_ALIASES.get(
-            str(r["team"]).strip().upper(), str(r["team"]).strip().upper()
-        ) if r["team"] is not None else None
-
-        if canon == "DST":
-            key = ("DST", team)
-        elif r["gsis_id"] is not None:
-            key = ("SKILL", r["gsis_id"])
-        else:
-            key = ("SPID", r["source_player_id"])
-
-        acc = groups.get(key)
-        if acc is None:
-            acc = {
-                "canon": canon,
-                "gsis_id": r["gsis_id"],
-                "source_player_id": r["source_player_id"],
-                "team": team,
-                "proj": 0.0,
-                "weeks": set(),
-                "totals": {"receptions": 0.0, "bracket_pts": 0.0, "kick_pts": 0.0},
-            }
-            groups[key] = acc
-
-        stat = dict(r)
-        pts = scoring.score(raw_pos, stat, rules)
-        acc["proj"] += pts
-        acc["weeks"].add(r["week"])
-        if canon in scoring.OFFENSE_POSITIONS:
-            acc["totals"]["receptions"] += _num(r["receptions"])
-        elif canon == "DST":
-            # bracket contribution = full - events (public API only, no constants).
-            no_brackets = dict(stat)
-            no_brackets["points_allowed"] = None
-            no_brackets["yards_allowed"] = None
-            acc["totals"]["bracket_pts"] += pts - scoring.score(raw_pos, no_brackets, rules)
-        elif canon == "K":
-            acc["totals"]["kick_pts"] += pts
-        if acc["team"] is None and team is not None:
-            acc["team"] = team
-
-    if not groups:
+    if not lines:
         return []
 
     # by_pos: canonical position -> season points DESC (for replacement levels).
     by_pos: dict[str, list[float]] = {}
-    for acc in groups.values():
-        by_pos.setdefault(acc["canon"], []).append(acc["proj"])
+    for line in lines.values():
+        by_pos.setdefault(line.position, []).append(line.season_points)
     for pts_list in by_pos.values():
         pts_list.sort(reverse=True)
 
     replacement, started = replacement_levels(by_pos, roster, denoise_kdst=denoise_kdst)
 
     rows_out: list[ValuationRow] = []
-    for acc in groups.values():
-        canon = acc["canon"]
-        proj = acc["proj"]
+    for line in lines.values():
+        canon = line.position
+        proj = line.season_points
         repl = replacement.get(canon, 0.0)
-        weeks_counted = len(acc["weeks"])
-        gsis = acc["gsis_id"]
-        espn_id = None if canon == "DST" else espn_ids.get(gsis)
-        if canon == "DST":
-            player = f"{acc['team']} D/ST" if acc["team"] else "D/ST"
-        else:
-            player = names.get(gsis)
+        # rows-present, NOT games played (item 3.2 §2.5: a bye row is present with
+        # NULL stats for skill players and absent entirely for D/ST). Never a
+        # denominator.
+        weeks_counted = len(line.points)
 
         baseline_rank = started.get(canon, 0) + 1  # first non-starter is (started+1)-th
         reasons = [
             f"{proj:.1f} house pts / {weeks_counted} wk",
             f"{canon} replacement {repl:.1f} ({canon}{baseline_rank})",
         ]
-        driver = _driver_reason(canon, acc["totals"], rules)
+        driver = _driver_reason(canon, line.totals, rules)
         if driver:
             reasons.append(driver)
         if canon in _LOW_CONFIDENCE_POSITIONS:
@@ -340,10 +485,10 @@ def build_valuation(
 
         rows_out.append(
             ValuationRow(
-                gsis_id=gsis,
-                espn_id=espn_id,
-                team=acc["team"],
-                player=player,
+                gsis_id=line.gsis_id,
+                espn_id=line.espn_id,
+                team=line.team,
+                player=line.player,
                 position=canon,
                 season=int(season),
                 weeks_counted=weeks_counted,
@@ -432,7 +577,7 @@ def build_value_view(
             # Only compare when both boards agree on the player's position;
             # a Sleeper/ESPN position disagreement (fringe/gadget players) would
             # otherwise subtract ranks from two different position pools.
-            if e is not None and _canon_position(e.get("position")) != v.position:
+            if e is not None and canon_position(e.get("position")) != v.position:
                 continue
         if e is None:
             continue  # unmatched: no ESPN board rank to compare against

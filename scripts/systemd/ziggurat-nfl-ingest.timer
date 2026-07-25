@@ -1,0 +1,37 @@
+# Ziggurat NFL data refresh schedule — DAILY group (item 3.1b) — USER timer.
+#
+# ONCE a day, not four times. The league-state sync runs 4x/day because ESPN
+# serves no history and a missed day is unrecoverable; that reasoning does NOT
+# transfer here. Every nflverse source is a whole-season file re-downloaded in
+# full, so extra runs buy nothing but tens of megabytes a day of pointless
+# traffic against free volunteer infrastructure that publishes once daily.
+#
+# The hour is pinned to MEASURED upstream publish times (probed 2026-07-24), not
+# to a guess:
+#   * Sleeper regenerates ALL 18 weeks of projections in ONE batch at ~07:45 UTC
+#     (every row's last_modified inside a 3-second window).
+#   * nflverse depth charts / rosters publish 06:00-13:00 UTC, mode ~09:00.
+#   * DynastyProcess player ids commit weekly, Fridays ~04:00 UTC.
+#   * FantasyPros ECR carries its own scrape_date and refreshes daily.
+# 07:20 LOCAL clears all of them in US time zones with margin.
+#
+# Deliberately off the league timer's :15 slots so ESPN is never hit by both
+# units in the same instant.
+
+[Unit]
+Description=Ziggurat NFL data refresh schedule (daily group)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=*-*-* 07:20:00
+# Persistent: if the machine was asleep/off at the scheduled time, run at the
+# next opportunity rather than skipping the day. This matters more here than it
+# looks — projections and the ECR scrape are point-in-time only.
+Persistent=true
+# Do not hit upstream from every machine at exactly :20.
+RandomizedDelaySec=900
+AccuracySec=1m
+Unit=ziggurat-nfl-ingest.service
+
+[Install]
+WantedBy=timers.target

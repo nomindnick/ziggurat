@@ -1,0 +1,45 @@
+# Ziggurat NFL source refresh — WEEKLY group (item 3.1b) — systemd USER service.
+#
+# Installed by scripts/install-nfl-ingest.sh, which substitutes @REPO@ and
+# @SEASON@. The post-game nflverse sources: weekly_stats, snap_counts,
+# team_defense and the three NGS tables.
+#
+# Separate from the daily unit for two reasons that both matter:
+#   1. These are whole-season parquet files (weekly_stats alone is ~19k rows a
+#      season). Re-downloading them daily is pure waste against free volunteer
+#      infrastructure — and because the file covers the WHOLE season, one weekly
+#      pull also self-heals every earlier week.
+#   2. NFL stat corrections land Monday-Wednesday, so Thursday's copy is the
+#      clean one. Pulling Tuesday would store numbers that upstream then revises.
+#
+# None of these is perishable: a missed run costs freshness, never data.
+
+[Unit]
+Description=Ziggurat NFL post-game data refresh (weekly group: stats, snaps, NGS, team defense)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+StartLimitBurst=3
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec) or the rate
+# limiter can never engage against a HANG: a start killed at t=1800 and retried
+# at t=2100 has already aged out of a 1800s window, so the burst counter never
+# passes 1 and the unit loops all day re-downloading everything.
+StartLimitIntervalSec=10800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# NOTE: `After=network-online.target` does NOT work in a USER unit — that target
+# is a system unit, the user manager has no such unit, and `After=` on a
+# nonexistent unit is silently ignored (verified: `systemctl --user show
+# network-online.target -p LoadState` -> not-found). Combined with
+# Persistent=true, a machine that was off at the scheduled time runs the catch-up
+# the moment the user manager starts, which is exactly when the network is most
+# likely still down. So wait for name resolution explicitly, bounded, and never
+# fail the unit on it — Restart=on-failure is the real backstop.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts github.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+ExecStart=@REPO@/.venv/bin/ziggurat ingest run --group weekly --season @SEASON@
+Restart=on-failure
+RestartSec=600
+# Type=oneshot defaults TimeoutStartSec to INFINITY — see the daily unit.
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal

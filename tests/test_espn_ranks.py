@@ -224,12 +224,189 @@ def test_pull_uses_patched_seam(db):
     with patch.object(espn_source, "fetch_player_universe", return_value=_raw_players()) as m:
         n = espn_ranks.pull_espn_ranks(
             db, league_id=1160156465, season=2026,
-            espn_s2="x", swid="y", retrieved_as_of="2026-07-20",
+            espn_s2="x", swid="y", retrieved_as_of="2026-07-20", today="2026-07-20",
         )
     m.assert_called_once()
     assert n == len(_raw_players())
     got = espn_ranks.get_espn_draft_ranks(db, as_of="2026-07-20", season=2026)
     assert len(got) == n
+
+
+# ------------------------------------------------- collapse floor (item 3.1b)
+#
+# ingest_espn_ranks is the ONLY delete-then-write path in ziggurat/data/nfl/, and
+# the delete is scoped to (season, TODAY) — today's partition is the one the
+# draft cockpit reads. The 3.1b probe reproduced the item-3.1 destroy-the-day bug
+# here against the live DB with real credentials: a 20-player degraded response
+# replaced a stored 1,026-player same-day board, and an empty response wiped it
+# to zero (the coverage guard sat behind `if rows:`; the DELETE did not).
+
+
+def _board(n, *, start=1):
+    """A well-formed n-player board slice (every row carries a PPR rank, so the
+    editorial-coverage guard cannot be what refuses it)."""
+    return [
+        {"id": i, "defaultPositionId": 2, "proTeamId": 8, "fullName": f"P{i}",
+         "draftRanksByRankType": {"PPR": {"rank": i}}, "ownership": {"averageDraftPosition": i}}
+        for i in range(start, start + n)
+    ]
+
+
+def test_degraded_same_day_pull_is_refused_and_the_stored_board_survives(db):
+    """THE property this item exists to protect: the DB holds a draft board three
+    weeks before draft day, and a bad refresh must not destroy it."""
+    espn_ranks.ingest_espn_ranks(db, _board(1000), retrieved_as_of="2026-07-24", season=2026)
+    before = db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"]
+    assert before == 1000
+
+    with pytest.raises(espn_ranks.BoardCollapse, match="degraded"):
+        espn_ranks.ingest_espn_ranks(db, _board(20), retrieved_as_of="2026-07-24", season=2026)
+
+    after = db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"]
+    assert after == before, "the refused pull must leave the stored board untouched"
+    # And the board still READS whole — not a stale/mixed hybrid.
+    assert len(espn_ranks.get_espn_draft_ranks(db, as_of="2026-07-24", season=2026)) == 1000
+
+
+def test_empty_pull_is_refused_even_with_no_stored_board(db):
+    # An empty board is never right, so this floor is unconditional and is NOT
+    # covered by allow_shrink. It is also the case the old `if rows:` guard
+    # skipped entirely on its way to an unconditional DELETE.
+    with pytest.raises(espn_ranks.BoardCollapse, match="EMPTY"):
+        espn_ranks.ingest_espn_ranks(db, [], retrieved_as_of="2026-07-24", season=2026)
+    assert db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"] == 0
+
+
+def test_empty_pull_never_wipes_a_stored_board(db):
+    espn_ranks.ingest_espn_ranks(db, _board(500), retrieved_as_of="2026-07-24", season=2026)
+    with pytest.raises(espn_ranks.BoardCollapse):
+        espn_ranks.ingest_espn_ranks(db, [], retrieved_as_of="2026-07-24", season=2026)
+    assert db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"] == 500
+
+
+def test_floor_measures_against_todays_own_earlier_snapshot(db):
+    # The yardstick deliberately includes TODAY's snapshot: the cockpit refreshes
+    # the board several times a day, so a same-day re-pull must not be allowed to
+    # shrink what an earlier run of the same day already captured.
+    espn_ranks.ingest_espn_ranks(db, _board(400), retrieved_as_of="2026-07-24", season=2026)
+    with pytest.raises(espn_ranks.BoardCollapse):
+        espn_ranks.ingest_espn_ranks(db, _board(100), retrieved_as_of="2026-07-24", season=2026)
+    assert db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"] == 400
+
+
+def test_a_mild_shrink_inside_the_floor_is_accepted(db):
+    # The floor must not be so tight that normal churn (ESPN trimming the pool)
+    # blocks a legitimate refresh. 0.75 of 400 is 300.
+    espn_ranks.ingest_espn_ranks(db, _board(400), retrieved_as_of="2026-07-24", season=2026)
+    n = espn_ranks.ingest_espn_ranks(db, _board(350), retrieved_as_of="2026-07-24", season=2026)
+    assert n == 350
+    assert db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"] == 350
+
+
+def test_allow_shrink_is_the_operators_explicit_override(db):
+    espn_ranks.ingest_espn_ranks(db, _board(1000), retrieved_as_of="2026-07-24", season=2026)
+    n = espn_ranks.ingest_espn_ranks(
+        db, _board(20), retrieved_as_of="2026-07-24", season=2026, allow_shrink=True
+    )
+    assert n == 20
+    assert db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"] == 20
+
+
+def test_first_board_of_a_season_has_nothing_to_compare_against(db):
+    n = espn_ranks.ingest_espn_ranks(db, _board(30), retrieved_as_of="2026-07-24", season=2026)
+    assert n == 30
+
+
+def test_a_new_seasons_first_board_is_not_floored_by_last_seasons(db):
+    espn_ranks.ingest_espn_ranks(db, _board(1000), retrieved_as_of="2025-08-01", season=2025)
+    # Different season = a different partition; a small first 2026 board is fine.
+    assert espn_ranks.ingest_espn_ranks(
+        db, _board(40), retrieved_as_of="2026-07-24", season=2026
+    ) == 40
+
+
+def test_pull_passes_allow_shrink_through_to_the_floor(db):
+    espn_ranks.ingest_espn_ranks(db, _board(1000), retrieved_as_of="2026-07-24", season=2026)
+    with patch.object(espn_source, "fetch_player_universe", return_value=_board(20)):
+        with pytest.raises(espn_ranks.BoardCollapse):
+            espn_ranks.pull_espn_ranks(
+                db, league_id=1, season=2026, espn_s2="x", swid="y",
+                retrieved_as_of="2026-07-24", today="2026-07-24",
+            )
+        assert espn_ranks.pull_espn_ranks(
+            db, league_id=1, season=2026, espn_s2="x", swid="y",
+            retrieved_as_of="2026-07-24", today="2026-07-24", allow_shrink=True,
+        ) == 20
+
+
+def test_the_floor_protects_the_partition_BEING_REPLACED_not_just_the_newest(db):
+    """3.1b audit: the yardstick was MAX(retrieved_as_of) while the DELETE targets
+    ``stamp``. With a large old board and a small current one, a mid-sized
+    back-stamped write cleared the floor computed from the CURRENT board and wiped
+    the historical partition it was actually deleting (2051 -> 600, measured)."""
+    espn_ranks.ingest_espn_ranks(db, _board(2000), retrieved_as_of="2026-07-01", season=2026)
+    espn_ranks.ingest_espn_ranks(db, _board(500), retrieved_as_of="2026-07-24", season=2026,
+                                 allow_shrink=True)
+    with pytest.raises(espn_ranks.BoardCollapse):
+        # 600 clears 0.75 x 500 (the newest partition) but not 0.75 x 2000 (the
+        # partition this write deletes).
+        espn_ranks.ingest_espn_ranks(db, _board(600), retrieved_as_of="2026-07-01",
+                                     season=2026)
+    kept = db.execute(
+        "SELECT COUNT(*) c FROM espn_draft_ranks WHERE retrieved_as_of = '2026-07-01'"
+    ).fetchone()["c"]
+    assert kept == 2000
+
+
+def test_a_key_collapsing_response_is_refused_and_rolled_back(db):
+    """The floor compares distinct board_keys, and the write is re-counted inside
+    the transaction. A response with duplicate ids used to clear the floor on
+    ``len(rows)``, collapse the board onto a handful of keys, and still report
+    rows_written=1000."""
+    espn_ranks.ingest_espn_ranks(db, _board(1000), retrieved_as_of="2026-07-24", season=2026)
+    dupes = _board(1000)
+    for row in dupes:
+        row["id"] = 4242            # every row lands on ONE board_key
+    with pytest.raises(espn_ranks.BoardCollapse):
+        espn_ranks.ingest_espn_ranks(db, dupes, retrieved_as_of="2026-07-24", season=2026)
+    assert db.execute("SELECT COUNT(*) c FROM espn_draft_ranks").fetchone()["c"] == 1000
+
+
+def test_ingest_returns_the_stored_count_not_the_incoming_list_length(db):
+    dupes = _board(40) + _board(10)          # 10 rows repeat
+    assert espn_ranks.ingest_espn_ranks(
+        db, dupes, retrieved_as_of="2026-07-24", season=2026) == 40
+
+
+def test_a_live_pull_cannot_be_back_stamped_over_a_stored_board(db):
+    """`valuation --espn --as-of <past day>` did exactly this: it replaced the
+    stored past board with today's, permanently losing a perishable point-in-time
+    observation AND making today's ranks readable at that past as_of under the
+    default historical view."""
+    espn_ranks.ingest_espn_ranks(db, _board(1000), retrieved_as_of="2026-07-21", season=2026)
+    with patch.object(espn_source, "fetch_player_universe", return_value=_board(1000, start=5000)):
+        with pytest.raises(ValueError, match="refusing to store a LIVE ESPN board"):
+            espn_ranks.pull_espn_ranks(db, league_id=1, season=2026, espn_s2="x", swid="y",
+                                       retrieved_as_of="2026-07-21", today="2026-07-24")
+    stored = espn_ranks.get_espn_draft_ranks(db, as_of="2026-07-21", season=2026)
+    assert {r["board_key"] for r in stored} == {str(i) for i in range(1, 1001)}
+
+
+def test_ensure_board_reads_a_past_day_instead_of_overwriting_it(db):
+    espn_ranks.ingest_espn_ranks(db, _board(30), retrieved_as_of="2026-07-21", season=2026)
+    with patch.object(espn_source, "fetch_player_universe") as fetch:
+        note = espn_ranks.ensure_board(db, league_id=1, season=2026, espn_s2="x", swid="y",
+                                       as_of="2026-07-21", today="2026-07-24")
+    fetch.assert_not_called()
+    assert "stored" in note and "30 rows" in note
+
+
+def test_ensure_board_refreshes_when_as_of_is_today(db):
+    with patch.object(espn_source, "fetch_player_universe", return_value=_board(30)) as fetch:
+        note = espn_ranks.ensure_board(db, league_id=1, season=2026, espn_s2="x", swid="y",
+                                       as_of="2026-07-24", today="2026-07-24")
+    fetch.assert_called_once()
+    assert "refreshed" in note
 
 
 def test_truncation_guard_fails_loud():

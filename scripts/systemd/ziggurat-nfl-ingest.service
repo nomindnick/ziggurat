@@ -1,0 +1,64 @@
+# Ziggurat NFL source refresh — DAILY group (item 3.1b) — systemd USER service.
+#
+# Installed by scripts/install-nfl-ingest.sh, which substitutes @REPO@ and
+# @SEASON@. Runs unattended: refreshes the daily-cadence NFL sources and exits.
+#
+# What this protects against: the fourteen 1.4/1.5 ingesters existed and were
+# tested, but nothing called them, so their tables sat empty. The failure mode is
+# silent and rule-1-invisible — in November a Week 10 valuation priced off a July
+# projection snapshot carries a perfectly valid knowable_as_of and nothing
+# complains, because the data is not leaked, merely stale.
+#
+# The DAILY group holds the sources with something new to say every day, and it
+# is the one that carries the PERISHABLE ones: Sleeper projections and the
+# FantasyPros ECR scrape serve the current value only, so a day this unit does
+# not capture is a lost observation (the nflverse sources in the weekly unit are
+# whole-season files and re-pullable at will).
+#
+# Failures are visible three ways: a nonzero exit here (journal + `systemctl
+# --user status`), a per-source row in nfl_ingest_runs, and a staleness verdict
+# in `ziggurat ingest status`.
+
+[Unit]
+Description=Ziggurat NFL data refresh (daily group: projections, ADP, schedules, players)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+# Rate limit for the Restart= below. These live in [Unit], not [Service]
+# (systemd >= 229); putting them under [Service] is silently ignored.
+StartLimitBurst=3
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec) or the rate
+# limiter can never engage against a HANG: a start killed at t=1800 and retried
+# at t=2100 has already aged out of a 1800s window, so the burst counter never
+# passes 1 and the unit loops all day re-downloading everything.
+StartLimitIntervalSec=10800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# NOTE: `After=network-online.target` does NOT work in a USER unit — that target
+# is a system unit, the user manager has no such unit, and `After=` on a
+# nonexistent unit is silently ignored (verified: `systemctl --user show
+# network-online.target -p LoadState` -> not-found). Combined with
+# Persistent=true, a machine that was off at the scheduled time runs the catch-up
+# the moment the user manager starts, which is exactly when the network is most
+# likely still down. So wait for name resolution explicitly, bounded, and never
+# fail the unit on it — Restart=on-failure is the real backstop.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts github.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+# The season is PINNED rather than derived, so a January run cannot drift to the
+# wrong season number. Update it (or re-run the installer) each new season — and
+# note that `ziggurat ingest status` defaults to the CURRENT season, so after the
+# March rollover a stale @SEASON@ here shows up as the new season reading 'never'.
+ExecStart=@REPO@/.venv/bin/ziggurat ingest run --group daily --season @SEASON@
+# Upstream (nflverse GitHub releases, Sleeper, FantasyPros, ESPN) is occasionally
+# flaky; retry a couple of times, rate-limited by the StartLimit* keys above.
+Restart=on-failure
+RestartSec=300
+# Type=oneshot defaults TimeoutStartSec to INFINITY. Without this, one hung pull
+# holds the service Active forever, every later timer trigger is silently
+# skipped, and the refresh stops running with nothing reporting it — the exact
+# item-3.1 defect. The seams are also socket-bounded (ziggurat/net.py); this is
+# the outer fence for whatever a per-socket timeout cannot catch.
+TimeoutStartSec=1800
+# ESPN credentials live in the repo .env, which the package loads itself
+# (never echoed into logs — rule 5).
+StandardOutput=journal
+StandardError=journal

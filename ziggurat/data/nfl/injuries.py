@@ -32,14 +32,32 @@ _COLUMNS = (
     "date_modified",
 )
 
+# Columns whose ABSENCE is a known upstream regime change rather than drift, so
+# require_columns must not fail on them (item 3.1b, verified 2026-07-24):
+# nflverse dropped ``date_modified`` from the 2025+ injury release — 2024 has it,
+# 2025 does not. Losing it costs the report's own publish timestamp, so every
+# 2025+ row falls back to the team-gameday anchor below. That is still
+# leakage-safe (a report is final no later than kickoff) but MUCH coarser: a
+# Wednesday practice report becomes knowable only on Sunday. Consumers that need
+# mid-week injury news must use a live feed (ESPN league state carries
+# injury_status 4x/day via item 3.1), not this table.
+_OPTIONAL_COLUMNS = ("date_modified",)
+_REQUIRED_COLUMNS = tuple(c for c in _COLUMNS if c not in _OPTIONAL_COLUMNS)
+
 
 def ingest_injuries(conn, df, *, retrieved_as_of: str) -> int:
     """Stamp knowable_as_of from each report's own ``date_modified`` (fallback:
     the week's first gameday), normalize date_modified to its ISO date, and
     upsert. Rows whose knowledge time can't be resolved are dropped, never
     inserted with a NULL ``knowable_as_of``."""
-    base.require_columns(df, _COLUMNS, source="injuries")
+    base.require_columns(df, _REQUIRED_COLUMNS, source="injuries")
     df = df.dropna(subset=["gsis_id"])
+    if "date_modified" not in df.columns:
+        # 2025+ release: no publish timestamp at all. Materialize the column as
+        # NULL so the mapping stays uniform and EVERY row takes the team-gameday
+        # fallback below, rather than the ingester exploding on a schema the
+        # source now legitimately serves.
+        df = df.assign(date_modified=None)
     # Fallback knowledge time when a row has no date_modified: the report's own
     # TEAM gameday (needs schedules). NOT the week's first gameday, which would
     # leak the report for teams that play later in the week.

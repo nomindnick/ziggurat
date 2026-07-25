@@ -17,10 +17,12 @@ two deliberately distinct views:
   grading and bulk-loaded immutable history, but must be requested explicitly.
 """
 
+import contextvars
 import functools
 import logging
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Literal
 
 import pandas as pd
@@ -71,11 +73,82 @@ def require_columns(df: pd.DataFrame, required: Sequence[str], *, source: str) -
         raise ValueError(f"{source}: source schema missing required columns {missing}")
 
 
-def note_drops(source: str, dropped: int, total: int, *, why: str = "unresolved knowledge time") -> None:
+# Per-run drop accounting (item 3.1b). ``note_drops`` used to log and nothing
+# else, and NO logging is configured in this package — under systemd the message
+# reached the journal through Python's lastResort handler as a bare line with no
+# level and no logger name, indistinguishable from noise, and it was persisted
+# nowhere. That mattered because a 100% drop is the exact signature of running a
+# gameday-stamped source before ``schedules`` exists (measured: 19,421/19,421
+# dropped, return value 0, no exception) — which is indistinguishable from
+# "upstream legitimately had nothing" unless the count is recorded.
+#
+# A ContextVar, not a module global: the collector is scoped to one source's
+# ingest inside the orchestrator and must not leak across sources or threads.
+_drop_tally: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "ziggurat_nfl_drop_tally", default=None
+)
+
+
+@contextmanager
+def collect_drops():
+    """Tally every ``note_drops`` call made inside the block.
+
+    Yields the mutable ``{"dropped": int, "total": int}`` dict, which is filled
+    in as the ingest runs. Best-effort by construction: it counts what ingesters
+    report, and an ingester that never calls ``note_drops`` contributes nothing.
+    """
+    tally = {"dropped": 0, "total": 0, "filtered": 0, "incomplete": 0}
+    token = _drop_tally.set(tally)
+    try:
+        yield tally
+    finally:
+        _drop_tally.reset(token)
+
+
+def note_drops(
+    source: str,
+    dropped: int,
+    total: int,
+    *,
+    why: str = "unresolved knowledge time",
+    by_design: bool = False,
+) -> None:
     """Make a drop-on-ingest observable (never silent data loss). Ingesters call
-    this when they skip rows they cannot stamp with a knowledge time."""
+    this when they skip rows they cannot stamp with a knowledge time.
+
+    ``by_design=True`` marks a filter the league's rules make CORRECT (e.g. the
+    IDP rows FantasyPros ships, which are not startable here) rather than a
+    failure to handle the data. Both are logged; only the latter counts against
+    ``refresh``'s drop ceiling. The distinction is not cosmetic — the first live
+    run of item 3.1b failed ``adp_rankings`` on a 35% "drop" that was almost
+    entirely the intentional IDP filter, and a guard that cries wolf is how the
+    one report that matters gets ignored (the same reasoning that kept the
+    league sync's gap report out of this module).
+    """
+    tally = _drop_tally.get()
+    if tally is not None:
+        tally["filtered" if by_design else "dropped"] += dropped
+        tally["total"] += total
     if dropped:
-        logger.warning("%s: dropped %d/%d rows (%s)", source, dropped, total, why)
+        logger.warning(
+            "%s: %s %d/%d rows (%s)",
+            source, "filtered" if by_design else "dropped", dropped, total, why,
+        )
+
+
+def note_incomplete(source: str, count: int, total: int, *, why: str) -> None:
+    """Record rows that were KEPT but are missing an optional field.
+
+    Distinct from ``note_drops`` because nothing was lost: the rows are in the
+    table and readable. ``adp_rankings`` called ``note_drops`` for these — its
+    own line comment said "kept (NULL gsis_id), not dropped" — which inflated
+    the drop ratio with rows that had not been dropped at all.
+    """
+    tally = _drop_tally.get()
+    if tally is not None:
+        tally["incomplete"] += count
+    if count:
+        logger.warning("%s: kept %d/%d rows with a missing field (%s)", source, count, total, why)
 
 
 def _clean(value):

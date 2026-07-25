@@ -19,6 +19,8 @@ import json
 import os
 from importlib import import_module
 
+from ziggurat import net
+
 # ESPN default-league scoringPeriodId for the pre-draft player pool snapshot.
 _SCORING_PERIOD_PREDRAFT = 0
 
@@ -120,10 +122,18 @@ def fetch_player_universe(
         }
     }
     try:
-        data = league.espn_request.league_get(
-            params={"view": "kona_player_info", "scoringPeriodId": _SCORING_PERIOD_PREDRAFT},
-            headers={"x-fantasy-filter": json.dumps(filters)},
-        )
+        # Bounded (item 3.1b): espn_api passes NO timeout to requests, and this
+        # seam is now on a timer. An unbounded hang under Type=oneshot parks the
+        # unit Active forever and silently kills every later run — the exact 3.1
+        # defect, which ziggurat/league/source.py already fixed and this did not.
+        # bounded_espn, NOT bounded_socket: requests overrides the process-wide
+        # socket default with an explicit settimeout(None), so the socket default
+        # never applied here (measured — see ziggurat/net.py).
+        with net.bounded_espn():
+            data = league.espn_request.league_get(
+                params={"view": "kona_player_info", "scoringPeriodId": _SCORING_PERIOD_PREDRAFT},
+                headers={"x-fantasy-filter": json.dumps(filters)},
+            )
     except (espn_requests.ESPNAccessDenied, espn_requests.ESPNInvalidLeague) as exc:
         raise RuntimeError(
             "ESPN rejected the request (expired/invalid cookies?); "

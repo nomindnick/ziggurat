@@ -161,6 +161,126 @@ def crosswalked_db(db):
 
 
 @pytest.fixture()
+def marginal_world(db):
+    """Factory for a synthetic projection universe + league state (item 3.2).
+
+    Entirely invented players and owners (Rule 5). The SHAPE is the live one, and
+    the details that bite are reproduced exactly:
+
+    * a skill/K bye is a projection row that IS PRESENT with a NULL opponent and
+      NULL stats; a D/ST bye row is ABSENT entirely — a detector keyed on either
+      shape alone mislabels the other class;
+    * D/ST rows carry a negative ESPN id and a NULL ``gsis_id``, so they can only
+      be joined on normalized team abbreviation;
+    * roster rows land in ``league_player_state`` with the four post-draft fields
+      (``on_team_id``, ``lineup_slot``, ``acquisition_type``, ``acquisition_date``),
+      which are the ONLY fields that change when the real draft happens — so a
+      test roster and the live roster are the same shape.
+
+    Each spec is ``{"name", "pos", "team", "pts", "bye", "on_team", "slot",
+    "owned", "injury", "weeks", "forecast", "proj_team"}``; ``pts`` is HOUSE points
+    per playing week (offense via rushing yards at 0.1/yd, K via extra points at
+    1.0, D/ST via sacks at 1.0 — no bracket keys, so no phantom shutout points),
+    and ``weeks`` overrides individual weeks.
+
+    ``forecast`` is the set of weeks the feed actually forecasts. Every other week
+    gets a BYE-SHAPED row (team set, opponent NULL, all stats NULL) — which is what
+    the live feed emits for a player it has no forecast for, byte-identical to a
+    real bye. That indistinguishability is the trap: it made a 99.3%-owned WR with
+    one forecast week read as the most droppable player on the roster.
+
+    ``proj_team`` overrides the abbreviation stored in ``projections`` while the
+    league row keeps ``team`` — the LAR/LA case, where joining raw loses the Rams.
+    """
+    def _stat_columns(pos, pts):
+        if pos in ("QB", "RB", "WR", "TE"):
+            return {"rushing_yards": pts * 10.0}
+        if pos == "K":
+            return {"pat_made": pts}
+        return {"sacks": pts}          # D/ST: events only, brackets left absent
+
+    def _make(specs, *, season=2026, weeks=None, retrieved="2026-09-15",
+              scoring_period=0, source="sleeper_rotowire"):
+        weeks = list(range(1, 18) if weeks is None else weeks)
+        roster, pool = [], []
+        for i, spec in enumerate(specs):
+            pos = spec["pos"]
+            is_dst = pos == "D/ST"
+            espn_id = str(-16000 - i) if is_dst else str(2000 + i)
+            gsis_id = None if is_dst else f"00-1{i:05d}"
+            team = spec["team"]
+            bye = spec.get("bye")
+            sleeper_id = f"S{i}"
+
+            if not is_dst:
+                db.execute(
+                    "INSERT INTO players (gsis_id, sleeper_id, espn_id, name, "
+                    "retrieved_as_of, knowable_as_of) VALUES (?, ?, ?, ?, ?, ?)",
+                    (gsis_id, sleeper_id, espn_id, spec["name"], retrieved, retrieved),
+                )
+
+            forecast = spec.get("forecast")
+            for week in weeks:
+                blank = week == bye or (forecast is not None and week not in forecast)
+                if blank and is_dst:
+                    continue                     # D/ST bye row is ABSENT
+                pts = spec.get("weeks", {}).get(week, spec["pts"])
+                cols = {
+                    "source": source,
+                    "source_player_id": sleeper_id if not is_dst else team,
+                    "gsis_id": gsis_id,
+                    "season": season,
+                    "week": week,
+                    "season_type": "regular",
+                    "position": "DEF" if is_dst else pos,
+                    "team": spec.get("proj_team", team),
+                    "opponent": None if blank else "OPP",
+                    "retrieved_as_of": spec.get("retrieved", retrieved),
+                    "knowable_as_of": spec.get("retrieved", retrieved),
+                }
+                if not blank:
+                    cols.update(_stat_columns(pos, pts))
+                names = ", ".join(cols)
+                db.execute(
+                    f"INSERT INTO projections ({names}) VALUES "
+                    f"({', '.join('?' * len(cols))})",
+                    tuple(cols.values()),
+                )
+
+            row = {
+                "season": season,
+                "espn_player_id": espn_id,
+                "gsis_id": gsis_id,
+                "player": spec["name"],
+                "position": pos,
+                "pro_team": team,
+                "on_team_id": spec.get("on_team"),
+                "roster_status": spec.get("status",
+                                          "ONTEAM" if spec.get("on_team") else "FREEAGENT"),
+                "lineup_slot": spec.get("slot", "BE" if spec.get("on_team") else None),
+                "acquisition_type": "DRAFT" if spec.get("on_team") else None,
+                "acquisition_date": "2026-08-20" if spec.get("on_team") else None,
+                "injury_status": spec.get("injury", "ACTIVE"),
+                "percent_owned": spec.get("owned", 10.0 + i),
+                "percent_started": 0.0,
+                "percent_change": 0.0,
+                "scoring_period": scoring_period,
+                "retrieved_as_of": retrieved,
+                "knowable_as_of": retrieved,
+            }
+            db.execute(
+                f"INSERT INTO league_player_state ({', '.join(row)}) VALUES "
+                f"({', '.join('?' * len(row))})",
+                tuple(row.values()),
+            )
+            (roster if spec.get("on_team") else pool).append(row)
+        db.commit()
+        return roster, pool
+
+    return _make
+
+
+@pytest.fixture()
 def make_draft_board():
     """Factory building a synthetic, fully-draftable mock-sim board (item 2.2).
 

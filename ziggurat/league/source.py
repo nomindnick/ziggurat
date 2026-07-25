@@ -21,9 +21,9 @@ or 404. League history exists only because these pulls run on a cadence.
 """
 
 import json
-import socket
-from contextlib import contextmanager
 from importlib import import_module
+
+from ziggurat import net
 
 # Seconds any single ESPN socket operation may block. espn_api calls
 # ``requests.get`` with NO timeout (grep the package: zero hits), so a
@@ -31,9 +31,20 @@ from importlib import import_module
 # TimeoutStartSec defaults to infinity, so a single hung pull would hold the
 # service Active forever and every later timer trigger would be skipped: the
 # sync stops capturing days and nothing reports it (audit finding). The unit now
-# also sets TimeoutStartSec, but bounding the socket here fixes it for every
+# also sets TimeoutStartSec, but bounding the request here fixes it for every
 # caller, cron included.
-_SOCKET_TIMEOUT = 60
+#
+# The mechanism moved to ``ziggurat.net`` in item 3.1b so the NFL ingest seams
+# (Sleeper, Open-Meteo, ESPN kona_player_info) share it instead of carrying a
+# fourth copy; these two names stay as this module's stable local contract.
+#
+# CORRECTION (3.1b audit, measured): the original fix here used the process-wide
+# SOCKET default, which ``requests`` discards — it always passes an explicit
+# timeout to urllib3, and with none supplied that explicit value is ``None``.
+# So this seam was never actually bounded. ``net.bounded_espn`` injects the
+# timeout into espn_api's ``requests`` module instead, which is.
+_SOCKET_TIMEOUT = net.HTTP_TIMEOUT
+_bounded_request = net.bounded_espn
 
 # Kept in sync with espn_api's own activity filter (League.recent_activity):
 # ADD/DROP/WAIVER/TRADE message type ids on the league communication feed.
@@ -46,22 +57,6 @@ _TRANSACTION_TYPES = ["FREEAGENT", "WAIVER", "WAIVER_ERROR", "TRADE_ACCEPT", "RO
 STATE_VIEWS = ("mTeam", "mRoster", "mMatchupScore", "mStandings", "mSettings")
 
 
-@contextmanager
-def _bounded_socket(seconds: int = _SOCKET_TIMEOUT):
-    """Bound socket blocking for the duration of one request, then restore.
-
-    Scoped rather than set once at import: this process is not only the sync
-    (the draft cockpit and ingesters share the interpreter), so the default is
-    put back on the way out.
-    """
-    previous = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(seconds)
-    try:
-        yield
-    finally:
-        socket.setdefaulttimeout(previous)
-
-
 def _request(league, *, params, headers=None, extend=""):
     """Issue one authenticated league GET, converting ESPN's auth failures into a
     loud, actionable error.
@@ -72,7 +67,7 @@ def _request(league, *, params, headers=None, extend=""):
     """
     espn_requests = import_module("espn_api.requests.espn_requests")
     try:
-        with _bounded_socket():
+        with _bounded_request():
             if extend:
                 return league.espn_request.league_get(extend=extend, params=params, headers=headers)
             return league.espn_request.league_get(params=params, headers=headers)

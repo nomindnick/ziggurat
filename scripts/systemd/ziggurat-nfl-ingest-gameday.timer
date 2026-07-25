@@ -1,0 +1,30 @@
+# Ziggurat NFL gameday context refresh schedule (item 3.1b).
+#
+# Once a day, late afternoon local: a forecast for a game 0-10 days out changes
+# meaningfully day to day, and the Sunday lineup call wants the most recent one.
+#
+# refresh.weather_weeks keeps a week in the request set until its LAST game is
+# played, so the current week IS refreshed on its Friday, Saturday and Sunday.
+# (It originally dropped a week the moment its Thursday game kicked off, which
+# meant the freshest forecast any Sunday lineup call could read was three days
+# old — and forecast mode is perishable, so those observations were gone.)
+# 16:20 local is after most Sunday kickoffs; the Sunday-morning capture is the
+# previous evening's run, which is inside the useful window.
+# Deliberately in its own slot so the three ingest units never overlap on the
+# database (07:20 daily, 08:20 weekly, 16:20 gameday).
+#
+# Out of season this fires and records 'skipped' — a phase gate, not a failure.
+
+[Unit]
+Description=Ziggurat NFL gameday context refresh schedule
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=*-*-* 16:20:00
+Persistent=true
+RandomizedDelaySec=900
+AccuracySec=1m
+Unit=ziggurat-nfl-ingest-gameday.service
+
+[Install]
+WantedBy=timers.target

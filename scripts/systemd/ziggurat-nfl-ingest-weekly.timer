@@ -1,0 +1,37 @@
+# Ziggurat NFL post-game refresh schedule — WEEKLY group (item 3.1b).
+#
+# FIRES DAILY, PULLS WEEKLY. The sources in this group carry interval_days=7 and
+# `refresh.decide` skips one whose last SUCCESSFUL pull is still inside its
+# interval (status 'fresh'), so upstream is still hit once a week — but a failed
+# Thursday now retries on Friday instead of costing a whole in-season week.
+#
+# That was a real hole, not a hypothetical: with a fixed `OnCalendar=Thu` the only
+# retries were the unit's three restarts inside ~20 minutes, and an nflverse
+# outage longer than that meant seven days with no weekly_stats/snap_counts
+# refresh — while `ingest status` still said 'fresh' (age 7 <= interval 7) and the
+# Sunday lineup call read last week's usage data.
+#
+# THURSDAY is still the anchor, and it maintains itself: nflverse's update
+# schedule says NFL stat corrections land Monday through Wednesday, so Thursday's
+# copy is the clean one, and after a successful Thursday the next day the interval
+# gate opens is the following Thursday.
+#
+# 08:20 local, after the nightly nflverse rebuild and an hour after the daily
+# unit so the two never contend for the same connection.
+#
+# Off-season this fires and finds nothing to do: the phase gate in
+# refresh.SOURCES records 'skipped', which is not a failure.
+
+[Unit]
+Description=Ziggurat NFL post-game data refresh schedule (weekly group)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=*-*-* 08:20:00
+Persistent=true
+RandomizedDelaySec=1800
+AccuracySec=1m
+Unit=ziggurat-nfl-ingest-weekly.service
+
+[Install]
+WantedBy=timers.target

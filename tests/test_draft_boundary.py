@@ -80,6 +80,65 @@ def test_scanner_would_catch_a_real_violation(tmp_path):
         assert _imports_draft_at_import_time(bad), f"scanner missed {name}"
 
 
+def _imports_draft_anywhere(path: Path) -> bool:
+    """True if the file references ziggurat.draft in ANY import, including one
+    hidden inside a function body."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "ziggurat.draft" or alias.name.startswith("ziggurat.draft."):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "ziggurat.draft" or module.startswith("ziggurat.draft."):
+                return True
+            if module == "ziggurat" and any(a.name == "draft" for a in node.names):
+                return True
+    return False
+
+
+# The CLI is the ONE sanctioned lazy importer: `ziggurat mock-draft` / `draft-board`
+# have to reach the package somehow, and they do it inside the command body so
+# `import ziggurat` still works after draft/ is deleted. Every other permanent
+# package is off limits ENTIRELY — a lazy import there passes the import-time
+# scanner while still breaking at runtime once the package is gone, and item 3.2
+# writes core/lineup.py fresh precisely so nobody is tempted (Rule 8).
+_LAZY_EXEMPT_PACKAGES = {"cli"}
+_PERMANENT_PACKAGES = ("core", "league", "data", "llm")
+
+
+def test_permanent_packages_never_reach_into_draft_even_lazily():
+    offenders = []
+    for py in ZIGGURAT.rglob("*.py"):
+        rel = py.relative_to(ZIGGURAT)
+        if rel.parts[0] in _LAZY_EXEMPT_PACKAGES or rel.parts[0] == "draft":
+            continue
+        if rel.parts[0] not in _PERMANENT_PACKAGES:
+            continue
+        if _imports_draft_anywhere(py):
+            offenders.append(str(rel))
+    assert offenders == [], (
+        "these permanent modules import the deletable draft package: "
+        f"{offenders}. Copy what you need (see ziggurat/core/lineup.py's lineage note)."
+    )
+
+
+def test_lazy_scanner_would_catch_a_real_violation(tmp_path):
+    # Guard the guard: the lazy-aware scanner flags what the import-time one allows.
+    lazy = tmp_path / "lazy_core.py"
+    lazy.write_text(
+        "def seat():\n    from ziggurat.draft.board_view import _fill_lineup\n"
+        "    return _fill_lineup\n"
+    )
+    assert _imports_draft_anywhere(lazy)
+    assert not _imports_draft_at_import_time(lazy)   # exactly the gap it closes
+
+    clean = tmp_path / "clean.py"
+    clean.write_text("from ziggurat.core.lineup import fill_lineup\n")
+    assert not _imports_draft_anywhere(clean)
+
+
 def test_scanner_allows_sanctioned_patterns(tmp_path):
     # Lazy in-function import (the CLI's pattern) and TYPE_CHECKING-only imports
     # never execute at module load, so deleting draft/ cannot break them.

@@ -1,0 +1,49 @@
+# Ziggurat NFL source refresh — GAMEDAY group (item 3.1b) — systemd USER service.
+#
+# Today this group is exactly one source: game_weather in FORECAST mode.
+#
+# It is separated from the daily group because its window is not a preference,
+# it is an upstream wall: Open-Meteo's forecast endpoint returns HTTP 400 for any
+# start_date more than ~16 days out (measured 2026-07-24: +16d OK, +20d 400), and
+# fetch_open_meteo has no error tolerance — one out-of-range call would take a
+# whole multi-source run with it. refresh.weather_weeks() keeps the request set
+# inside a 10-day horizon, and the phase gate keeps it to the season, so
+# out-of-season this unit records 'skipped' and exits.
+#
+# Cost per run: one HTTP request per OUTDOOR game (fixed domes fetch nothing),
+# about 18 seconds for a 16-game week.
+#
+# Forecast weather is PERISHABLE: a past forecast cannot be re-fetched. (ERA5
+# archive actuals are a separate, replayable mode, not on this timer.)
+
+[Unit]
+Description=Ziggurat NFL gameday context refresh (weather forecasts for upcoming weeks)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+StartLimitBurst=3
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec) or the rate
+# limiter can never engage against a HANG: a start killed at t=1800 and retried
+# at t=2100 has already aged out of a 1800s window, so the burst counter never
+# passes 1 and the unit loops all day re-downloading everything.
+StartLimitIntervalSec=10800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# NOTE: `After=network-online.target` does NOT work in a USER unit — that target
+# is a system unit, the user manager has no such unit, and `After=` on a
+# nonexistent unit is silently ignored (verified: `systemctl --user show
+# network-online.target -p LoadState` -> not-found). Combined with
+# Persistent=true, a machine that was off at the scheduled time runs the catch-up
+# the moment the user manager starts, which is exactly when the network is most
+# likely still down. So wait for name resolution explicitly, bounded, and never
+# fail the unit on it — Restart=on-failure is the real backstop.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts github.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+ExecStart=@REPO@/.venv/bin/ziggurat ingest run --group gameday --season @SEASON@
+Restart=on-failure
+RestartSec=300
+# Type=oneshot defaults TimeoutStartSec to INFINITY — see the daily unit. This
+# group makes one request per outdoor game, so it has the most chances of the
+# three to meet a black-holed connection.
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal

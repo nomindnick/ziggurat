@@ -12,26 +12,47 @@ from typing import Annotated, Optional
 import typer
 
 from ziggurat.core.divergence import build_divergence, format_report
+from ziggurat.core.marginal import (
+    DEFAULT_POOL_LIMIT,
+    WeekResolutionError,
+    build_board,
+    format_marginal,
+)
 from ziggurat.core.scoring import score
 from ziggurat.core.valuation import (
-    _canon_position,
     build_valuation,
     build_value_view,
+    canon_position,
     format_valuation,
     format_value_view,
 )
 from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
-from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks, pull_espn_ranks
+from ziggurat.data.nfl.espn_ranks import BoardCollapse, get_espn_draft_ranks
+from ziggurat.data.nfl.espn_ranks import ensure_board as ensure_espn_board
 from ziggurat.data.nfl.espn_source import load_espn_credentials
+from ziggurat.data.nfl.refresh import (
+    format_plan,
+    format_sources,
+    needs_credentials,
+    plan_ingest,
+    resolve_stamp,
+    run_failed,
+    run_ingest,
+    select_sources,
+)
+from ziggurat.data.nfl.refresh import format_run as format_ingest_run
+from ziggurat.data.nfl.refresh import format_status as format_ingest_status
 from ziggurat.data.store import apply_schema, connect, open_db
 from ziggurat.league.state import (
+    OwnTeamUnresolved,
     format_free_agents,
     format_roster,
     format_timeline,
     get_free_agents,
     get_player_state,
     holder_timeline,
+    resolve_own_team,
 )
 from ziggurat.league.sync import format_run, format_status, run_sync
 from ziggurat.llm import Router
@@ -122,17 +143,21 @@ def valuation(
     top: Annotated[Optional[int], typer.Option(help="Show only the top N rows.")] = None,
     weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
     source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
-    espn: Annotated[bool, typer.Option("--espn", help="Live-pull the ESPN board and print the value view.")] = False,
+    espn: Annotated[bool, typer.Option("--espn", help="Refresh the ESPN board and print the value view.")] = False,
     league_id: Annotated[Optional[int], typer.Option(help="ESPN leagueId (else ESPN_LEAGUE_ID env).")] = None,
+    allow_shrink: Annotated[bool, typer.Option("--allow-shrink",
+        help="Accept an ESPN board materially smaller than the stored one (default: refuse).")] = False,
 ) -> None:
     """Print the global static VOR valuation board (item 2.1).
 
-    Default: the house VOR board. With ``--espn``, live-pull the ESPN default
-    board and print the "what the room can't see" value view instead. All
+    Default: the house VOR board. With ``--espn``, make the ESPN default board
+    for ``--as-of`` available (a live pull only when ``--as-of`` IS today; a past
+    day reads the stored snapshot rather than back-stamping today's board over
+    it) and print the "what the room can't see" value view instead. All
     computation lives in ``core/valuation.py`` / ``data/nfl/espn_ranks.py``; this
     command only parses, calls, and prints (rule 3).
     """
-    canon = _canon_position(position) if position is not None else None
+    canon = canon_position(position) if position is not None else None
     conn = connect(path)
     rows = build_valuation(
         conn, as_of=as_of, season=season, weeks=_parse_weeks(weeks), source=source
@@ -142,7 +167,13 @@ def valuation(
 
     if espn:
         creds = load_espn_credentials(league_id=league_id)
-        pull_espn_ranks(conn, season=season, retrieved_as_of=as_of, **creds)
+        try:
+            typer.echo(ensure_espn_board(conn, season=season, as_of=as_of, today=_today(),
+                                         allow_shrink=allow_shrink, **creds), err=True)
+        except BoardCollapse as exc:   # legible, not a traceback, on a draft-day command
+            conn.close()
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         espn_rows = get_espn_draft_ranks(conn, as_of=as_of, season=season)
         view = build_value_view(rows, espn_rows)
         conn.close()
@@ -150,6 +181,59 @@ def valuation(
     else:
         conn.close()
         typer.echo(format_valuation(rows, top=top))
+
+
+@app.command()
+def marginal(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your SWID's team).")] = None,
+    from_week: Annotated[Optional[int], typer.Option("--from-week",
+        help="First remaining week. REQUIRED whenever the week cannot be derived.")] = None,
+    last_week: Annotated[int, typer.Option("--last-week",
+        help="Final week priced (applies whether or not --from-week is given).")] = 17,
+    top: Annotated[Optional[int], typer.Option(help="Show only the N most droppable.")] = None,
+    reasons: Annotated[bool, typer.Option("--reasons", help="Print every row's reasons.")] = False,
+    pool_limit: Annotated[int, typer.Option("--pool-limit",
+        help="Free agents scanned per position (0 = the whole pool).")] = DEFAULT_POOL_LIMIT,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Print the roster-context drop board: what each of your players is worth
+    over the remaining season, against the best free agent you could add (3.2).
+
+    Every number, reason, cap and prior lives in ``core/marginal.py``; this
+    command parses, calls, and prints (rule 3).
+    """
+    day = as_of or _today()
+    resolved_season = _season(season)
+    conn = open_db(path)
+    try:
+        team_id = team
+        if team_id is None:
+            creds = load_espn_credentials()
+            team_id = resolve_own_team(
+                conn, as_of=day, season=resolved_season, swid=creds["swid"]
+            )
+        board = build_board(
+            conn,
+            as_of=day,
+            season=resolved_season,
+            roster=get_player_state(
+                conn, as_of=day, season=resolved_season, on_team_id=team_id
+            ),
+            weeks=None if from_week is None else range(from_week, last_week + 1),
+            last_week=last_week,
+            pool_limit=None if pool_limit == 0 else pool_limit,
+            source=source,
+            today=_today(),
+        )
+    except (WeekResolutionError, OwnTeamUnresolved) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_marginal(board, top=top, reasons=reasons))
 
 
 @app.command("mock-draft")
@@ -520,6 +604,89 @@ def league_holdings(
                                since=since, until=until)
     conn.close()
     typer.echo(format_timeline(segments, player_label=f"espn_id {player_id}"))
+
+
+ingest_app = typer.Typer(help="NFL source refresh cadence (item 3.1b).", no_args_is_help=True)
+app.add_typer(ingest_app, name="ingest")
+
+
+@ingest_app.command("run")
+def ingest_run(
+    group: Annotated[Optional[str], typer.Option(help="Cadence group: daily / weekly / gameday.")] = None,
+    source: Annotated[Optional[list[str]], typer.Option(help="Pull only these sources (repeatable).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="NFL season (default: current).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(help="retrieved_as_of stamp (default today).")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    league_id: Annotated[Optional[int], typer.Option(help="ESPN league id (default $ESPN_LEAGUE_ID).")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run",
+        help="Report what WOULD be pulled and exit. Touches no network and writes nothing.")] = False,
+    allow_shrink: Annotated[bool, typer.Option("--allow-shrink",
+        help="Accept an ESPN board materially smaller than the stored one (default: refuse).")] = False,
+    allow_backfill: Annotated[bool, typer.Option("--allow-backfill",
+        help="Permit --as-of on a past day (a manufactured leak; espn_ranks would also "
+             "DELETE that day's board).")] = False,
+    force: Annotated[bool, typer.Option("--force",
+        help="Pull even a source whose last good pull is still inside its interval.")] = False,
+) -> None:
+    """Refresh NFL sources. This is the scheduled command.
+
+    Sources whose season phase says they have nothing to pull, whose dependency
+    is missing, whose last good pull is still inside their interval, or whose
+    upstream has not published this season yet are RECORDED (skipped / fresh /
+    upstream_absent), not silently omitted. Exits nonzero if any source failed,
+    so a systemd unit reports the failure.
+    """
+    conn = open_db(path)
+    try:
+        specs = select_sources(group=group, names=source or None)
+        # Both branches resolve the day ONCE, together: the dry run used to plan
+        # against `--as-of` while the real run planned against today, so the two
+        # disagreed on 3 of 8 daily sources — and the preview said espn_ranks
+        # would be SKIPPED right before the real run deleted its board partition.
+        stamp, day = resolve_stamp(as_of or _today(), _today(), allow_backfill=allow_backfill)
+        credentials = None
+        if needs_credentials(specs):
+            try:
+                credentials = load_espn_credentials(league_id=league_id)
+            except RuntimeError as exc:  # recorded as 'skipped' by the package layer
+                typer.echo(f"note: {exc}", err=True)
+        if dry_run:
+            typer.echo(format_plan(plan_ingest(
+                conn, sources=specs, season=_season(season), today=day,
+                have_credentials=credentials is not None, force=force,
+            )))
+            return
+        summaries = run_ingest(
+            conn, sources=specs, season=_season(season),
+            retrieved_as_of=stamp, today=day, credentials=credentials,
+            allow_shrink=allow_shrink, allow_backfill=allow_backfill, force=force,
+        )
+    except ValueError as exc:   # a refused selection or a refused back-stamp
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        conn.close()
+    typer.echo(format_ingest_run(summaries))
+    if run_failed(summaries):
+        raise typer.Exit(code=1)
+
+
+@ingest_app.command("status")
+def ingest_status(
+    season: Annotated[Optional[int], typer.Option(help="NFL season (default: current).")] = None,
+    through: Annotated[Optional[str], typer.Option(help="Judge staleness as of this day.")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Per-source last successful pull + staleness verdict (3.2's staleness source)."""
+    conn = open_db(path)
+    typer.echo(format_ingest_status(conn, season=_season(season), today=through or _today()))
+    conn.close()
+
+
+@ingest_app.command("sources")
+def ingest_sources() -> None:
+    """List the source registry: cadence group, phases, interval, and flags."""
+    typer.echo(format_sources())
 
 
 @app.command()
