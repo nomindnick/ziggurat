@@ -35,6 +35,16 @@ def _knowable(src) -> str | None:
     return base.iso_date(src.get("gameday"))
 
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# SWEPT 2026-07-25: the same instrumentation was applied to 6 of 14 call sites
+# in 3.2c and skipped here, and the one skipped site that DID collide
+# (adp_rankings) lost a real market fact a day for two days, silently, with an
+# inflated count in the run log.
+# Measured 0 same-batch collisions live (544 rows).
+_PK_COLS = ('game_id', 'retrieved_as_of')
+
+
 def ingest_schedules(conn, df, *, retrieved_as_of: str) -> int:
     base.require_columns(df, _COLUMNS, source="schedules")
     rows = base.frame_to_rows(
@@ -45,7 +55,7 @@ def ingest_schedules(conn, df, *, retrieved_as_of: str) -> int:
     )
     kept = [r for r in rows if r["knowable_as_of"] is not None]
     base.note_drops("schedules", len(rows) - len(kept), len(rows), why="no game_type/gameday")
-    return base.upsert(conn, "schedules", kept)
+    return base.upsert(conn, "schedules", kept, key_cols=_PK_COLS)
 
 
 def pull_schedules(conn, years, *, retrieved_as_of: str) -> int:

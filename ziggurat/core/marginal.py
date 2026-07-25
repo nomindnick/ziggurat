@@ -2154,11 +2154,16 @@ def _freshness_lines(conn, *, season, as_of, today, lines, roster_rows, pool_row
     if today is not None:
         from ziggurat.data.nfl import refresh
 
+        # QUIET_VERDICTS, not a literal tuple restated here (item 3.2c, F-D).
+        # `archived` joined the ladder for a COMPLETED season, whose files no
+        # longer change — so `ziggurat marginal --season 2023` would otherwise
+        # have printed "ingest says projections: archived" as a staleness warning
+        # on every past-season run. That is the third time this banner has warned
+        # about something that was not a problem, and the refresh module now owns
+        # the definition so a fourth verdict cannot reintroduce it here.
         watched = {"projections", "players"}
         for s in refresh.source_freshness(conn, season=season, today=today):
-            if s["source"] in watched and s["verdict"] not in (
-                refresh.VERDICT_FRESH, refresh.VERDICT_NA
-            ):
+            if s["source"] in watched and s["verdict"] not in refresh.QUIET_VERDICTS:
                 age = "never pulled" if s["age_days"] is None else f"{s['age_days']}d old"
                 out.append(
                     f"  ingest says {s['source']}: {s['verdict']} ({age})"

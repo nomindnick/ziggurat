@@ -252,6 +252,44 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   Details: `IMPLEMENTATION_PLAN.md` 3.2 + gitignored
   `intel/research/marginal-valuation-3.2-design.md`.
 
+- **3.2c historical backfill & `depth_charts` v2 — built, audited & fixed
+  2026-07-25.** Inserted as a prerequisite for 3.3 from a measurement, not a
+  plan reading: **the database held only season 2026 and every stat table was
+  empty**, because 3.1b built a *current-season refresher* that correctly
+  phase-skips history and will never backfill it — so 3.3's done-when ("run
+  against last season's data") had no data. `ziggurat ingest backfill` now lands
+  2021–2025 (55 source-season pairs, 40.6 s, DB → 124.3 MB), and `depth_charts`
+  is unblocked as a **change log + tombstones** (29,483 slots + 348 panels,
+  6.98 MiB vs 255.4 MB verbatim; migration `007`, `schema_version` 7). All 10
+  shipped-code defects recon surfaced are fixed. Suite 832 → **1219**.
+  **The audit's headline is the tombstone rule: an absence is only a fact when
+  you know it is one.** `_change_log` could not tell "these players were removed
+  from the chart" from "upstream's scraper failed for this club today" — and
+  upstream does the latter in **12 of 348 published panels** (ARI 2026-07-24:
+  100 slots → 42 → back to 100). One collapse wrote 91 tombstones, logged `ok`,
+  and made `qb1_change_candidates` announce a QB1 change that never happened.
+  Raising was the wrong fix (the whole file is re-diffed every pull, so a bad
+  past `dt` bricks the source forever — unlike `espn_ranks`, where the bad
+  response is transient) and a club-count floor catches 0 of 12. Also fixed: a
+  daily silent row loss on `adp_rankings` that put a hole in the WR board, and
+  an unfenced `ingest run --season <past>` that wrote ~58k projection rows
+  stamped `knowable_as_of = today` and logged `ok`. Details:
+  `IMPLEMENTATION_PLAN.md` 3.2c + gitignored
+  `intel/research/backfill-depthcharts-3.2c-design.md`.
+
+**Two standing rules this item paid for, both about process rather than code:**
+**(1) The systemd timers run `ziggurat` from the working tree, so uncommitted
+code is the production cadence.** `db/ziggurat.sqlite` reached `schema_version 7`
+because a timer applied a migration nobody had reviewed. **An applied migration
+is never re-applied, so a correction NEVER edits an existing migration file** —
+it ships as a new one, or the live database permanently describes a schema no
+file holds while the whole suite agrees with the file. Enforced by
+`test_an_applied_migration_is_never_edited`. **(2) Rule 5's three enforcement
+points are only as wide as their patterns**: an end-anchored `*.sqlite` matched
+neither `ziggurat.sqlite.bak-v7` nor `.sqlite.gz`, in `.gitignore` *and* in
+`repo_guard.py`, so a database backup full of league-private data cleared two of
+the three. Both widened; a boundary pattern is now assumed narrow until tested.
+
 Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
 (monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).
 
@@ -349,6 +387,10 @@ loginctl enable-linger "$USER"            # or every timer dies at logout
 # before any first/manual NFL pull, see the plan without touching the network:
 .venv/bin/ziggurat ingest run --dry-run
 .venv/bin/ziggurat ingest sources         # the registry: cadence, phases, flags
+
+# item 3.2c — history is a SEPARATE command from the cadence, by design:
+.venv/bin/ziggurat ingest backfill --first 2021 --last 2025   # ~40 s, DB -> ~124 MB
+.venv/bin/ziggurat ingest reap --dry-run  # clear an orphan run left by a killed backfill
 ```
 
 **League history is perishable (item 3.1).** ESPN serves league state as a

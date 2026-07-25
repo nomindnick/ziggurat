@@ -259,6 +259,17 @@ def _build_row(game, *, mode, retrieved_as_of):
     return row
 
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# SWEPT 2026-07-25: the same instrumentation was applied to 6 of 14 call sites
+# in 3.2c and skipped here, and the one skipped site that DID collide
+# (adp_rankings) lost a real market fact a day for two days, silently, with an
+# inflated count in the run log.
+# forecast_source is in the key because the two regimes (live forecast vs ERA5
+# archive actuals) legitimately disagree about the same game.
+_PK_COLS = ('game_id', 'forecast_source', 'retrieved_as_of')
+
+
 def ingest_game_weather(conn, games, *, retrieved_as_of: str, mode: str) -> int:
     """Store weather rows for an iterable of schedule ``games`` (dict-like).
 
@@ -278,7 +289,7 @@ def ingest_game_weather(conn, games, *, retrieved_as_of: str, mode: str) -> int:
             rows.append(row)
     base.note_drops("game_weather", len(games) - len(rows), len(games),
                     why="unresolvable stadium or missing gameday")
-    return base.upsert(conn, "game_weather", rows)
+    return base.upsert(conn, "game_weather", rows, key_cols=_PK_COLS)
 
 
 def pull_game_weather(conn, season, week, *, retrieved_as_of: str, mode: str) -> int:

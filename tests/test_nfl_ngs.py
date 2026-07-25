@@ -8,7 +8,17 @@ NGS labels the Rams "LAR" while schedules use "LA"; base.game_date_map aliases
 LAR->LA so Rams rows resolve (regression-guarded below) rather than being
 silently dropped. A genuinely unmappable team is still dropped rather than
 stored with a NULL/leaky knowledge time.
+
+WHAT THE FIXTURE CANNOT CATCH (item 3.1b's lesson): the fixture is a frozen 2023
+weeks 5-6 regular-season slice, so it contains no postseason row at all and could
+never have surfaced finding F-I. The week-23 tests below therefore synthesize the
+postseason row from the live measurement (2026-07-25, all three tables x
+2021/2023/2024: the unresolved population is 100% week 23 and its team set is
+exactly that season's two Super Bowl participants). They test the MESSAGE — they
+prove nothing about whether upstream still numbers the Super Bowl 23.
 """
+
+import pandas as pd
 
 from ziggurat.data.nfl import base, ngs, schedules
 
@@ -120,3 +130,82 @@ def test_passing_ingest_and_count(db, nfl_fixture):
     assert 0 < n == _resolvable(df, db)
     seen = ngs.get_ngs_passing(db, as_of="2023-10-11", season=2023)
     assert {r["week"] for r in seen} == {5}
+
+
+# --- F-I: the Super Bowl drop is explained, not remapped ---------------------
+
+
+def _with_super_bowl(nfl_fixture, extra_unexplained=0):
+    """Append NGS week-23 (Super Bowl) rows, and optionally an unexplained one."""
+    df = nfl_fixture("ngs_receiving").copy().reset_index(drop=True)
+    sb = df.iloc[:2].copy()
+    sb["week"] = 23
+    rows = [df, sb]
+    if extra_unexplained:
+        odd = df.iloc[:extra_unexplained].copy()
+        odd["team_abbr"] = "ZZZ"          # genuinely unmappable, week 5
+        rows.append(odd)
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_the_super_bowl_week_drop_says_what_it_is(db, nfl_fixture, caplog):
+    """F-I. NGS numbers the Super Bowl week 23; ``schedules`` numbers it 22, so
+    those rows never resolve a gameday and dropped with the generic "unresolved
+    knowledge time" — a fully explained structural gap wearing a mystery's
+    costume. Measured live: 1-7 rows per table per season, 100% week 23."""
+    _load_schedules(db, nfl_fixture)
+    df = _with_super_bowl(nfl_fixture)
+    with caplog.at_level("WARNING", logger="ziggurat.data.nfl"):
+        with base.collect_drops() as tally:
+            ngs.ingest_ngs_receiving(db, df, retrieved_as_of="2023-10-20")
+
+    assert tally["dropped"] == 2
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "Super Bowl" in message and "week 23" in message and "schedules numbers 22" in message
+    assert "structural" in message
+
+
+def test_a_super_bowl_row_is_never_remapped_to_week_22(db, nfl_fixture):
+    """The data must NOT move. Remapping 23->22 asserts a week number upstream
+    did not give us, and bakes an inference into a stored fact."""
+    _load_schedules(db, nfl_fixture)
+    ngs.ingest_ngs_receiving(db, _with_super_bowl(nfl_fixture), retrieved_as_of="2023-10-20")
+    weeks = {
+        r["week"]
+        for r in ngs.get_ngs_receiving(db, as_of="2026-01-01", season=2023, view="latest_truth")
+    }
+    assert 22 not in weeks and 23 not in weeks, "the row is dropped, not relabelled"
+
+
+def test_the_super_bowl_rows_stay_in_the_ceiling_counting_channel(db, nfl_fixture):
+    """They are ``dropped``, never ``by_design`` filtering. A new postseason
+    round or a renumbering would explode this population, and it must still
+    alarm — ``filtered`` is excluded from refresh's drop ceiling."""
+    _load_schedules(db, nfl_fixture)
+    with base.collect_drops() as tally:
+        ngs.ingest_ngs_receiving(db, _with_super_bowl(nfl_fixture), retrieved_as_of="2023-10-20")
+    assert tally["dropped"] == 2
+    assert tally["filtered"] == 0
+
+
+def test_an_unexplained_drop_is_not_hidden_behind_the_super_bowl(db, nfl_fixture, caplog):
+    """The trap in a canned explanation: once the message names the Super Bowl,
+    a REAL unresolvable row (new team abbr, missing schedules week) could ride
+    along invisibly. The split is counted, and the unexplained remainder is
+    called out by name."""
+    _load_schedules(db, nfl_fixture)
+    df = _with_super_bowl(nfl_fixture, extra_unexplained=3)
+    with caplog.at_level("WARNING", logger="ziggurat.data.nfl"):
+        with base.collect_drops() as tally:
+            ngs.ingest_ngs_receiving(db, df, retrieved_as_of="2023-10-20")
+
+    assert tally["dropped"] == 5
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "2 are NGS week 23" in message
+    assert "3 are NOT explained" in message and "need investigating" in message
+
+
+def test_a_wholly_unexplained_drop_keeps_the_original_message(db, nfl_fixture):
+    """No Super Bowl rows -> no Super Bowl story."""
+    assert ngs._drop_reason([5, 6]) == "unresolved knowledge time"
+    assert ngs._drop_reason([]) == "unresolved knowledge time"

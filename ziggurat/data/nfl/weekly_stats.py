@@ -36,6 +36,12 @@ _COLUMNS = (
     "fantasy_points_ppr",
 )
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# Measured 0 same-batch collisions on live 2021/2024/2025, so this changes no
+# count today — it makes a future upstream regrain visible instead of silent.
+_PK_COLS = ("player_id", "season", "week", "retrieved_as_of")
+
 
 def ingest_weekly_stats(conn, df, *, retrieved_as_of: str) -> int:
     """Persist weekly stats, stamping knowable_as_of with the team gameday.
@@ -43,6 +49,15 @@ def ingest_weekly_stats(conn, df, *, retrieved_as_of: str) -> int:
     Requires schedules already ingested so ``base.game_date_map`` resolves.
     Rows whose (season, week, recent_team) has no gameday are dropped (counted
     via the difference between the frame length and the return value).
+
+    Two drop classes are reported through ONE ``note_drops`` call. That is not
+    tidiness: ``base.collect_drops`` SUMS ``total`` across calls, so the two
+    calls this used to make reported ``{'dropped': 22, 'total': 37916}`` for an
+    18,969-row frame — a denominator larger than the number of rows that ever
+    existed (item 3.2c, finding F-H). It was cosmetic only because
+    ``refresh.run_ingest`` computes its own ``seen = written + dropped`` and
+    never reads ``tally['total']``; it was still wrong in the module whose job
+    is drop accounting.
     """
     base.require_columns(df, _COLUMNS, source="weekly_stats")
     # nflverse ships all-zero placeholder rows with a NULL player_id (measured
@@ -54,7 +69,7 @@ def ingest_weekly_stats(conn, df, *, retrieved_as_of: str) -> int:
     # dropped: counted, never silent.
     total = len(df)
     df = df.dropna(subset=["player_id"])
-    base.note_drops("weekly_stats", total - len(df), total, why="null player_id")
+    null_ids = total - len(df)
     gdm = base.game_date_map(conn)
 
     def _knowable(r):
@@ -67,8 +82,18 @@ def ingest_weekly_stats(conn, df, *, retrieved_as_of: str) -> int:
         knowable_as_of=_knowable,
     )
     resolved = [row for row in rows if row["knowable_as_of"] is not None]
-    base.note_drops("weekly_stats", len(rows) - len(resolved), len(rows))
-    return base.upsert(conn, "weekly_stats", resolved)
+    unresolved = len(rows) - len(resolved)
+
+    why = []
+    if null_ids:
+        why.append(f"{null_ids} null player_id")
+    if unresolved:
+        why.append(f"{unresolved} unresolved knowledge time")
+    base.note_drops(
+        "weekly_stats", null_ids + unresolved, total,
+        why="; ".join(why) or "unresolved knowledge time",
+    )
+    return base.upsert(conn, "weekly_stats", resolved, key_cols=_PK_COLS)
 
 
 def pull_weekly_stats(conn, years, *, retrieved_as_of: str) -> int:

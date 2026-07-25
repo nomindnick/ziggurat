@@ -109,3 +109,48 @@ def test_the_null_player_id_drop_is_counted_not_silent(db, nfl_fixture):
     with base.collect_drops() as tally:
         weekly_stats.ingest_weekly_stats(db, df, retrieved_as_of="2023-10-20")
     assert tally["dropped"] >= 2
+
+
+# --- F-H: the drop denominator ----------------------------------------------
+
+
+def test_drop_accounting_uses_one_denominator(db, nfl_fixture):
+    """F-H. ``base.collect_drops`` SUMS ``total`` over every ``note_drops``
+    call, so the two calls this ingester used to make reported a denominator
+    roughly DOUBLE the frame — measured ``{'dropped': 22, 'total': 37916}`` for
+    an 18,969-row frame.
+
+    Confirmed cosmetic, and the test says why so nobody re-inflates the claim:
+    ``refresh.run_ingest`` computes its own ``seen = written + dropped`` and
+    never reads ``tally['total']``, so the ceiling was never affected. It was
+    still wrong in the module whose job is drop accounting.
+    """
+    from ziggurat.data.nfl import base
+
+    _load_schedules(db, nfl_fixture)
+    df = nfl_fixture("weekly_stats").copy().reset_index(drop=True)
+    df.loc[0, "player_id"] = None            # one drop in the FIRST class...
+    with base.collect_drops() as tally:
+        written = weekly_stats.ingest_weekly_stats(db, df, retrieved_as_of="2023-10-20")
+
+    assert tally["total"] == len(df), "the denominator is the frame, counted once"
+    assert tally["dropped"] == 1
+    assert written + tally["dropped"] == len(df)  # nothing unaccounted for
+
+
+def test_both_drop_classes_are_counted_against_the_same_frame(db, nfl_fixture):
+    """Both classes at once — a null player_id AND an unstampable team — still
+    sum to one dropped count over one denominator, and the log names each class
+    with its own count rather than collapsing them into one number."""
+    from ziggurat.data.nfl import base
+
+    _load_schedules(db, nfl_fixture)
+    df = nfl_fixture("weekly_stats").copy().reset_index(drop=True)
+    df.loc[0, "player_id"] = None
+    df.loc[1, "recent_team"] = "ZZZ"         # no such team in schedules -> unstampable
+    with base.collect_drops() as tally:
+        written = weekly_stats.ingest_weekly_stats(db, df, retrieved_as_of="2023-10-20")
+
+    assert tally["dropped"] == 2
+    assert tally["total"] == len(df)
+    assert written == len(df) - 2

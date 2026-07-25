@@ -44,6 +44,16 @@ _REQUIRED = _ID_COLUMNS + ("gameday",) + _ODDS_COLUMNS
 _COLMAP = {c: c for c in _ID_COLUMNS + _ODDS_COLUMNS}
 
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# SWEPT 2026-07-25: the same instrumentation was applied to 6 of 14 call sites
+# in 3.2c and skipped here, and the one skipped site that DID collide
+# (adp_rankings) lost a real market fact a day for two days, silently, with an
+# inflated count in the run log.
+# One row per game_id; rides the same whole-season frame shape as schedules.
+_PK_COLS = ('game_id', 'retrieved_as_of')
+
+
 def ingest_game_odds(conn, df, *, retrieved_as_of: str) -> int:
     """Persist per-game closing lines, stamping knowable_as_of with the gameday.
 
@@ -66,7 +76,7 @@ def ingest_game_odds(conn, df, *, retrieved_as_of: str) -> int:
     )
     kept = [r for r in rows if r["knowable_as_of"] is not None]
     base.note_drops("game_odds", len(rows) - len(kept), len(rows), why="null gameday")
-    return base.upsert(conn, "game_odds", kept)
+    return base.upsert(conn, "game_odds", kept, key_cols=_PK_COLS)
 
 
 def pull_game_odds(conn, years, *, retrieved_as_of: str) -> int:

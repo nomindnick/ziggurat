@@ -10,6 +10,9 @@ stored with a leaky/NULL knowledge time.
 
 Real NGS frames carry ``week == 0`` season-aggregate rows; those have no single
 gameday and are filtered out on ingest (the cached fixture is weeks 5-6 already).
+They also number the Super Bowl **week 23** where ``schedules`` numbers it 22, so
+a handful of rows a season legitimately never resolve a gameday; see
+``_NGS_SUPER_BOWL_WEEK`` for why that is a message fix and not a remap.
 
 The three tables differ only in their metric columns, so ingest/pull/get are one
 shared internal helper each, wrapped by three thin public functions apiece.
@@ -49,6 +52,53 @@ _STAT_TYPE = {
 
 _NATURAL_KEY = ["player_gsis_id", "season", "week"]
 
+# The stored PRIMARY KEY (identical across the three sibling tables), passed to
+# ``base.upsert`` so its return value is the number of DISTINCT keys written
+# rather than rows offered (item 3.2c, F-G). Measured 0 same-batch collisions on
+# live 2021/2024/2025 for all three tables.
+_PK_COLS = ("player_gsis_id", "season", "week", "retrieved_as_of")
+
+# NGS and schedules disagree about ONE week number, and only that one. NGS runs
+# 1-18 REG then 19 WC, 20 DIV, 21 CONF, and numbers the Super Bowl **23** (it
+# never emits a 22 at all); ``schedules`` numbers the Super Bowl **22**. So every
+# NGS Super Bowl row fails ``game_date_map`` and is dropped — with the generic
+# "unresolved knowledge time" message, which reads like a mystery when it is a
+# fully explained structural mismatch.
+#
+# Measured live 2026-07-25, all three tables x 2021/2023/2024: the unresolved
+# population is 100% week 23, and its ``team_abbr`` set is exactly that season's
+# two Super Bowl participants every time (2021 CIN+LAR, 2023 KC+SF, 2024 KC+PHI)
+# — 1 to 7 rows per table per season.
+#
+# The MESSAGE is the fix, deliberately not the data:
+#   * we do NOT remap 23 -> 22. That would assert a week number upstream did not
+#     give us, and bake an inference into a stored fact.
+#   * the rows stay in the ``dropped`` (ceiling-counting) channel, NOT
+#     ``by_design=True``. If this population ever explodes — a new postseason
+#     round, a renumbering — it must still alarm. Labelling it "by design" is how
+#     an alarm gets trained away.
+_NGS_SUPER_BOWL_WEEK = 23
+
+
+def _drop_reason(unresolved_weeks: list[int]) -> str:
+    """Explain the unresolved-gameday population instead of just naming it."""
+    sb = sum(1 for w in unresolved_weeks if w == _NGS_SUPER_BOWL_WEEK)
+    other = len(unresolved_weeks) - sb
+    if sb and not other:
+        subject = f"all {sb} are" if sb > 1 else "the 1 dropped row is"
+        return (
+            f"{subject} NGS week {_NGS_SUPER_BOWL_WEEK} = the Super Bowl, which "
+            "schedules numbers 22 — a known structural week-numbering mismatch, "
+            "not an unexplained gap"
+        )
+    if sb:
+        return (
+            f"{sb} are NGS week {_NGS_SUPER_BOWL_WEEK} = the Super Bowl (schedules "
+            f"numbers it 22 — known structural mismatch); {other} are NOT explained "
+            "by that and need investigating"
+        )
+    return "unresolved knowledge time"
+
 
 def _ingest(conn, df, *, table: str, retrieved_as_of: str) -> int:
     """Filter to real weeks, stamp gameday knowledge time, drop unresolved rows.
@@ -70,9 +120,14 @@ def _ingest(conn, df, *, table: str, retrieved_as_of: str) -> int:
         retrieved_as_of=retrieved_as_of,
         knowable_as_of=knowable_as_of,
     )
-    resolved = [r for r in rows if r["knowable_as_of"] is not None]
-    base.note_drops(table, len(rows) - len(resolved), len(rows))
-    return base.upsert(conn, table, resolved)
+    resolved, unresolved_weeks = [], []
+    for r in rows:
+        if r["knowable_as_of"] is None:
+            unresolved_weeks.append(r["week"])
+        else:
+            resolved.append(r)
+    base.note_drops(table, len(unresolved_weeks), len(rows), why=_drop_reason(unresolved_weeks))
+    return base.upsert(conn, table, resolved, key_cols=_PK_COLS)
 
 
 def _pull(conn, years, *, table: str, retrieved_as_of: str) -> int:

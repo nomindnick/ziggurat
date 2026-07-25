@@ -31,12 +31,31 @@ PRIVATE_PATHS = [
     "config/.env",
 ]
 
+#: Private paths the MATCHER and the HOOK must catch, held separately from
+#: PRIVATE_PATHS for one reason, stated rather than hidden: `.gitignore` does not
+#: cover them yet (item 3.2c audit — see `test_a_database_backup_is_blocked`), so
+#: asserting them in PRIVATE_PATHS would fail `test_gitignore_covers_boundary_paths`
+#: for a real, still-open reason. The commit-time gate — the hook — DOES block
+#: them, which is what stops the file reaching the public remote.
+PRIVATE_PATHS_NOT_YET_GITIGNORED = [
+    "db/ziggurat.sqlite.bak-v7",       # the operator's actual pre-migration backup name
+    "db/ziggurat.sqlite.gz",
+    "db/ziggurat.sqlite.1",
+    "db/ziggurat.sqlite3.old",
+    ".env-prod",
+    ".envrc",
+]
+
 PUBLIC_PATHS = [
     "ziggurat/data/__init__.py",  # the ingestion *package* is public
     "templates/intel/README.md",  # committed starter skeleton is public
     "db/schema.sql",  # schema is public; only the .sqlite is private
     "SPEC.md",
     "ziggurat/core/scoring.py",
+    "docs/sqlite.md",  # writing ABOUT sqlite is public
+    "ziggurat/sqlite_helpers.py",
+    "foo.sqliteish.py",  # the separator class is what keeps this out
+    "db/migrations/008_backfill_recovery.sql",
 ]
 
 
@@ -46,6 +65,35 @@ def test_matcher_flags_private_paths():
 
 def test_matcher_allows_public_paths():
     assert violations(PUBLIC_PATHS) == []
+
+
+def test_a_database_backup_is_blocked(tmp_path):
+    """THE OPERATOR'S OWN FINDING (item 3.2c audit). The sqlite pattern used to be
+    `\\.sqlite3?(-(wal|shm|journal))?$` — anchored after four enumerated endings —
+    so `db/ziggurat.sqlite.bak-v7`, the most natural name for the copy you take
+    before a migration, matched NOTHING: not this matcher, not the hook that reads
+    it, and not `.gitignore`'s `*.sqlite`. That file is 43 MB of league-private
+    state (every opponent's roster, every league member's team name) in a PUBLIC
+    repo, and Rule 5 names three enforcement points, two of which it walked past.
+
+    Asserted through the HOOK as well as the matcher, because the hook is the
+    gate that actually runs at commit time.
+
+    STILL OPEN, deliberately out of this fix's ownership: `.gitignore` needs
+    `*.sqlite*` (it has `*.sqlite`), or a backup keeps showing up in
+    `git status` and `git add .` where a tired operator can stage it. The hook
+    then refuses the commit — which is the failure mode this test pins.
+    """
+    for path in PRIVATE_PATHS_NOT_YET_GITIGNORED:
+        assert violations([path]) == [path], f"boundary path not matched: {path}"
+    blocked = subprocess.run(
+        [sys.executable, str(HOOK), "--paths", *PRIVATE_PATHS_NOT_YET_GITIGNORED],
+        capture_output=True, text=True,
+    )
+    assert blocked.returncode == 1
+    assert "COMMIT BLOCKED" in blocked.stderr
+    for path in PRIVATE_PATHS_NOT_YET_GITIGNORED:
+        assert path in blocked.stderr
 
 
 def test_hook_script_blocks_and_allows():

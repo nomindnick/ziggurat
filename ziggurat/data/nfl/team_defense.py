@@ -58,6 +58,18 @@ def _num(value) -> float:
     return float(value)
 
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# SWEPT 2026-07-25: the same instrumentation was applied to 6 of 14 call sites
+# in 3.2c and skipped here, and the one skipped site that DID collide
+# (adp_rankings) lost a real market fact a day for two days, silently, with an
+# inflated count in the run log.
+# A DERIVED grid (one row per team-week): a collision here would mean the
+# schedules join produced two games for one team-week, which is the shape that
+# would silently halve a D/ST season.
+_PK_COLS = ('season', 'week', 'team', 'retrieved_as_of')
+
+
 def ingest_team_defense(conn, team_stats_df, schedules_df, *, retrieved_as_of: str) -> int:
     """Derive + persist the per-defense fantasy line. Returns rows written.
 
@@ -156,7 +168,7 @@ def ingest_team_defense(conn, team_stats_df, schedules_df, *, retrieved_as_of: s
         })
 
     base.note_drops("team_defense", dropped, total, why="unresolved opponent/score/gameday")
-    return base.upsert(conn, "team_defense", rows)
+    return base.upsert(conn, "team_defense", rows, key_cols=_PK_COLS)
 
 
 def pull_team_defense(conn, years, *, retrieved_as_of: str) -> int:

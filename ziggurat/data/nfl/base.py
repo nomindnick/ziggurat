@@ -15,6 +15,12 @@ two deliberately distinct views:
 * ``latest_truth`` ignores retrieval time and uses the newest correction for a
   fact that was already knowable by ``as_of``. This is useful for outcome
   grading and bulk-loaded immutable history, but must be requested explicitly.
+
+``select_observed_as_of`` (item 3.2c) is its sibling for a CHANGE LOG — a table
+whose rows carry their own observation instant (``observed_at``) and where a key
+with no row at a later instant is unchanged rather than absent. It adds one
+resolution stage that ``select_as_of`` structurally cannot express; both views
+mean the same thing there. Nothing about ``select_as_of`` changed.
 """
 
 import contextvars
@@ -97,7 +103,8 @@ def collect_drops():
     in as the ingest runs. Best-effort by construction: it counts what ingesters
     report, and an ingester that never calls ``note_drops`` contributes nothing.
     """
-    tally = {"dropped": 0, "total": 0, "filtered": 0, "incomplete": 0}
+    tally = {"dropped": 0, "total": 0, "filtered": 0, "incomplete": 0,
+             "collapsed": 0, "duplicated": 0}
     token = _drop_tally.set(tally)
     try:
         yield tally
@@ -149,6 +156,57 @@ def note_incomplete(source: str, count: int, total: int, *, why: str) -> None:
         tally["incomplete"] += count
     if count:
         logger.warning("%s: kept %d/%d rows with a missing field (%s)", source, count, total, why)
+
+
+def note_collapsed(source: str, collapsed: int, duplicated: int, total: int) -> None:
+    """Record rows that never reached the table because another row in the SAME
+    batch carried the same primary key (item 3.2c, F-G).
+
+    A THIRD channel, deliberately not either of the two above:
+
+    * NOT ``note_drops(by_design=False)`` — nothing was *dropped by the ingester*;
+      the rows were handed to SQLite and ``INSERT OR REPLACE`` overwrote them. The
+      distinction matters for diagnosis: a drop means "we could not stamp it", a
+      collapse means "our key is wrong or upstream shipped a duplicate".
+    * NOT ``note_drops(by_design=True)`` — ``by_design`` is defined one screen up
+      as *a filter the league's rules make CORRECT*, and ``refresh.run_ingest``
+      deliberately excludes ``filtered`` from its drop ceiling. Under that label a
+      source that started colliding on 50% of its rows would write half the data
+      and report ``ok``. **A primary-key collision is silent data loss.**
+
+    Two counters, because the classes are genuinely different and only one is a
+    defect (F-G's "separate by FULL-ROW EQUALITY, not by relabelling the class"):
+
+    * ``collapsed`` — same key, DIFFERENT payload. One of the two facts is gone
+      and nothing else records which. This is what must reach the drop ceiling.
+      Measured warrant: the pre-3.2c ``depth_charts`` PK omitted ``game_type`` and
+      ``depth_team``, so 835/947/899/933 rows per season (2021-2024) vanished —
+      ~700 a season differing ONLY in ``depth_team``, i.e. the depth ORDER, i.e.
+      the one column the table exists for — while the ingester returned the full
+      count and ``note_drops`` reported 0.
+    * ``duplicated`` — same key, byte-identical payload. Upstream shipped the row
+      twice; storing it once loses nothing. Measured: 145/171/182/207 per season
+      on the same four files once the key is widened. Counted so an EXPLOSION is
+      still visible, but kept off the ceiling.
+
+    Both are logged; the collapse at WARNING, the benign duplicate at INFO.
+    """
+    tally = _drop_tally.get()
+    if tally is not None:
+        tally["collapsed"] += collapsed
+        tally["duplicated"] += duplicated
+    if collapsed:
+        logger.warning(
+            "%s: COLLAPSED %d/%d rows — a same-batch primary-key collision with a "
+            "DIFFERENT payload overwrote them (wrong key columns, or upstream "
+            "restated a row); the lost facts are unrecoverable from this table",
+            source, collapsed, total,
+        )
+    if duplicated:
+        logger.info(
+            "%s: %d/%d rows were byte-identical duplicates of another row in the "
+            "same batch (stored once; nothing lost)", source, duplicated, total,
+        )
 
 
 def _clean(value):
@@ -208,9 +266,23 @@ def frame_to_rows(
     return rows
 
 
+def _primary_key_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    """The table's declared PRIMARY KEY columns, in declaration order.
+
+    Positional indexing (not ``row["name"]``) so this works whether or not the
+    caller's connection sets ``row_factory``. ``PRAGMA table_info`` returns
+    ``(cid, name, type, notnull, dflt_value, pk)``; ``pk`` is the 1-based position
+    within the primary key, 0 for a non-key column.
+    """
+    info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    keyed = sorted((r[5], r[1]) for r in info if r[5])
+    return tuple(name for _, name in keyed)
+
+
 def upsert(conn: sqlite3.Connection, table: str, rows: Sequence[Mapping], *,
-           commit: bool = True) -> int:
-    """Idempotent INSERT OR REPLACE of uniform row dicts. Returns rows written.
+           key_cols: Sequence[str] | None = None, commit: bool = True) -> int:
+    """Idempotent INSERT OR REPLACE of uniform row dicts. Returns rows written —
+    a count that is only honest when ``key_cols`` is given (see below).
 
     ``commit=False`` leaves the write inside the caller's transaction. A
     replace-the-partition ingester (DELETE then insert) needs this: with the
@@ -219,16 +291,115 @@ def upsert(conn: sqlite3.Connection, table: str, rows: Sequence[Mapping], *,
     league state (item 3.1) that is unrecoverable data loss, since ESPN serves
     no history. Such callers wrap both statements in one ``with conn:`` block
     and pass ``commit=False``.
+
+    ``key_cols`` — THE HONEST COUNT (item 3.2c, F-G). Without it this function
+    returns ``len(rows)``, which is the number of rows OFFERED, and that is a lie
+    whenever two of them share a primary key: ``INSERT OR REPLACE`` keeps the last
+    one and the caller reports the full count. Three probes hit this on three
+    different tables — measured, ``ingest_snap_counts`` returned 26,468 for a 2021
+    pull the table received 26,467 of, and ``note_drops`` reported 0. Pass the
+    table's FULL primary key and the return value becomes the number of DISTINCT
+    keys written, with the collapse reported through ``note_collapsed``.
+
+    Detection is PRE-INSERT, on purpose: the obvious post-hoc fix is verified not
+    to work. ``conn.total_changes`` counts **3 for 3 rows that collapse to 2**,
+    because REPLACE reports the replacing insert as a change (and the deletion of
+    the row it displaced separately). SQLite cannot tell us afterwards what it
+    silently overwrote; only the batch we handed it can.
+
+    ``key_cols`` must equal the table's declared PRIMARY KEY exactly. A subset
+    would count collisions SQLite does not make (phantom loss); a superset would
+    miss collisions it does make (silent loss, wearing a clean count) — the very
+    defect this parameter exists to end. A mismatch raises rather than returning a
+    number nobody can interpret.
+
+    Only collisions WITHIN this batch are counted. A row that replaces one already
+    in the table is an ordinary re-ingest of the same key — nothing is lost, and
+    the repo's convention puts ``retrieved_as_of`` in every key so a correction is
+    a new version anyway.
+
+    Counting follows the CHAIN, not the first row seen (corrected 2026-07-25).
+    ``INSERT OR REPLACE`` overwrites whatever currently occupies the key, so the
+    comparison that says "was a fact lost here?" is against the row the previous
+    statement left there — not against the first row of the run. Comparing
+    everything to the first row reported ``A, B, B`` as **two** collapses when
+    exactly one fact (A) was lost and the second B was a byte-identical duplicate
+    of the row already stored. It failed toward alarm and measured 0 in every real
+    season, but a tally that over-counts is a tally an operator learns to discount,
+    and this one gates ``run_ingest``'s 20% drop ceiling.
+
+    A row with a NULL in ANY key column is exempt from collision accounting. A
+    composite PRIMARY KEY on an ordinary rowid table is a UNIQUE index, and in a
+    UNIQUE index every NULL is distinct — SQLite stores every such row and
+    replaces nothing. Python tuple equality disagrees (``(None,) == (None,)``), so
+    without this exemption a table that started serving NULLs in a key column
+    would report a phantom collapse for every row after the first and could fail a
+    healthy pull against the drop ceiling. Such rows are still counted as written
+    (they are in the table) and are logged, because a NULL key column is almost
+    always a real defect in its own right: ``select_as_of`` resolves per key and a
+    NULL never equals itself in the correlated match, so the row is STORED AND
+    UNREADABLE. Measured on the shipped DDL: ``game_type=NULL`` -> 2 stored,
+    0 returned.
+
+    Row order is untouched: every row is still handed to ``executemany`` in the
+    order given, so a caller that deliberately orders its batch (``injuries``
+    keeps the most recent report per player-week) keeps deciding which row wins.
+    This parameter changes the COUNT and the REPORTING, never the stored data.
     """
     if not rows:
         return 0
     cols = list(rows[0].keys())
     placeholders = ", ".join(f":{c}" for c in cols)
     sql = f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
+
+    written = len(rows)
+    if key_cols is not None:
+        key_cols = tuple(key_cols)
+        declared = _primary_key_columns(conn, table)
+        if set(key_cols) != set(declared):
+            raise ValueError(
+                f"{table}: key_cols {list(key_cols)} does not match the declared "
+                f"primary key {list(declared)} — the collapse count would be "
+                f"wrong in one direction or the other"
+            )
+        missing = sorted(set(key_cols) - set(cols))
+        if missing:
+            raise ValueError(
+                f"{table}: key_cols {missing} absent from the rows being written"
+            )
+        occupant: dict[tuple, Mapping] = {}
+        collapsed = duplicated = null_keyed = 0
+        for row in rows:
+            key = tuple(row[c] for c in key_cols)
+            if any(v is None for v in key):
+                # SQLite never collapses these (see the docstring); neither do we.
+                null_keyed += 1
+                continue
+            prior = occupant.get(key)
+            if prior is None:
+                occupant[key] = row
+            elif dict(prior) == dict(row):
+                # Full-row equality, not a relabelled class. Safe as a plain ==
+                # because every value has been through _clean: NaN is already
+                # None, so the one scalar that is not equal to itself is gone.
+                duplicated += 1
+            else:
+                collapsed += 1
+                occupant[key] = row   # follow the chain: REPLACE moved the row
+        written = len(occupant) + null_keyed
+        if null_keyed:
+            logger.warning(
+                "%s: %d/%d rows carry a NULL in a PRIMARY KEY column (%s) — SQLite "
+                "stores them but select_as_of cannot resolve a NULL key, so they are "
+                "written and unreadable; they are exempt from collision accounting",
+                table, null_keyed, len(rows), ", ".join(key_cols),
+            )
+        note_collapsed(table, collapsed, duplicated, len(rows))
+
     conn.executemany(sql, rows)
     if commit:
         conn.commit()
-    return len(rows)
+    return written
 
 
 # Team-abbr variants across nflverse sources normalized to the schedules abbr.
@@ -283,13 +454,36 @@ def week_first_gameday_map(conn: sqlite3.Connection) -> dict[tuple[int, int], st
     return out
 
 
+def _gsis_preference(gsis: str | None) -> tuple[int, str]:
+    """Sort key for choosing among gsis ids that collide on one source id.
+
+    A REAL gsis is ``00-00xxxxx``. nflverse also mints pseudo-ids (``ALT577722``,
+    ``32004243-4152-...``) for players it has not yet reconciled, so ``00-`` first
+    then lexicographic is a total order over any collision set.
+    """
+    gsis = gsis or ""
+    return (0 if gsis.startswith("00-") else 1, gsis)
+
+
 def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
     """pfr_id -> gsis_id from the latest players snapshot (crosswalk resolution
     for PFR-keyed sources like snap counts).
 
-    A pfr_id should map to exactly one gsis_id; if the crosswalk ever carries a
-    collision it is logged (not silently last-write-wins) and the first mapping
-    is kept, so a mis-join surfaces instead of hiding.
+    A pfr_id should map to exactly one gsis_id. It does not always: 15 pfr ids in
+    the live crosswalk map to two, a pseudo-id (``ALT577722``) and a real one
+    (``00-0041453``) for the same player (item 3.2c, F-J). Every collision is
+    logged — never silently last-write-wins.
+
+    **Which one is kept is DETERMINISTIC (``00-`` preferred, then lexicographic),
+    not verified correct.** Nobody has established that the ``00-`` id is the right
+    one; recon recorded that as unmeasured (design note §5). What is fixed here is
+    a worse property: the resolving SQL has no ``ORDER BY``, so the winner was
+    SQLite's scan order, and ``snap_counts`` FREEZES the resolved gsis into the
+    stored row at ingest — a flip between two runs would be permanently baked in
+    and the table non-idempotent, with nothing anywhere recording that it moved.
+    Measured 0 flips across one re-pull, i.e. luck rather than correctness. If the
+    preference is later shown to pick the wrong id, that is a one-line change here
+    plus a re-pull; a nondeterministic table is not repairable at all.
     """
     out: dict[str, str] = {}
     for r in conn.execute(
@@ -302,8 +496,13 @@ def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
     ):
         pfr, gsis = r["pfr_id"], r["gsis_id"]
         if pfr in out and out[pfr] != gsis:
-            logger.warning("crosswalk: pfr_id %s maps to multiple gsis (%s, %s); keeping first",
-                           pfr, out[pfr], gsis)
+            keep = min(out[pfr], gsis, key=_gsis_preference)
+            logger.warning(
+                "crosswalk: pfr_id %s maps to multiple gsis (%s, %s); keeping %s "
+                "(deterministic '00-' preference — see base._gsis_preference)",
+                pfr, out[pfr], gsis, keep,
+            )
+            out[pfr] = keep
             continue
         out[pfr] = gsis
     return out
@@ -448,6 +647,102 @@ def select_as_of(
               WHERE {key_match}
                 AND t2.knowable_as_of <= :as_of
                 {retrieval_gate}
+          ){where_extra}
+    """
+    bound = {"as_of": cutoff, **(dict(params) if params else {})}
+    return conn.execute(sql, bound).fetchall()
+
+
+def select_observed_as_of(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    as_of,
+    key_cols: Sequence[str],
+    observed_col: str = "observed_at",
+    columns: str = "g.*",
+    extra_where: str = "",
+    params: Mapping | None = None,
+    view: AsOfView = "historical",
+) -> list[sqlite3.Row]:
+    """``select_as_of`` for a table whose rows carry their OWN observation time.
+
+    A CHANGE LOG, not a snapshot table (item 3.2c, the depth-chart panel). A row
+    says "at this instant, this key's value became X"; a key with no row at a
+    later instant is UNCHANGED, and a key whose value became "vacant" is recorded
+    by a tombstone row (a positive fact — the same lesson item 3.1 paid for with
+    ``on_team_id IS NULL``). Reading such a table needs THREE stages, in this
+    order:
+
+      1. gate:  ``knowable_as_of <= as_of``  (+ ``retrieved_as_of <= as_of``
+                under ``historical``) — identical to ``select_as_of``.
+      2. per ``key_cols``:  ``MAX(observed_col)``  — WHICH observation is current.
+      3. per ``(key_cols, observed_col)``:  ``MAX(retrieved_as_of)`` — which
+         VERSION of that observation (a later correction to the same instant).
+
+    ``select_as_of`` is the degenerate case with no step 2, and step 2 is exactly
+    what it cannot express: its correlated MAX is on ``retrieved_as_of`` ONLY, so
+    a bulk backfill — one retrieval stamp for a whole season — makes every version
+    of every key tie, and the read returns the ENTIRE HISTORY of each key as if it
+    were all current. Measured on the real 2025 panel: **3,572 rows where 2,255
+    was right**, a 58% inflated board showing one team both a QB3 and a QB4 who
+    are the same player. Running the two resolutions in the other order does not
+    help either, and dropping step 2 in favour of "just take the newest retrieval"
+    resurrects ghosts — a phantom rank-4 carried forward seven weeks — because a
+    slot that vacated has no newer row of its own.
+
+    The caller supplies the tombstone predicate through ``extra_where`` (e.g.
+    ``"g.espn_id IS NOT NULL"``). It CANNOT be applied inside stages 2/3: a
+    tombstone must win the MAX so it can hide the row it retires, and only then be
+    filtered from the output. Filtering first is precisely the ghost bug.
+
+    COST, measured on this box against the shipped DDL with a 36,048-row season
+    (larger than the real 2025 panel's 27,674): whole-league 91 ms, one team
+    5 ms; both correlated subqueries resolve through the table's PK autoindex.
+    A row-value variant (68 ms) and a ROW_NUMBER() window variant (63 ms) return
+    byte-identical results and were rejected — the margin is not decision-relevant
+    on the hot path (one team), and this shape is the one an auditor can read
+    stage by stage. The design note's 20–44 ms is a different prototype's number.
+
+    ``as_of`` is validated by ``normalize_as_of`` (no implicit "now"), and the
+    day-granular contract in ``select_as_of``'s docstring applies unchanged —
+    ``observed_col`` orders WITHIN a day (four measured days carry 2-3 panels) but
+    does not make ``as_of`` intraday. ``extra_where`` is trusted, code-authored SQL
+    plus bound ``params``; the outer row is aliased ``g``. Every ``key_cols``
+    column must be NOT NULL in the table (a NULL never equals itself in the
+    correlated joins, so a NULL-keyed row would resolve against nothing and leak
+    its whole history) — the shipped ``depth_chart_slots`` declares them so.
+    """
+    if view not in AS_OF_VIEWS:
+        raise ValueError(f"unknown as-of view {view!r} (known: {AS_OF_VIEWS})")
+    if not key_cols:
+        raise ValueError("select_observed_as_of requires at least one key column")
+
+    cutoff = normalize_as_of(as_of).isoformat()
+    obs_match = " AND ".join(f"o.{k} = g.{k}" for k in key_cols)
+    ver_match = " AND ".join(f"v.{k} = g.{k}" for k in key_cols)
+    where_extra = f" AND ({extra_where})" if extra_where else ""
+    historical = view == "historical"
+    gate_g = "AND g.retrieved_as_of <= :as_of" if historical else ""
+    gate_o = "AND o.retrieved_as_of <= :as_of" if historical else ""
+    gate_v = "AND v.retrieved_as_of <= :as_of" if historical else ""
+    sql = f"""
+        SELECT {columns}
+        FROM {table} g
+        WHERE g.knowable_as_of <= :as_of
+          {gate_g}
+          AND g.{observed_col} = (
+              SELECT MAX(o.{observed_col}) FROM {table} o
+              WHERE {obs_match}
+                AND o.knowable_as_of <= :as_of
+                {gate_o}
+          )
+          AND g.retrieved_as_of = (
+              SELECT MAX(v.retrieved_as_of) FROM {table} v
+              WHERE {ver_match}
+                AND v.{observed_col} = g.{observed_col}
+                AND v.knowable_as_of <= :as_of
+                {gate_v}
           ){where_extra}
     """
     bound = {"as_of": cutoff, **(dict(params) if params else {})}

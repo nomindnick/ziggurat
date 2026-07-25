@@ -32,18 +32,32 @@ from ziggurat.data.nfl.espn_ranks import BoardCollapse, get_espn_draft_ranks
 from ziggurat.data.nfl.espn_ranks import ensure_board as ensure_espn_board
 from ziggurat.data.nfl.espn_source import load_espn_credentials
 from ziggurat.data.nfl.refresh import (
+    BACKFILL_MIN_SEASON,
+    ORPHAN_STALE_MINUTES,
+    BackfillRefused,
+    BackfillTouchedProtectedSeason,
+    backfill_coverage,
+    format_backfill_plan,
+    format_backfill_run,
+    format_coverage,
     format_plan,
+    format_reap,
     format_sources,
     needs_credentials,
+    orphan_runs,
+    plan_backfill,
     plan_ingest,
+    reap_orphan_runs,
     resolve_stamp,
+    run_backfill,
     run_failed,
     run_ingest,
+    select_backfill_sources,
     select_sources,
 )
 from ziggurat.data.nfl.refresh import format_run as format_ingest_run
 from ziggurat.data.nfl.refresh import format_status as format_ingest_status
-from ziggurat.data.store import apply_schema, connect, open_db
+from ziggurat.data.store import apply_schema, connect, migration_alerts, open_db
 from ziggurat.league.state import (
     OwnTeamUnresolved,
     format_free_agents,
@@ -70,6 +84,20 @@ app.add_typer(db_app, name="db")
 app.add_typer(intel_app, name="intel")
 
 
+def _echo_migration_alerts(alerts: dict) -> None:
+    """Print the rows a migration left behind to say it silently dropped data.
+
+    A migration runs inside ``open_db`` on EVERY command, so it may not raise —
+    which forces the 007 table rebuilds to use ``INSERT OR REPLACE``, which means
+    a key collision COLLAPSES rather than failing. ``store.migration_alerts``
+    records such a loss as a positive ``meta`` fact; without this echo the alarm
+    exists in the database and is never seen by anyone. Print only (rule 3): the
+    detection lives in ``store.py``.
+    """
+    for key, detail in sorted(alerts.items()):
+        typer.echo(f"MIGRATION ALERT [{key}]: {detail}", err=True)
+
+
 @db_app.command("init")
 def db_init(
     path: Annotated[Path, typer.Option(help="SQLite file to create/upgrade.")] = DEFAULT_DB_PATH,
@@ -78,8 +106,10 @@ def db_init(
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(path)
     apply_schema(conn)
+    alerts = migration_alerts(conn)
     conn.close()
     typer.echo(f"schema applied: {path}")
+    _echo_migration_alerts(alerts)
 
 
 @intel_app.command("init")
@@ -679,14 +709,138 @@ def ingest_status(
 ) -> None:
     """Per-source last successful pull + staleness verdict (3.2's staleness source)."""
     conn = open_db(path)
-    typer.echo(format_ingest_status(conn, season=_season(season), today=through or _today()))
+    report = format_ingest_status(conn, season=_season(season), today=through or _today())
+    alerts = migration_alerts(conn)
     conn.close()
+    typer.echo(report)
+    _echo_migration_alerts(alerts)
 
 
 @ingest_app.command("sources")
 def ingest_sources() -> None:
     """List the source registry: cadence group, phases, interval, and flags."""
     typer.echo(format_sources())
+
+
+@ingest_app.command("backfill")
+def ingest_backfill(
+    first: Annotated[int, typer.Option(help="Oldest season to land (>= 2021).")] = BACKFILL_MIN_SEASON,
+    last: Annotated[Optional[int], typer.Option(
+        help="Newest season to land (default: last COMPLETED season). The current "
+             "season is refused — the 3.1b cadence owns it.")] = None,
+    source: Annotated[Optional[list[str]], typer.Option(
+        help="Backfill only these sources (repeatable). Excluded names are refused "
+             "with the measured reason.")] = None,
+    with_weather: Annotated[bool, typer.Option("--with-weather",
+        help="Also pull the ERA5 weather ARCHIVE (~18 min for five seasons, 12x "
+             "everything else combined; item 3.3 reads none of it).")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run",
+        help="Report what WOULD be pulled and exit. Touches no network, writes nothing.")] = False,
+    force: Annotated[bool, typer.Option("--force",
+        help="Re-pull (source, season) pairs that ALREADY LANDED, under today's stamp. "
+             "Does NOT override the season bounds or the active-cadence refusal.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Land historical NFL seasons (item 3.2c). Not the scheduled command.
+
+    Every row is written with ``retrieved_as_of = TODAY`` and its real historical
+    ``knowable_as_of``, so the default ``historical`` view returns NOTHING for a
+    past ``as_of`` — read backfilled history through ``base.latest_truth(accessor)``.
+
+    NOTE, because the word is overloaded: this has nothing to do with
+    ``ingest run --allow-backfill``, which writes TODAY's data under a PAST
+    ``retrieved_as_of`` (a manufactured leak). That flag is not available here and
+    the package layer hard-codes it off.
+
+    Ordering, fences, the run log and the draft-critical fingerprint all live in
+    ``data/nfl/refresh.py``; this command parses, calls, prints (rule 3).
+    """
+    resolved_last = last if last is not None else nfl_season_of(_today()) - 1
+    conn = open_db(path)
+    try:
+        specs = select_backfill_sources(names=source or None, with_weather=with_weather)
+        if dry_run:
+            typer.echo(format_backfill_plan(plan_backfill(
+                conn, first=first, last=resolved_last, sources=specs,
+                today=_today(), force=force,
+            )))
+            return
+        summaries = run_backfill(
+            conn, first=first, last=resolved_last, sources=specs,
+            retrieved_as_of=_today(), today=_today(), force=force,
+            progress=lambda line: typer.echo(line, err=True),
+        )
+    except BackfillTouchedProtectedSeason as exc:
+        typer.echo(format_backfill_run(exc.summaries))
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except (BackfillRefused, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        conn.close()
+    typer.echo(format_backfill_run(summaries))
+    if run_failed(summaries):
+        raise typer.Exit(code=1)
+
+
+@ingest_app.command("reap")
+def ingest_reap(
+    older_than_minutes: Annotated[int, typer.Option(
+        help="Only rows that have been `running` at least this long. 0 clears every "
+             "running row, including one that is genuinely in flight.")] = ORPHAN_STALE_MINUTES,
+    dry_run: Annotated[bool, typer.Option("--dry-run",
+        help="List the orphans and exit. Writes nothing.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Clear ingest runs left marked `running` by a killed process (item 3.2c).
+
+    A run row is written BEFORE the network call and only the run itself clears
+    it, so a Ctrl-C or a systemd ``TimeoutStartSec`` SIGTERM leaves one behind on
+    purpose — silence is not success. But ``ingest backfill`` refuses to start
+    while any run is marked `running`, and the only automatic reaper fires when
+    that exact (source, season) pair runs again — which for the backfill-only
+    sources no command could reach. This is that missing command.
+
+    It rewrites the run LOG only. No fact table is touched, nothing is deleted,
+    and a run that turns out to be alive overwrites its own row when it finishes.
+    """
+    conn = open_db(path)
+    try:
+        rows = (orphan_runs(conn, older_than_minutes=older_than_minutes) if dry_run else
+                reap_orphan_runs(conn, older_than_minutes=older_than_minutes))
+    finally:
+        conn.close()
+    typer.echo(format_reap(rows, older_than_minutes=older_than_minutes, dry_run=dry_run))
+
+
+@ingest_app.command("coverage")
+def ingest_coverage(
+    first: Annotated[int, typer.Option(help="Oldest season to report.")] = BACKFILL_MIN_SEASON,
+    last: Annotated[Optional[int], typer.Option(
+        help="Newest season to report (default: last completed season).")] = None,
+    source: Annotated[Optional[list[str]], typer.Option(
+        help="Report only these sources (repeatable).")] = None,
+    with_weather: Annotated[bool, typer.Option("--with-weather",
+        help="Include the opt-in ERA5 weather archive row.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """What history is actually stored, per source per season (item 3.2c).
+
+    The question ``ingest status`` structurally cannot answer: that report is
+    per-source for ONE season and never lists the backfill-only sources.
+    """
+    resolved_last = last if last is not None else nfl_season_of(_today()) - 1
+    conn = open_db(path)
+    try:
+        specs = select_backfill_sources(names=source or None, with_weather=with_weather)
+        rows = backfill_coverage(conn, first=first, last=resolved_last, sources=specs)
+    except (BackfillRefused, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        conn.close()
+    typer.echo(format_coverage(rows))
 
 
 @app.command()

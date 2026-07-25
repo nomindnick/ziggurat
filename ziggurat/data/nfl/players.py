@@ -124,6 +124,18 @@ def _norm_id(value):
     return text[:-2] if text.endswith(".0") else text
 
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# SWEPT 2026-07-25: the same instrumentation was applied to 6 of 14 call sites
+# in 3.2c and skipped here, and the one skipped site that DID collide
+# (adp_rankings) lost a real market fact a day for two days, silently, with an
+# inflated count in the run log.
+# Measured 0 same-batch collisions live (15,705 rows). ingest_players already
+# drop_duplicates() on gsis_id, so this asserts that filter still works rather
+# than trusting it.
+_PK_COLS = ('gsis_id', 'retrieved_as_of')
+
+
 def ingest_players(conn, df, *, retrieved_as_of: str, allow_shrink: bool = False) -> int:
     base.require_columns(df, list(_COLMAP.values()), source="players")
     df = df.dropna(subset=["gsis_id"]).drop_duplicates(subset=["gsis_id"])
@@ -136,7 +148,7 @@ def ingest_players(conn, df, *, retrieved_as_of: str, allow_shrink: bool = False
         for col in _NUMERIC_ID_COLS:
             row[col] = _norm_id(row[col])
     _check_id_coverage(conn, rows, allow_shrink=allow_shrink)
-    return base.upsert(conn, "players", rows)
+    return base.upsert(conn, "players", rows, key_cols=_PK_COLS)
 
 
 def pull_players(conn, *, retrieved_as_of: str, allow_shrink: bool = False) -> int:

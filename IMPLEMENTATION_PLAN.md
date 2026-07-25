@@ -1516,8 +1516,256 @@ populatable today.
 > numbers real, and the staleness banner is the only thing standing between a July snapshot
 > and a November decision.
 
+### 3.2c [Build] Historical NFL backfill & `depth_charts` v2
+**Inserted 2026-07-25** (operator decision) as a prerequisite for 3.3, from three facts measured
+against the live DB rather than assumed from the plan:
+- **The database holds only season 2026, and every stat table is empty.** `weekly_stats`,
+  `snap_counts`, `ngs_passing/rushing/receiving`, `injuries`, `team_defense`, `game_odds`,
+  `game_weather` and `depth_charts` are all **0 rows**; `schedules` is 272 rows (2026 only) and
+  `projections` 115,802 (2026 only). This is not a cadence bug — `nfl_ingest_runs` shows those
+  sources correctly `skipped` with *"nothing to pull in the preseason phase"*. 3.1b built a
+  **current-season refresher**, and item 1.4's "multi-season history (≥2021)" was satisfied by
+  the ingester code, never by a populated database. Nothing will backfill history on its own.
+- **A backfill is not one command.** `ziggurat ingest run --season 2025 --dry-run` reports every
+  phase-gated source as *"season 2025 phase unknown — schedules not ingested yet"*, so it is a
+  two-pass, per-season loop. The underlying `pull_*` functions already take a `years` **list**
+  (`pull_weekly_stats(conn, years, *, retrieved_as_of)`); only the registry's one-season-at-a-time
+  wiring does not use it.
+- **`depth_charts` is still BLOCKED** (recorded in 3.1b: upstream became a dated daily panel that
+  the stored table cannot hold and `base.select_as_of` cannot query). *"Opportunity shocks
+  (injury/**depth-chart** triggers)"* is half of 3.3's stated goal, and 3.2 already deferred its
+  own depth-chart consumer once. The deferral comes due here.
+
+**Goal:** Land 2021–2025 nflverse history (the season set is a recon decision, floored by what
+3.3 needs to be gradeable and reaching toward Phase 4's 2021–23 train / 2024–25 validate split),
+and rewrite `depth_charts` to the dated-panel shape with the accessor it needs — one dated
+snapshot per key, a real publish timestamp as knowledge time, and a diff accessor that 3.3's
+depth-chart trigger can query.
+**Done when:** the stat tables answer a 2025 mid-season read with real rows; `usage_deltas` runs
+unchanged at that as-of and reproduces a known usage step-up; `depth_charts` ingests through the
+cadence and its accessor returns both "the chart at as-of X" and "what changed between X and Y";
+and a re-run of the full suite plus the 2026 board proves the backfill did not degrade the
+draft-critical 2026 data.
+
+**Why it is its own item and not folded into 3.3's recon:** `depth_charts` v2 is a migration
+(`007`, `schema_version` 7) plus a table rewrite plus a new accessor query shape plus leakage
+tests — that is an item. And 3.1b's headline finding was that **3 of 14 ingesters were already
+broken against live upstream while the suite was green**, because the committed fixtures are
+frozen 2023 frames; a 5-season × 8-source backfill is the shakeout that finds the rest of that
+class, and those failures want to be isolated from 3.3's signal logic so each is diagnosable.
+
+**The standing hazard for this item:** the draft is ~3 weeks out and the 2026 partition
+(`players` crosswalk, `projections`, the `espn_ranks` board, league state) is what the draft
+weapon runs on. Both 3.1 and 3.1b shipped a *"a degraded pull destroys the day"* defect that only
+an audit caught. Every delete-then-write path and collapse floor is in scope for this item's
+audit, and no backfill may damage the 2026 data.
+
+**Recon complete 2026-07-25** (11-agent workflow: 7 probes → 2 designers → adversarial reviewer →
+note; full note in gitignored `intel/research/backfill-depthcharts-3.2c-design.md`, 1,160 lines).
+Findings that reshape the item:
+- **The depth-chart panel does not detect injuries — see the amendment to 3.3 below.** This is the
+  item's most valuable finding and it is a negative one.
+- **`ff_opportunity` (expected TDs) is a leak wearing a valid timestamp, and is moved to Phase 4.**
+  TD regression genuinely has no source in any ingested table (`weekly_stats` has no `*_exp` and no
+  red-zone column; NGS has expected *yards* and *completions*, never expected *TDs*), so the design
+  proposed adding ffverse `ff_opportunity`. Measured via the GitHub release API: it is a **model
+  output published months after each season ends** (`ep_weekly_2021.parquet` written 2023-01-05;
+  2025's written 2026-02-10) **by a model trained on the season it scores**. Stamping a 2021 week-5
+  row `knowable_as_of = 2021-10-10` passes every leakage test while contaminating a Phase-4 backtest
+  with the outcome distribution of the season it is grading. Its `model_version` pin pins a release
+  *tag*, not a build, and both tags' assets straddle a model refresh on 2025-12-11. There is no
+  in-season file at all — that is structural, not calendar. It lands in Phase 4 as a
+  backtest-only, `latest_truth`-only source stamped from the asset's `updated_at`.
+- **Store the panel as a change log + tombstones, not verbatim.** Verbatim 2025+2026 (923,162 source
+  rows) measured **255.4 MB** on a 43.4 MB database. A row only when a slot's occupant changes, plus
+  a tombstone when a slot vacates, measured **31,085 rows / 6.50 MB** with indexes — and it is
+  provably lossless: every published panel reconstructed row-for-row against raw upstream,
+  **221/221 for 2025 and 127/127 for 2026, 0 mismatches**. This also dissolves the IDP question
+  (all-position 6.50 MB vs skill-only ~2 MB — **store everything**, since filtering forecloses
+  future D/ST front-personnel work for ~4 MB). The tombstones are load-bearing, not tidiness: two
+  probes recommended incompatible accessors because per-key resolution over a full panel inflates a
+  board 58% (a KC roster showing both a QB3 and a QB4 named Chris Oladokun) while per-key resolution
+  *without* tombstones resurrects ghosts (a phantom rank-4 carried forward seven weeks). Change-only
+  + tombstones + per-key resolution ordered on `observed_at` satisfies both — validated at 24 as-of
+  points across two seasons, 0 mismatches. **This is item 3.1's `on_team_id IS NULL` lesson again:
+  a drop must be a positive fact.**
+- **The two halves of the design collided on migration `007`, and it would have bricked every
+  command.** Both designers independently wrote a `db/migrations/007_*.sql`; `store.py:58` enforces
+  contiguous numbering and `apply_schema` is called unconditionally by `open_db`, which its own
+  docstring calls "the safe default for any command" — so `draft-web`, `draft-board`, `league sync`,
+  `ingest run` and `marginal` all die at startup with a traceback, three weeks before the draft.
+  Caught by the adversarial stage against the real runner, not by inspection. One migration file
+  ships (`007_backfill_and_depth_charts.sql`, `schema_version` → 7) plus a test that the shipped
+  migrations directory actually applies.
+- **Routing 2021–2024 legacy depth charts into the v2 panel table would have stored ~148k rows that
+  read back as ZERO with the run log saying `ok`** — the legacy frame carries none of the new
+  table's key columns, and the proposed crosswalk rescue would have fabricated "slot vacated" facts
+  on 18% of rows. Two tables, permanently: the panel and the legacy weekly shape.
+- **The blast radius is genuinely narrow.** Independently re-verified twice: nothing outside the
+  owning modules selects from any table the backfill writes; `ziggurat/draft/*` touches only
+  `espn_draft_ranks` and `base.TEAM_ALIASES`; `core/valuation.py` and `core/marginal.py` read only
+  `{base, projections, schedules}`, all `WHERE season = ?`. **Nothing currently works only because a
+  table is empty.** The residual risk is concentrated in the backfill's own correctness and in the
+  run-log/concurrency seams — `start_run`'s orphan reap is not season-scoped, and `store.connect`
+  sets no `busy_timeout` (verified), so a multi-minute backfill can collide with the league sync,
+  whose lost day is the one that is literally unrecoverable.
+- **The two-view trap is real and silent, measured on seven accessors.** Backfilled history under
+  the default `historical` view returns 0 rows where `latest_truth` returns real data —
+  `weekly_stats` 2023 (0 vs 6,002), `snap_counts` 2024 (0 vs 11,589), `injuries` 2023 (0 vs 2,430),
+  `usage_deltas` 2025 wk9 (0 vs 83). This is `select_as_of` working as designed, and it must **not**
+  be "solved" by back-stamping (`resolve_stamp` already refuses that; it would manufacture a leak).
+  The failure mode is an empty result that reads as *"3.3 is broken"* rather than *"wrong view"* —
+  hence a parameterized contract test across every backfilled accessor, the highest-value test here.
+- Recon also surfaced **10 real defects in shipped 1.4/1.5/3.1b code**, two of which change
+  live-cadence behaviour and one of which is a Rule-6 input. See §2.7 of the note.
+
+**Scope decisions (operator, 2026-07-25):** all 10 shipped-code fixes plus the `store.connect`
+`busy_timeout` land **inside 3.2c** — they are all in files this item already opens, and splitting
+them means two migrations and two audit rounds three weeks before the draft. Two are worth naming
+because they change behaviour beyond this item: **F-C** makes `decide()` anchor on `partial` as
+well as `ok`, because `weekly_stats` drops the same 22 null-`player_id` rows every season and the
+three `ngs_*` drop the week-23 Super Bowl rows, so those four sources **never anchor** and the
+daily-firing weekly unit re-downloads four whole-season parquets every day in-season; the trade is
+that a `partial` pull now anchors the interval instead of self-healing tomorrow, which is right for
+a source that is `partial` by construction every run. **F-F** is the Rule-6 one: `injuries`
+last-write-wins currently keeps the STALE status (source carries `Out` at 13:57 and `Questionable`
+at 20:55 the previous day for the same player-week; the table stores **Questionable**) — 3 rows
+across 5 seasons, and the worst possible class of wrong. `--with-weather` ships as a flag but is
+not run (~18 min, 12× everything else, and 3.3 reads none of it).
+**Update:**
+> **Built, audited and fixed 2026-07-25** (recon → build → 15-agent adversarial audit → fix round;
+> suite **832 → 1219**, ruff clean). The backfill runs 2021–2025 across 55 (source, season) pairs in
+> **40.6 s**, reproducing every expected row count at **0.000% deviation** (`weekly_stats` 94,735,
+> `snap_counts` 132,616, `injuries` 29,148, `schedules` 1,424, `team_defense` 2,848, NGS
+> 2,832/2,853/6,707), taking a populated DB from 43.4 → **124.3 MB**. `depth_charts` is unblocked:
+> the dated panel is stored as a **change log + tombstones** — **29,483 slot rows + 348 panel rows,
+> 6.98 MiB**, against **255.4 MB** for the verbatim panel — and a second-oracle test reconstructs
+> the published files exactly. Migration `007`, `schema_version` 7. All 10 shipped-code fixes landed.
+>
+> **The audit found 11 confirmed major/critical defects. Two are the item's real lessons.**
+>
+> **C1 (critical) — a tombstone is an ASSERTION derived from an ABSENCE, so anything that can make
+> a row absent for a reason other than a real vacancy fabricates a fact.** `_change_log` could not
+> tell *"these players were removed from the chart"* from *"upstream's scraper failed for this club
+> today"*, and upstream does the latter often: **12 club-panels across the 348 published in
+> 2025+2026 carry a partial chart**, most recently **ARI 2026-07-24 (100 slots → 42, zero skill
+> players, back to 100 the next day)**. The LAC 2025-12-18 collapse alone wrote **91 tombstones**
+> with the run log reading `ok` and `lost=0`, after which `qb1_change_candidates` announced
+> *"Justin Herbert is now listed QB1 for LAC (previous=None)"* — this project's signature failure
+> class, in the one module whose encoding turns absence into an assertion. **Two obvious fixes were
+> tested and are both wrong:** raising re-raises forever (the whole file is re-diffed every pull, so
+> a bad past `dt` bricks the source permanently — the asymmetry with `espn_ranks`/league-state,
+> where the bad response is transient, is the whole point), and an `n_teams` floor catches **0 of
+> 12** (all 348 panels carry 32 teams). Shipped: per-club suppression below
+> `PANEL_COLLAPSE_RATIO = 0.50`, the panel flagged `degraded`, and a novice-legible caveat. The
+> threshold was re-measured independently on both real files — worst defective ratio **0.4949**,
+> lowest legitimate shrink **0.5634** — a clean gap, though only **1.0 pp** of headroom above the
+> worst observed defect.
+>
+> **C2 (major) — the item's own fix, applied to 6 of 14 call sites, and skipped on the one source
+> that is perishable, daily and draft-critical.** `adp_rankings.py:128` called `base.upsert` with no
+> `key_cols`, so it silently lost a row per pull while the run log claimed 4,699 — confirmed on the
+> live DB: **table held 4,698 both days, and `rp`/WR had a hole exactly at rank 64**, because
+> FantasyPros ships Travis Hunter twice under one `fantasypros_id`. Every WR below him read one rank
+> better than the truth, and `core/divergence.py:172` turns `pos_rank` into the delta that report
+> leads with. It survived the build because the guard had no teeth: **7 of 9 `key_cols=` deletions
+> passed the whole suite**. Now 15 sites instrumented, **15/15 mutants killed**.
+>
+> **Also fixed:** an interrupted backfill left an orphan `running` row that refused every subsequent
+> `ingest backfill` with no shipped way to clear it (`ziggurat ingest reap` now exists, and `ingest
+> status` names it); `ingest run --season <past>` had no fence and wrote **~58k fabricated projection
+> rows stamped `knowable_as_of = today`, logged `ok`** — a manufactured leak every leakage test
+> passes, the same class that disqualified `ff_opportunity` at recon; and three tests that could not
+> fail (C10's payload mutant and C11's listing key both passed the entire suite).
+>
+> **The process finding, which is not about this code at all: the installed systemd timers run
+> `ziggurat` FROM THE WORKING TREE, so uncommitted mid-build code is the production cadence.**
+> `db/ziggurat.sqlite` reached `schema_version 7` because a timer applied a migration nobody had
+> reviewed or committed. It was benign — no drift, and 007 was never edited afterward (verified
+> byte-identical against a pre-round copy) — but only by luck: an applied migration is never
+> re-applied, so **one edit to 007 would have left the live database permanently describing a schema
+> no file holds, with the whole suite agreeing with the file.** Hence the standing rule that
+> corrections ship as a new migration, now enforced by
+> `test_an_applied_migration_is_never_edited` rather than by memory.
+>
+> **A Rule 5 near-miss, hit directly:** `repo_guard.py:23` anchored its pattern as
+> `\.sqlite3?(-(wal|shm|journal))?$`, so a backup named `ziggurat.sqlite.bak-v7` matched **neither**
+> `.gitignore`'s `*.sqlite` **nor** the pre-commit hook — a 43 MB file of league-private data past
+> two of the three enforcement points Rule 5 names. Pattern widened, `.gitignore` widened, case added
+> to `tests/test_repo_boundary.py`.
+>
+> **Verified, not inferred:** the 2026 draft-critical partitions are hash-identical across a full
+> migrate + 2021–2025 backfill (`espn_draft_ranks` 3,077, `projections` 173,712, `players` 15,705,
+> `adp_rankings` 9,396, the league tables, and all four crosswalks); `draft-board` renders its Pick-1
+> recommendation and `draft-web` serves HTTP 200 against a fully backfilled database; and the exact
+> Sunday-07:28 unit command was simulated against a copy of the live DB — it writes 6,647 slots
+> (714 tombstones) + 127 panels, emits **11 `PARTIAL SCRAPE` warnings**, and **ARI 07-24 and IND
+> 07-22 emit zero tombstones**.
+>
+> **Recorded, NOT fixed** (each is real, none is reachable by a shipped consumer): **C3** — a single
+> unresolvable row still advances the panel watermark (inspection only; its trigger is 0 rows in
+> 923,162 live). **M3** — a remedy string that names an impossible `--force`. **M2a** — `ingest
+> status` reports `depth_charts` as `n/a` on a day it landed 6,774 rows. **M11** — `store.py:128`'s
+> `"00%collapsed"` goes blind at migration 010. Three `base.upsert` sites in `ziggurat/league/state.py`
+> are still uninstrumented, including `:525`, the unrecoverable dataset's delete-then-write path —
+> confirmed no divergence today (1,026 reported = 1,026 stored on all runs), so the gap is
+> unverifiability, not loss; it is deliberately out of scope three weeks before the draft.
+>
+> **Still unverified until a real in-season week:** 11 of the 12 measured panel collapses are
+> offseason/preseason, so the 0.50 threshold has never met live roster churn; nothing here has met a
+> real game week; and six sources have no 2026 data upstream until ~Sept 10.
+>
+> **Remaining operator steps:** run the backfill against the live database (it has only ever run on
+> scratch copies — the live DB still holds 2026 only), and install the cadence on the Strix Halo,
+> which must take this code first since pre-3.2c code now refuses a `schema_version 7` database.
+
 ### 3.3 [Build] Candidate generator & signals
 **Goal:** High-recall breakout candidate scan from usage deltas and opportunity shocks (injury/depth-chart triggers), plus TD-regression flags. Output: ranked weekly candidate list with the signal evidence attached. (Precision re-ranking arrives in Phase 4 if the podcast arm earns deployment.)
+**Blocked on 3.2c** (recorded 2026-07-25): the done-when below reads "last season's data" and
+there is none in the database — see 3.2c for the measurements. Its depth-chart trigger is also
+blocked on the `depth_charts` rewrite. **And it inherits a two-view seam:** backfilled history
+lands with `retrieved_as_of` = the day of the pull, so a 2025 mid-season read under the default
+`historical` view returns **empty** — correctly, per Rule 1. 3.3's live in-season path reads
+`historical`; its 2025 validation path must bind `base.latest_truth`. Get that wrong and the
+generator returns either a silently empty candidate list or a leaked one, and both look plausible.
+
+**Amendment 2026-07-25 — two of this item's three signal arms are not what the goal above assumes.**
+Both findings come from 3.2c's recon, measured on the real 2025 season; details in gitignored
+`intel/research/backfill-depthcharts-3.2c-design.md` §F3/§F6.
+
+**(a) The depth chart does NOT detect injuries. "Injuries = availability. Depth chart = role
+order" — two mechanisms, never to be conflated.** Three probes measured this independently and
+none of it is ambiguous. Chuba Hubbard (out wk 5–6), Marvin Harrison Jr. (11–12) and Rhamondre
+Stevenson (9, 11) **all stayed `pos_rank = 1` every single day they were ruled Out**, and their
+beneficiaries never moved. Systematically: of 15 rank-1 skill players with ≥3 consecutive `Out`
+weeks, **1 (7%)** was demoted within 14 days; over any first-`Out` week (n=75), **19%**, median lag
+6 days. The chart does not even track who plays — on the 497 team-week-positions where the real
+snap leader changed, the pre-week chart already pointed at the new leader **35.0%** of the time,
+and pre-week rank-1 led the position in snaps only **55.0%** of the time at WR (QB 88.4%, RB 77.1%,
+TE 67.8%, n=2,161). The proposed noise filter does not rescue it: "persists ≥2 consecutive `dt`"
+suppresses **2 of 117** rank-1 skill changes, and 9% revert to the prior occupant within 7 days
+regardless. Firing anyway would produce **6.5 rank-1 + 15.3 rank-2 alerts per week** league-wide,
+48 of the 117 rank-1 changes being TE. **A "starter falls off the depth chart" trigger fires on
+essentially none of 2025's real shocks.** What the panel *is* good for is naming the **beneficiary**
+of a shock something else detected, and only at QB: conditioned on the starter's absence, panel
+rank-2 led the position 92% at QB vs 73% for the usage-only baseline 3.3 already has (n=49) — but
+a wash at RB (75%/75%) and **worse than nothing at WR (49%/52%)**. Even that QB cell is conditioned
+on *absence*, not on a rank-1 *change*, so it is not the trigger's own precision, which was never
+measured. `QB1_CHANGE` therefore ships as a **labelled hypothesis with its source in the reason
+text** (3.2's convention), not as a validated trigger. Injury detection comes from the `injuries`
+feed, whose real waiver-day lead time is the operative number: **85–88% of rows land at exactly −2
+days; only 3.6–9.1% are knowable ≥3 days before the game** (measured through the real accessor at a
+real waiver-day as-of).
+
+**(b) TD regression has no source, before or after 3.2c.** No ingested table carries expected TDs,
+and the obvious candidate is disqualified — see 3.2c's `ff_opportunity` finding. This arm of the
+done-when cannot be built in-season; it moves to Phase 4 alongside the backtest-only source.
+
+**Consequence for this item's scope:** what 3.2c actually unblocks is the **usage-delta** arm
+(`usage_deltas` already exists and was validated in 1.4) plus **injury-triggered** opportunity
+shocks. The depth-chart arm survives only as a QB-beneficiary hypothesis, and the TD-regression arm
+leaves for Phase 4. Rescope the goal accordingly when this item opens rather than pretending the
+original three arms are all live.
 **Done when:** run against last season's data as-of mid-season, the generator's candidate lists visibly contain the known breakouts of the following weeks (informal sanity check; rigorous measurement is Phase 4).
 **Update:**
 > _[To be completed]_

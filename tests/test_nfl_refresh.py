@@ -321,7 +321,10 @@ def test_wrote_zero_but_dropped_everything_is_failed_not_ok(db):
     out = refresh.run_ingest(db, sources=(_spec("z", _drops_all),), season=2026,
                              retrieved_as_of="2026-07-24", today="2026-07-24")
     assert out[0]["status"] == refresh.STATUS_FAILED
-    assert "dropped 500/500" in out[0]["reason"]
+    # "lost", not "dropped": item 3.2c F-G folded the collapse channel into the
+    # same counter, and the reason string names which channel each loss came from.
+    assert "lost 500/500" in out[0]["reason"]
+    assert "500 unstampable" in out[0]["reason"]
 
 
 def test_wrote_zero_and_dropped_nothing_is_empty_not_ok(db):
@@ -488,15 +491,15 @@ def test_nfl_runs_do_not_pollute_the_league_run_log(db):
 # ---------------------------------------------------------------- staleness
 
 
-def _log(db, source, day, status=refresh.STATUS_OK, rows=10):
-    rid = refresh.start_run(db, batch_id="b", source=source, season=2026, scope=None,
+def _log(db, source, day, status=refresh.STATUS_OK, rows=10, season=2026):
+    rid = refresh.start_run(db, batch_id="b", source=source, season=season, scope=None,
                             retrieved_as_of=day, started_at=f"{day}T05:00:00+00:00")
     refresh.finish_run(db, rid, status=status, finished_at=f"{day}T05:00:01+00:00",
                        rows_written=rows)
 
 
-def _verdict(db, source, today):
-    rows = refresh.source_freshness(db, season=2026, today=today)
+def _verdict(db, source, today, season=2026):
+    rows = refresh.source_freshness(db, season=season, today=today)
     return next(r for r in rows if r["source"] == source)
 
 
@@ -519,10 +522,25 @@ def test_never_is_resolved_against_the_phase_not_against_zero(db):
 
 
 def test_a_blocked_source_reports_blocked_not_stale(db):
+    """REPOINTED at a SYNTHETIC spec (item 3.2c, F-B).
+
+    This test used to name ``depth_charts``, i.e. it pinned a real source's
+    DEFECT STATE into the test suite: fixing the defect broke a test that was
+    never about depth charts at all, it was about the verdict ladder. A synthetic
+    spec can never do that again, and the registry's own health is asserted
+    separately (``test_every_registered_source_is_either_pullable_or_explicitly_blocked``).
+    """
     _schedule_rows(db)
-    row = _verdict(db, "depth_charts", "2026-10-01")
+    spec = refresh.SourceSpec(name="synthetic_blocked", group=refresh.GROUP_DAILY,
+                              pull=None, blocked="upstream schema replaced (synthetic)")
+    with patch.object(refresh, "SOURCES", (spec,)):
+        row = _verdict(db, "synthetic_blocked", "2026-10-01")
+        out = refresh.format_status(db, season=2026, today="2026-10-01")
     assert row["verdict"] == refresh.VERDICT_BLOCKED
     assert row["blocked"]
+    assert "BLOCKED      : synthetic_blocked" in out
+
+
 
 
 def test_a_partial_pull_still_counts_as_the_last_landing(db):
@@ -1359,3 +1377,615 @@ def test_week_one_weather_is_captured_in_its_run_up_not_only_on_its_thursday(db)
     early = refresh.decide(db, spec, season=2026, today="2026-07-24", have_credentials=False)
     assert early.action == refresh.STATUS_SKIPPED
     assert "forecast horizon" in early.reason
+
+
+# ===================================================================== item 3.2c
+#
+# WHAT THESE TESTS CAN AND CANNOT CATCH (the 3.1b fixture lesson). Everything
+# below runs real SQL against real SQLite with fake `pull` closures, so it
+# catches regressions in the ORCHESTRATOR: the phase gate, the anchor set, the
+# verdict ladder, the drop ceiling, the run log. It proves NOTHING about
+# upstream — not that nflverse still publishes a depth-chart panel daily, not
+# that `injuries` 2023 is still downloadable, not that a real pull's tally has
+# the shape asserted here. Those are the per-ingester tests' job plus the live
+# measurements recorded in the item's Update block, and per 3.1b a frozen
+# fixture is weak evidence for any of them.
+
+
+# --------------------------------------------------- F-A: the offseason phase
+
+
+def _past_schedule(db, season=2023):
+    """A COMPLETED season's REG schedule, so its phase resolves to offseason."""
+    _schedule_rows(db, season=season, first=f"{season}-09-07")
+
+
+def test_a_completed_season_can_be_pulled_for_the_whole_season_files(db):
+    """F-A. `decide()` checks the phase BEFORE the force-able interval gate, so a
+    phase set that excludes offseason cannot be overridden by --force at all:
+    `ingest run --season 2023 --force` printed SKIPPED for injuries and game_odds
+    and pulled nothing. Both are whole-season files that upstream re-serves
+    forever, so refusing them in the offseason was wrong on the merits before the
+    backfill ever needed them."""
+    _past_schedule(db)
+    for name in ("injuries", "game_odds"):
+        spec = refresh.SOURCES_BY_NAME[name]
+        assert refresh.PHASE_OFFSEASON in spec.phases, name
+        d = refresh.decide(db, spec, season=2023, today="2026-07-25",
+                           have_credentials=False)
+        assert d.action == "pull", (name, d.reason)
+
+
+def test_the_offseason_widening_is_not_a_force_bypass(db):
+    """F-A explicitly rejected a bypass flag: a bypass forks the decision path,
+    which is the failure class 3.1b's audit spent a round on. So a source that
+    genuinely has nothing to say in a phase is STILL refused, --force or not."""
+    _past_schedule(db)
+    spec = refresh.SOURCES_BY_NAME["espn_ranks"]      # preseason only
+    d = refresh.decide(db, spec, season=2023, today="2026-07-25",
+                       have_credentials=True, force=True)
+    assert d.action == refresh.STATUS_SKIPPED
+    assert "offseason phase" in d.reason
+
+
+def test_the_phase_gate_still_bites_in_season(db):
+    """The widening must not become 'always applicable'. game_weather has no
+    offseason business (the forecast endpoint 400s past ~16 days) and must stay
+    out of it."""
+    assert refresh.PHASE_OFFSEASON not in refresh.SOURCES_BY_NAME["game_weather"].phases
+    assert refresh.PHASE_OFFSEASON not in refresh.SOURCES_BY_NAME["espn_ranks"].phases
+
+
+# ------------------------------------------------------ F-B: depth_charts v2
+
+
+def test_depth_charts_is_registered_and_wired_to_the_panel_module():
+    """F-B. The 3.1b block said this needed a table + accessor rewrite; 3.2c did
+    it. The spec's SHAPE is asserted because each field encodes a measured
+    decision, and a silent revert of any of them is a real regression."""
+    from ziggurat.data.nfl import depth_charts
+
+    spec = refresh.SOURCES_BY_NAME["depth_charts"]
+    assert spec.blocked is None
+    assert spec.pull is not None
+    # needs_schedules FALSE: `dt` IS the knowledge time. True would re-impose a
+    # season_weeks() precondition AND drop the source out of the PHASE_UNKNOWN
+    # bootstrap set that decide() relies on.
+    assert spec.needs_schedules is False
+    # The only nflverse source that publishes year-round (219/224 days Aug-Mar).
+    assert spec.phases == refresh.ALL_PHASES
+    assert spec.interval_days == 1
+    assert spec.perishable is False          # the season file carries its history
+    assert spec.replaces_partition is False  # append-only; no floor-before-delete
+    assert spec.season_resolver is not None  # the March handover
+    assert spec.applicable is not None       # "today's panel is already stored"
+    assert spec.quiet_ok is True             # ~2% of days carry no panel at all
+    # And it really calls the panel ingester, not the legacy one.
+    calls = {}
+
+    def _fake(conn, season, *, retrieved_as_of):
+        calls.update(season=season, retrieved_as_of=retrieved_as_of)
+        return 7
+
+    with patch.object(depth_charts, "pull_depth_charts", _fake):
+        ctx = refresh.IngestContext(conn=None, season=2026, retrieved_as_of="2026-07-25",
+                                    today="2026-07-25")
+        assert refresh._pull_depth_charts(ctx) == 7
+    assert calls == {"season": 2026, "retrieved_as_of": "2026-07-25"}
+
+
+def test_the_registry_never_lists_the_legacy_weekly_regime():
+    """Two regimes, two tables, permanently (F2). The legacy weekly ingester is
+    backfill-only: in the cadence it would be attempted daily and read stale
+    forever, which is a standing alarm on something working perfectly."""
+    assert "depth_charts_weekly" not in refresh.SOURCES_BY_NAME
+    assert "depth_charts_weekly" in refresh.BACKFILL_ONLY_BY_NAME
+    # The WHOLE backfill-only set is pinned, so a third member has to be a
+    # decision rather than an accident. game_weather_archive joined in item 3.2c:
+    # the registry's game_weather spec is FORECAST mode behind the ~10-day
+    # Open-Meteo wall, which returns no weeks at all for a completed season, so
+    # routing --with-weather through it would have been a flag that silently did
+    # nothing.
+    assert {s.name for s in refresh.BACKFILL_ONLY_SOURCES} == {
+        "depth_charts_weekly", "game_weather_archive"}
+    with pytest.raises(ValueError, match="unknown source"):
+        refresh.select_sources(names=["depth_charts_weekly"])
+    # ...but it is not INVISIBLE: `ingest sources` names it, because an operator
+    # who cannot find it would reasonably conclude 2021-2024 has no ingester.
+    out = refresh.format_sources()
+    assert "BACKFILL-ONLY" in out
+    assert "depth_charts_weekly" in out
+
+
+def test_a_pre_panel_season_is_skipped_by_regime_not_failed(db):
+    """Unblocking the source means `ingest run --season 2023` now REACHES it, and
+    the panel ingester correctly refuses a legacy season. Refusing by raising
+    would log `failed` on a source that is working perfectly and merely does not
+    cover that year — and would list it in `ingest status --season 2023` as a
+    backfill gap the cadence could close, which it cannot. The regime is stated
+    in the decision instead."""
+    from ziggurat.data.nfl import depth_charts, depth_charts_weekly
+
+    spec = refresh.SOURCES_BY_NAME["depth_charts"]
+    d = refresh.decide(db, spec, season=2023, today="2026-07-25", have_credentials=False)
+    assert d.action == refresh.STATUS_SKIPPED
+    assert "predates the dated-panel regime" in d.reason
+    assert "depth_charts_weekly" in d.reason
+    # the boundary is the module's own constant, not a literal repeated here
+    assert depth_charts.PANEL_MIN_SEASON == depth_charts_weekly.WEEKLY_MAX_SEASON + 1
+    ok = refresh.decide(db, spec, season=depth_charts.PANEL_MIN_SEASON, today="2026-07-25",
+                        have_credentials=False)
+    assert ok.action == "pull"
+    # ...and the status report calls it n/a, not a gap someone should go and fill.
+    _past_schedule(db)
+    row = _verdict(db, "depth_charts", "2026-07-25", season=2023)
+    assert row["verdict"] == refresh.VERDICT_NA
+    out = refresh.format_status(db, season=2023, today="2026-07-25")
+    assert "depth_charts_weekly" in out          # named, so it is not simply missing
+    assert "NOT BACKFILLED" in out
+    assert "depth_charts," not in out            # the panel spec is not in that list
+
+
+def test_the_march_handover_resolves_the_season_before_the_run_is_logged(db):
+    """F-B / the season_resolver seam. For two weeks each March the live panel is
+    still published inside the PREVIOUS season's file (ziggurat's league year
+    flips Mar 1, nflreadpy's Mar 15). If the resolver ran AFTER start_run, the log
+    would record a season that was never pulled — verbatim the failure last_run's
+    own docstring records — and the watermark would read NULL, so the ingester
+    would rewrite the whole baseline every morning for a fortnight."""
+    spec = refresh.SOURCES_BY_NAME["depth_charts"]
+    d = refresh.decide(db, spec, season=2026, today="2026-03-05", have_credentials=False)
+    assert d.action == "pull"
+    assert d.season == 2025                      # the file that is still publishing
+    assert d.scope == "season 2025"
+    # ...and outside the window nothing is redirected.
+    assert refresh.decide(db, spec, season=2026, today="2026-07-25",
+                          have_credentials=False).season == 2026
+
+
+def test_the_resolved_season_is_what_lands_in_the_run_log(db):
+    """The seam is only worth having if the log, the interval gate and the pull
+    all name the SAME season."""
+    spec = replace(refresh.SOURCES_BY_NAME["depth_charts"],
+                   pull=_ok(11), applicable=None)
+    out = refresh.run_ingest(db, sources=(spec,), season=2026,
+                             retrieved_as_of="2026-03-05", today="2026-03-05")
+    assert out[0]["status"] == refresh.STATUS_OK
+    row = db.execute("SELECT season, scope FROM nfl_ingest_runs WHERE source = 'depth_charts'"
+                     ).fetchone()
+    assert row["season"] == 2025 and row["scope"] == "season 2025"
+    # and the interval gate reads it back under the same season the next day
+    d = refresh.decide(db, spec, season=2026, today="2026-03-05", have_credentials=False)
+    assert d.action == refresh.STATUS_FRESH
+
+
+def test_a_source_without_a_resolver_is_untouched_by_the_seam(db):
+    """Blast radius: `resolve_source_season` is the identity for all fourteen
+    other sources, so nothing else can change season behind the operator's back."""
+    _schedule_rows(db)
+    for spec in refresh.SOURCES:
+        if spec.name == "depth_charts":
+            continue
+        assert spec.season_resolver is None, spec.name
+        assert refresh.resolve_source_season(db, spec, season=2026,
+                                             today="2026-03-05") == 2026
+
+
+# ------------------------------------------- F-C: partial anchors the interval
+
+
+def _partial(db, source, day, season=2026, rows=18969, dropped=22):
+    rid = refresh.start_run(db, batch_id="b", source=source, season=season, scope=None,
+                            retrieved_as_of=day, started_at=f"{day}T05:00:00+00:00")
+    refresh.finish_run(db, rid, status=refresh.STATUS_PARTIAL,
+                       finished_at=f"{day}T05:00:20+00:00", rows_written=rows,
+                       rows_dropped=dropped)
+
+
+def test_a_partial_pull_anchors_the_interval_gate(db):
+    """F-C, the measured defect. `decide` read `ok` only while `source_freshness`
+    fell back to `partial`, so the four sources that are partial BY CONSTRUCTION
+    on every healthy run (weekly_stats drops the same 22 null-player_id rows;
+    the three ngs_* drop the week-23 Super Bowl rows) never anchored: measured
+    `last_ok=False last_partial=True decide=pull status_verdict=fresh`. In-season
+    that re-downloaded four whole-season parquets EVERY DAY while the report said
+    everything was fine."""
+    _schedule_rows(db)
+    _partial(db, "weekly_stats", "2026-11-19")
+    spec = refresh.SOURCES_BY_NAME["weekly_stats"]      # interval 7d
+    d = refresh.decide(db, spec, season=2026, today="2026-11-20", have_credentials=False)
+    assert d.action == refresh.STATUS_FRESH, d.reason
+    assert _verdict(db, "weekly_stats", "2026-11-20")["verdict"] == refresh.VERDICT_FRESH
+    # ...and it still comes due when the interval really has elapsed.
+    assert refresh.decide(db, spec, season=2026, today="2026-11-27",
+                          have_credentials=False).action == "pull"
+
+
+def test_the_scheduler_and_the_report_read_one_constant(db):
+    """The fix is the SHARED constant, not two matching edits. Anything that
+    anchors reads _ANCHOR_STATUSES through last_landing; if a future status is
+    added to one and not the other, this fails."""
+    _schedule_rows(db)
+    assert refresh._ANCHOR_STATUSES == (refresh.STATUS_OK, refresh.STATUS_PARTIAL)
+    for status in refresh._ANCHOR_STATUSES:
+        db.execute("DELETE FROM nfl_ingest_runs")
+        _log(db, "adp_rankings", "2026-07-24", status=status)     # interval 1d
+        spec = refresh.SOURCES_BY_NAME["adp_rankings"]
+        d = refresh.decide(db, spec, season=2026, today="2026-07-24",
+                           have_credentials=False)
+        v = _verdict(db, "adp_rankings", "2026-07-24")["verdict"]
+        assert (d.action, v) == (refresh.STATUS_FRESH, refresh.VERDICT_FRESH), status
+
+
+def test_a_failed_or_empty_pull_still_does_not_anchor(db):
+    """The trade-off has a floor: anything over the drop ceiling is `failed`, and
+    `failed`/`empty`/`skipped` must keep retrying tomorrow."""
+    _schedule_rows(db)
+    spec = refresh.SOURCES_BY_NAME["adp_rankings"]
+    for status in (refresh.STATUS_FAILED, refresh.STATUS_EMPTY, refresh.STATUS_SKIPPED,
+                   refresh.STATUS_ABSENT, refresh.STATUS_ABANDONED):
+        db.execute("DELETE FROM nfl_ingest_runs")
+        _log(db, "adp_rankings", "2026-07-24", status=status)
+        d = refresh.decide(db, spec, season=2026, today="2026-07-24",
+                           have_credentials=False)
+        assert d.action == "pull", status
+
+
+def test_the_last_landing_is_the_latest_one_not_the_latest_ok(db):
+    """The subtle half of F-C: 'ok Monday, partial Friday' must answer FRIDAY.
+    The two-query form (prefer ok, else partial) answered Monday, which is the
+    same divergence one layer out — the report would have called a Monday pull
+    the current state of a table Friday rewrote."""
+    _schedule_rows(db)
+    _log(db, "weekly_stats", "2026-11-02")                        # ok
+    _partial(db, "weekly_stats", "2026-11-19")                    # partial, later
+    row = _verdict(db, "weekly_stats", "2026-11-20")
+    assert row["last_ok"] == "2026-11-19"
+    assert row["age_days"] == 1
+
+
+def test_a_404_after_a_partial_landing_is_failed_not_absent(db):
+    """The third reader of the anchor set. A PARTIAL pull proves the file exists,
+    so a later 404 is a renamed/withdrawn release, not 'not published yet' — and
+    weekly_stats is partial on every healthy run, so reading `ok` alone here would
+    downgrade a real break to exit 0 forever."""
+    _schedule_rows(db)
+    _partial(db, "weekly_stats", "2026-11-19")
+
+    def _gone(ctx):
+        raise ConnectionError("Failed to download x: 404 Client Error: Not Found for url: y")
+
+    out = refresh.run_ingest(db, sources=(_spec("weekly_stats", _gone),), season=2026,
+                             retrieved_as_of="2026-11-20", today="2026-11-20")
+    assert out[0]["status"] == refresh.STATUS_FAILED
+    assert "already succeeded" in out[0]["reason"]
+
+
+# ------------------------------------------------------- F-D: archived seasons
+
+
+def test_a_completed_season_reads_archived_not_stale_then_expired(db):
+    """F-D, the measured nonsense. A source backfilled for 2023 read `fresh 0d`
+    the day it landed, `stale` eight days later and `expired` after twenty-two —
+    none of which describes anything that happened to the data. A completed
+    season's upstream files are finished artifacts, not a feed."""
+    _past_schedule(db)
+    _log(db, "weekly_stats", "2026-07-25", season=2023)
+    for day in ("2026-07-25", "2026-08-02", "2026-08-16", "2027-06-01"):
+        row = _verdict(db, "weekly_stats", day, season=2023)
+        assert row["verdict"] == refresh.VERDICT_ARCHIVED, day
+
+
+def test_the_current_season_still_goes_stale(db):
+    """The guard on F-D: `archived` must be about the SEASON, not about age. The
+    live 2026 partition is what the draft weapon reads, and silencing its
+    staleness three weeks before the draft would be the worst possible fix."""
+    _schedule_rows(db)
+    _log(db, "adp_rankings", "2026-07-24")
+    assert _verdict(db, "adp_rankings", "2026-07-26")["verdict"] == refresh.VERDICT_STALE
+    assert _verdict(db, "adp_rankings", "2026-08-24")["verdict"] == refresh.VERDICT_EXPIRED
+
+
+def test_archived_is_judged_on_the_season_asked_about_not_the_resolved_one(db):
+    """In early March `depth_charts` pulls the PREVIOUS season's file while the
+    current league year has already turned over. Judging `archived` on the
+    resolved season would call today's live chart a historical artifact."""
+    spec = refresh.SOURCES_BY_NAME["depth_charts"]
+    assert refresh.resolve_source_season(db, spec, season=2026, today="2026-03-05") == 2025
+    _log(db, "depth_charts", "2026-03-05", season=2025)
+    row = _verdict(db, "depth_charts", "2026-03-05", season=2026)
+    assert row["season"] == 2025          # the partition the log holds
+    assert row["verdict"] == refresh.VERDICT_FRESH
+
+
+def test_a_completed_season_never_says_expected_until_september(db):
+    """The wording half of F-D. `ingest status --season 2023` said NOT PUBLISHED
+    UPSTREAM YET ... Expected until ~Sept 10 about a season that ended years ago,
+    and NEVER PULLED about sources that serve today's value and can never have
+    2023's. Standing nonsense is how a report earns being ignored."""
+    _past_schedule(db)
+    out = refresh.format_status(db, season=2023, today="2026-07-25")
+    assert "Expected until" not in out
+    assert "NEVER PULLED" not in out
+    assert "season 2023 is COMPLETE" in out
+    # the two kinds of absence are separated, because only one can be acted on
+    assert "NOT BACKFILLED" in out and "weekly_stats" in out
+    unobtainable = next(ln for ln in out.splitlines() if "UNOBTAINABLE" in ln)
+    assert "projections" in unobtainable and "adp_rankings" in unobtainable
+    assert "weekly_stats" not in unobtainable
+
+
+def test_an_archived_season_that_is_fully_backfilled_reports_nothing_to_do(db):
+    _past_schedule(db)
+    for spec in refresh.SOURCES:
+        _log(db, spec.name, "2026-07-25", season=2023)
+    out = refresh.format_status(db, season=2023, today="2026-07-25")
+    assert "nothing to do" in out
+    assert "EXPIRED" not in out
+    assert "PERISHABLE + EXPIRED" not in out
+
+
+def test_the_marginal_staleness_banner_stays_quiet_about_archived(db):
+    """The consumer, updated in the SAME change (F-D says so explicitly, because
+    this banner has already been fixed twice). marginal reads QUIET_VERDICTS
+    rather than restating the tuple, so a fifth verdict cannot reintroduce it."""
+    import inspect
+
+    from ziggurat.core import marginal
+
+    _past_schedule(db)
+    for source in ("projections", "players"):        # the two the banner watches
+        _log(db, source, "2026-07-25", season=2023)
+    out = marginal._freshness_lines(db, season=2023, as_of="2023-10-01", today="2026-07-25",
+                                    lines={}, roster_rows=[], pool_rows=[])
+    assert not any("ingest says" in ln for ln in out), out
+    # ...while a genuinely stale CURRENT season still speaks.
+    _schedule_rows(db)
+    _log(db, "projections", "2026-06-01", season=2026)
+    out = marginal._freshness_lines(db, season=2026, as_of="2026-07-25", today="2026-07-25",
+                                    lines={}, roster_rows=[], pool_rows=[])
+    assert any("ingest says projections" in ln for ln in out), out
+
+    assert refresh.VERDICT_ARCHIVED in refresh.QUIET_VERDICTS
+    assert refresh.VERDICT_FRESH in refresh.QUIET_VERDICTS
+    assert refresh.VERDICT_NA in refresh.QUIET_VERDICTS
+    for warned in (refresh.VERDICT_STALE, refresh.VERDICT_EXPIRED, refresh.VERDICT_NEVER,
+                   refresh.VERDICT_EXPIRED, refresh.VERDICT_BLOCKED):
+        assert warned not in refresh.QUIET_VERDICTS
+    src = inspect.getsource(marginal._freshness_lines)
+    assert "QUIET_VERDICTS" in src
+    assert "VERDICT_FRESH" not in src        # no restated literal tuple to drift
+
+
+# ------------------------------------------- F-G: a key collision is data loss
+
+
+def test_a_key_collision_counts_against_the_drop_ceiling(db):
+    """F-G. `base.upsert` used to return the OFFERED row count, so rows that
+    INSERT OR REPLACE overwrote on the primary key vanished with the run logged
+    `ok` (measured on the legacy depth charts: 835-947 rows a season, ~700 of them
+    differing only in depth_team — the depth ORDER, the one column the table
+    exists for). Reporting that through note_drops(by_design=True) would have been
+    worse than nothing: refresh deliberately excludes `filtered` from the ceiling,
+    so a source colliding on 50% of its rows would write half the data and say
+    `ok`."""
+    def _collides(ctx):
+        base.note_collapsed("fake", 900, 0, 1000)
+        return 100
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _collides),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_FAILED
+    assert refresh.run_failed(out)
+    assert "900 collapsed on a primary-key collision" in out[0]["reason"]
+
+
+def test_a_small_collision_is_partial_and_recorded(db):
+    def _collides(ctx):
+        base.note_collapsed("fake", 3, 0, 100)
+        return 97
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _collides),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_PARTIAL
+    assert out[0]["dropped"] == 3
+    row = db.execute("SELECT rows_dropped FROM nfl_ingest_runs WHERE source='z'").fetchone()
+    assert row["rows_dropped"] == 3      # the log records the loss, not just the write
+
+
+def test_byte_identical_duplicates_never_reach_the_ceiling(db):
+    """The other half of F-G, and the reason it is TWO counters. The legacy
+    depth-chart files carry 145-207 byte-identical duplicate rows per season once
+    the key is widened; storing them once loses nothing. Folding them into the
+    ceiling would fail a correct pull every single time — the adp_rankings IDP
+    mistake with a different label."""
+    def _dupes(ctx):
+        base.note_collapsed("fake", 0, 207, 37327)
+        return 37120
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _dupes),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_OK
+    assert out[0]["dropped"] == 0
+    assert not refresh.run_failed(out)
+
+
+def test_drops_and_collisions_share_one_ceiling_but_stay_named_apart(db):
+    """Rule 6: 'lost 40 rows' is not actionable. 'unstampable' and 'collapsed on a
+    primary-key collision' are two completely different investigations — a missing
+    gameday map versus a wrong primary key — so the reason names both counts."""
+    def _both(ctx):
+        base.note_drops("fake", 6, 100)
+        base.note_collapsed("fake", 4, 5, 100)      # 5 benign duplicates too
+        return 90
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _both),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_PARTIAL       # 10/100, under the ceiling
+    assert out[0]["dropped"] == 10                          # the duplicates are NOT in it
+    assert "6 unstampable" in out[0]["reason"]
+    assert "4 collapsed on a primary-key collision" in out[0]["reason"]
+
+
+def test_a_collision_alone_can_trip_the_ceiling_that_drops_alone_would_not(db):
+    """The integration is the point: before it, 19% dropped + 19% collapsed read
+    `partial` (19% is under the 20% ceiling) while 38% of the pull was gone."""
+    def _both(ctx):
+        base.note_drops("fake", 19, 100)
+        base.note_collapsed("fake", 19, 0, 100)
+        return 62
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _both),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_FAILED
+    assert "38/100" in out[0]["reason"]
+
+
+def test_wrote_zero_and_collapsed_everything_is_failed(db):
+    def _all_collapse(ctx):
+        base.note_collapsed("fake", 500, 0, 500)
+        return 0
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _all_collapse),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_FAILED
+
+
+# -------------------------------------------- quiet_ok: the empty-day residual
+
+
+def test_a_source_that_may_legitimately_write_nothing_is_skipped_not_empty(db):
+    """`applicable` is pure of the network by contract (so --dry-run reports
+    exactly what runs), and seeing 'upstream published no panel today' needs the
+    download. Measured: 5 of 224 days in 2025 and 1 of 126 in 2026 carry no panel
+    at all. Without quiet_ok each of those records `empty` -> PROBLEM_STATUSES ->
+    exit 1 -> Restart=on-failure and a standing LAST ATTEMPT FAILED on a healthy
+    source: the wolf-cry this module exists to avoid."""
+    spec = _spec("quiet", _ok(0), quiet_ok=True)
+    out = refresh.run_ingest(db, sources=(spec,), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_SKIPPED
+    assert not refresh.run_failed(out)
+    assert "normal day rather than a failure" in out[0]["reason"]
+
+
+def test_quiet_ok_never_covers_a_pull_that_lost_rows(db):
+    """The silent-zero signature stays FAILED even for a quiet_ok source: wrote 0
+    AND lost rows is the measured 'ran before the spine existed' shape, and
+    dressing it as a quiet day would hide exactly what 3.1b's defect class 4 is."""
+    def _zero_but_dropped(ctx):
+        base.note_drops("fake", 500, 500)
+        return 0
+
+    spec = _spec("quiet", _zero_but_dropped, quiet_ok=True)
+    out = refresh.run_ingest(db, sources=(spec,), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_FAILED
+
+
+def test_quiet_ok_is_opt_in_and_only_depth_charts_takes_it(db):
+    """No existing source's behaviour changes: an empty pull is still a problem
+    everywhere else, including for the four PERISHABLE ones where it means a lost
+    observation."""
+    assert {s.name for s in refresh.SOURCES if s.quiet_ok} == {"depth_charts"}
+    out = refresh.run_ingest(db, sources=(_spec("z", _ok(0)),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_EMPTY
+    assert refresh.run_failed(out)
+
+
+def test_a_quiet_day_does_not_anchor_the_interval(db):
+    """So tomorrow's run tries again rather than waiting out the interval."""
+    spec = _spec("quiet", _ok(0), quiet_ok=True)
+    refresh.run_ingest(db, sources=(spec,), season=2026,
+                       retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert refresh.last_landing(db, source="quiet", season=2026) is None
+    d = refresh.decide(db, spec, season=2026, today="2026-07-25", have_credentials=False)
+    assert d.action == "pull"
+
+
+# =====================================================================
+# C8 — `ingest run --season <past>` must apply BACKFILL_EXCLUDED too
+# =====================================================================
+#
+# The audit's C8, measured on the real network before the fix:
+#
+#   $ ziggurat ingest run --source projections --season 2023
+#   [ ok ] projections rows=57910 (weeks 1-18)
+#   sqlite> 2023 | 57910 | knowable_as_of 2026-07-25 .. 2026-07-25
+#
+# Fifty-eight thousand rows of TODAY's Sleeper board, filed under 2023, stamped
+# knowable-today, logged `ok`. Every leakage test passes — the rows are honestly
+# stamped, which is precisely why they are invisible under both views and
+# indistinguishable from history in the table. It is the same shape that
+# disqualified `ff_opportunity` during recon, reachable through a command the
+# operator is told to run.
+
+
+def _excluded_registry_sources():
+    return sorted(set(refresh.BACKFILL_EXCLUDED) & set(refresh.SOURCES_BY_NAME))
+
+
+@pytest.mark.parametrize("name", _excluded_registry_sources())
+def test_a_past_season_is_refused_for_every_backfill_excluded_source(db, name):
+    """One list, both doors. `select_backfill_sources` refuses these on
+    `ingest backfill`; `decide` must refuse them on `ingest run` for any season
+    before the current one."""
+    _past_schedule(db)
+    _schedule_rows(db, season=2026)
+    spec = refresh.SOURCES_BY_NAME[name]
+    d = refresh.decide(db, spec, season=2023, today="2026-07-25", have_credentials=True,
+                       force=True)
+    assert d.action != "pull", d.reason
+    if d.action == refresh.STATUS_BLOCKED:
+        # …and it quotes the RECORDED reason rather than inventing a new one, so
+        # the two refusals can never drift apart.
+        assert refresh.BACKFILL_EXCLUDED[name] in d.reason
+    else:
+        # espn_ranks is refused earlier, by the phase gate, with the more specific
+        # answer. Recorded rather than asserted away: it must still not pull.
+        assert name == "espn_ranks" and d.action == refresh.STATUS_SKIPPED
+
+
+def test_the_past_season_refusal_writes_nothing_and_never_calls_the_pull(db):
+    """Through the real orchestrator, because the defect was that the pull RAN."""
+    _past_schedule(db)
+    _schedule_rows(db, season=2026)
+    calls = []
+
+    def pull(ctx):
+        calls.append(ctx.season)
+        raise AssertionError("the pull must never be reached for a past season")
+
+    spec = replace(refresh.SOURCES_BY_NAME["projections"], pull=pull)
+    out = refresh.run_ingest(db, sources=(spec,), season=2023, retrieved_as_of="2026-07-25",
+                             today="2026-07-25", force=True)
+
+    assert calls == []
+    assert out[0]["status"] == refresh.STATUS_BLOCKED
+    assert out[0]["rows"] == 0
+    logged = db.execute("SELECT season, status, error FROM nfl_ingest_runs").fetchone()
+    assert (logged["season"], logged["status"]) == (2023, refresh.STATUS_BLOCKED)
+    assert "knowable_as_of = today" in logged["error"]
+    # The refusal is RECORDED, never silent: a source dropped without a row is the
+    # failure this whole module exists to make visible.
+    assert not refresh.run_failed(out)
+
+
+def test_the_past_season_refusal_does_not_touch_the_current_season(db):
+    """The fence must be a season predicate, not a source ban — these four are
+    exactly the sources the daily cadence exists to pull."""
+    _schedule_rows(db, season=2026)
+    for name in _excluded_registry_sources():
+        d = refresh.decide(db, refresh.SOURCES_BY_NAME[name], season=2026,
+                           today="2026-07-25", have_credentials=True)
+        assert d.action == "pull", (name, d.reason)
+
+
+def test_a_non_excluded_source_still_runs_for_a_past_season(db):
+    """Teeth: the fence must not become 'past seasons are refused'. The whole
+    point of item 3.2c is that ten sources DO backfill."""
+    _past_schedule(db)
+    d = refresh.decide(db, refresh.SOURCES_BY_NAME["weekly_stats"], season=2023,
+                       today="2026-07-25", have_credentials=False)
+    assert d.action == "pull", d.reason

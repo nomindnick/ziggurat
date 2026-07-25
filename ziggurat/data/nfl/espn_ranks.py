@@ -224,6 +224,17 @@ def _assign_pos_ranks(rows) -> None:
             row["espn_adp_pos_rank"] = i
 
 
+# The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the
+# number of DISTINCT keys written rather than rows offered (item 3.2c, F-G).
+# SWEPT 2026-07-25: the same instrumentation was applied to 6 of 14 call sites
+# in 3.2c and skipped here, and the one skipped site that DID collide
+# (adp_rankings) lost a real market fact a day for two days, silently, with an
+# inflated count in the run log.
+# Complementary to the BoardCollapse floor, which only fires when a collapse is
+# big enough to breach 90% of the stored board; this makes a SMALL one visible.
+_PK_COLS = ('season', 'board_key', 'retrieved_as_of')
+
+
 def ingest_espn_ranks(conn, raw_players, *, retrieved_as_of: str, season: int,
                       allow_shrink: bool = False) -> int:
     """Persist a full ESPN board snapshot. The board is a LIVE mutable signal, so
@@ -289,7 +300,7 @@ def ingest_espn_ranks(conn, raw_players, *, retrieved_as_of: str, season: int,
             "DELETE FROM espn_draft_ranks WHERE season = ? AND retrieved_as_of = ?",
             (season, stamp),
         )
-        base.upsert(conn, "espn_draft_ranks", rows, commit=False)
+        base.upsert(conn, "espn_draft_ranks", rows, commit=False, key_cols=_PK_COLS)
         # Report (and check) what is actually STORED, not what was handed in.
         # base.upsert returns len(rows), which over-reports whenever rows collapse
         # onto a board_key — so a key-collapsing response could wipe the board and
