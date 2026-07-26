@@ -106,6 +106,26 @@ POSITION_CAPS: Mapping[str, int] = MappingProxyType(
 # Thursday, and the two modules contradict each other with no error anywhere.
 STREAMED_POSITIONS = frozenset({"DST", "K"})
 
+# Acquisition classification — the ONE place the waiver-vs-FCFS decision is made
+# (item 3.4 audit F8). Consumed by BOTH the drop-board reason here and waiver.py's
+# claim planner, so the two can never disagree about the same player. Only the two
+# known ESPN pool tokens map; ANYTHING else (a leaked 'ONTEAM' from state.py's
+# conflict path, or a differently-spelled token) is UNKNOWN -> "verify", never a
+# silent free-agent default.
+ACQ_WAIVER = "WAIVER"          # roster_status 'WAIVERS' -> a queued, priority-ordered claim
+ACQ_FREE_AGENT = "FREE_AGENT"  # roster_status 'FREEAGENT' -> a first-come grab
+ACQ_UNKNOWN = "UNKNOWN"        # anything else -> verify in the ESPN app
+
+
+def classify_acquisition(roster_status: str | None) -> str:
+    """Map an ESPN ``roster_status`` token to how you acquire the player (F8)."""
+    tok = str(roster_status or "").strip().upper()
+    if tok == "WAIVERS":
+        return ACQ_WAIVER
+    if tok == "FREEAGENT":
+        return ACQ_FREE_AGENT
+    return ACQ_UNKNOWN
+
 # Fantasy playoff weeks in this league (regular season is 14 weeks; 6 of 10 teams
 # make the playoffs). Reported as a separate subtotal, never blended.
 PLAYOFF_WEEKS = frozenset({15, 16, 17})
@@ -446,6 +466,11 @@ class SwapRow:
     horizon_weeks: int              # 1 for a streamed slot, else the whole window
     reasons: tuple[str, ...]
     drop_unpriceable: bool = False  # the drop side had no usable projection
+    # Identity, so item 3.4 joins the claim on the ESPN id, not the display name —
+    # two different free agents can share a name (F3). Additive: defaults keep
+    # existing SwapRow constructors and the marginal suite unchanged.
+    add_espn_id: str | None = None
+    drop_espn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1383,11 +1408,17 @@ def _row_reasons(
             f"drop him and add {best.player} ({best.position}) and {verb} "
             f"{abs(marginal):.1f} house pts over {_plural(len(horizon_weeks), 'week')}"
         )
-        status = (best.roster_status or "").upper()
-        if status and status != "FREEAGENT":
+        acq = classify_acquisition(best.roster_status)
+        if acq == ACQ_WAIVER:
             reasons.append(
                 f"{best.player} is on WAIVERS, not a free agent — that is a claim to "
                 f"queue, not a click (item 3.4 plans the claim)"
+            )
+        elif acq == ACQ_UNKNOWN:
+            reasons.append(
+                f"{best.player} has an unrecognized roster status "
+                f"({best.roster_status or 'none'!r}) — verify in the ESPN app whether "
+                f"he is a free agent or a waiver claim before acting"
             )
     else:
         reasons.append(
@@ -1801,6 +1832,7 @@ def _scan(
                     add_startable_this_week=model_now.available(f.key, window[0]),
                     horizon_weeks=len(horizon),
                     drop_unpriceable=d.unvalued,
+                    add_espn_id=f.espn_id, drop_espn_id=d.espn_id,
                     reasons=(
                         f"add {f.player} ({f.position}), drop {d.player} "
                         f"({d.position}): {gain:+.1f} house pts over "
@@ -1835,6 +1867,7 @@ def _scan(
                 add_status=best.roster_status,
                 add_startable_this_week=model_now.available(best.key, window[0]),
                 horizon_weeks=len(horizon), drop_unpriceable=d.unvalued,
+                add_espn_id=best.espn_id, drop_espn_id=d.espn_id,
                 reasons=(
                     f"add {best.player} ({best.position}), drop {d.player} "
                     f"({d.position}): {best_value - base:+.1f} house pts over "

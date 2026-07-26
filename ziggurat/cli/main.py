@@ -27,6 +27,7 @@ from ziggurat.core.valuation import (
     format_valuation,
     format_value_view,
 )
+from ziggurat.core.waiver import build_waiver_plan, format_waiver_plan
 from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
 from ziggurat.data.nfl.espn_ranks import BoardCollapse, get_espn_draft_ranks
@@ -265,6 +266,62 @@ def marginal(
     finally:
         conn.close()
     typer.echo(format_marginal(board, top=top, reasons=reasons))
+
+
+@app.command()
+def waivers(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your SWID's team).")] = None,
+    from_week: Annotated[Optional[int], typer.Option("--from-week",
+        help="First remaining week. REQUIRED whenever the week cannot be derived.")] = None,
+    last_week: Annotated[int, typer.Option("--last-week",
+        help="Final week priced (applies whether or not --from-week is given).")] = 17,
+    claim_budget: Annotated[int, typer.Option("--claim-budget",
+        help="Max claims/grabs in the action shortlist (extra claims are free).")] = 3,
+    reasons: Annotated[bool, typer.Option("--reasons", help="Print every claim/drop's reasons.")] = False,
+    pool_limit: Annotated[int, typer.Option("--pool-limit",
+        help="Free agents scanned per position (0 = the whole pool).")] = DEFAULT_POOL_LIMIT,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Plan the week's waiver claims: roster-legality precheck (IR eligibility +
+    forced drop) FIRST, then queued waiver claims and first-come grabs ranked with
+    their drops, plus the drop board (item 3.4).
+
+    If the roster is illegal (an IR occupant reset out of IR-eligibility), the plan
+    refuses to plan claims and proposes the fix. All legality, claim/drop and
+    ordering logic lives in ``core/waiver.py``; this command parses, calls, and
+    prints (rule 3).
+    """
+    day = as_of or _today()
+    resolved_season = _season(season)
+    conn = open_db(path)
+    try:
+        team_id = team
+        if team_id is None:
+            creds = load_espn_credentials()
+            team_id = resolve_own_team(
+                conn, as_of=day, season=resolved_season, swid=creds["swid"]
+            )
+        plan = build_waiver_plan(
+            conn,
+            as_of=day,
+            season=resolved_season,
+            own_team_id=team_id,
+            weeks=None if from_week is None else range(from_week, last_week + 1),
+            last_week=last_week,
+            pool_limit=None if pool_limit == 0 else pool_limit,
+            source=source,
+            claim_budget=claim_budget,
+            today=_today(),
+        )
+    except (WeekResolutionError, OwnTeamUnresolved) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_waiver_plan(plan, reasons=reasons))
 
 
 @app.command()

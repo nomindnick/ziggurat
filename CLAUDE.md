@@ -322,6 +322,47 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   (**1255 passed**; +14). Details: `IMPLEMENTATION_PLAN.md` 3.3 + gitignored
   `intel/research/candidates-3.3-design.md`.
 
+- **3.4 waiver module — built, audited & fixed 2026-07-26.** New permanent
+  `core/waiver.py` (`core→league` acyclic direction; Rule 8 never touches
+  `draft/`), flat `ziggurat waivers` CLI. **Pure composition with one new piece**:
+  it calls `marginal.build_board()` ONCE (drop board + add/drop swap matrix, adds
+  already scoped to the FA pool and carrying WAIVERS-vs-FREEAGENT status), joins
+  `candidates.build_candidates` on `espn_id` for opportunity context, and reads the
+  roster + FA pool + `waiver_rank` from `league/state` — re-pricing nothing. No
+  scoring (Rule 2), no migration (`schema_version` 7). The **one new piece is the
+  roster-legality precheck**: it recounts IR itself (the shared seater strips all IR
+  rows, hiding the exact 17>16 oversize), reslots an ineligible IR occupant IR→BE
+  before pricing the forced drop, and runs independently of `build_board` (which
+  raises at `scoring_period==0`) so refuse-and-propose never depends on pricing.
+  Done-when met on synthetic state (pre-draft DB has no rostered players): 16 active
+  + 1 IR occupant flipped OUT→QUESTIONABLE → blocked, empty claims, occupant named,
+  a restorative fix; flip to OUT → legal + claims. **IR eligibility AND the whole
+  IR-legality fix model ship as labelled hypotheses** (`IR_ELIGIBLE_STATUSES`,
+  `IR_FIX_MODEL_LABEL`) — ESPN's `eligibleSlots` is not ingested and no draft has
+  happened, so they are disclosed as UNVERIFIED on every plan, to confirm in-app
+  post-draft (same discipline as scoring §3.8). Three verified workflows (recon →
+  build+green-gate → 7-dimension adversarial audit, 29 agents). **The audit found
+  the seam clean (no leakage, no rules/boundary violations) and 18 real defects (6
+  major), all fixed. Headline: the legality FIX was non-restorative and
+  non-terminating** — an ineligible IR occupant was double-counted as an independent
+  violation, so obeying the plan's own "drop this player" never reached legality
+  (17/16 → 16/16 → 15/16 … all still "illegal") while the true fix (move the reset
+  player off IR) was never stated, and a costless IR-move fix was never offered.
+  Fixed by redefining legality as `active>16 OR ir>1` (restorative + terminating,
+  proven by a re-run test) with a preference-ordered fix (zero-drop IR-move primary,
+  drop secondary) and sub-16 rosters never told to drop. Also fixed: the UNVERIFIED
+  IR disclosure was hidden behind `--reasons` on a destructive drop (now
+  unconditional); duplicate display-names mis-joined a claim to the wrong `espn_id`
+  3.6 would act on (now `SwapRow` carries the ids, joined on identity); streamed
+  1-week D/ST/K evicted season-long claims under budget (now segregated); unpriceable
+  drops shown as confident top claims (now flagged + de-prioritised); `own_team_id=
+  None` read the whole universe as your roster (now refused); a shared
+  `classify_acquisition` so the drop board and claims can't contradict; plus
+  test-rigor gaps (real view-threading leakage test, the candidate join exercised
+  non-empty, the legal render constrained). Suite green (**1305 passed**; +27).
+  Details: `IMPLEMENTATION_PLAN.md` 3.4 + gitignored
+  `intel/research/waiver-3.4-design.md`.
+
 **Two standing rules this item paid for, both about process rather than code:**
 **(1) The systemd timers run `ziggurat` from the working tree, so uncommitted
 code is the production cadence.** `db/ziggurat.sqlite` reached `schema_version 7`

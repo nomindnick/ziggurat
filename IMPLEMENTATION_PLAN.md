@@ -1828,8 +1828,59 @@ gitignored `intel/research/candidates-3.3-design.md`.
 ### 3.4 [Build] Waiver module
 **Goal:** Claims-vs-FCFS logic (claims are queued and free — submit liberally), roster-legality precheck (IR eligibility after Tuesday status resets; forced-drop computation), drop recommendations from 3.2, all with reasons.
 **Done when:** given a synthetic illegal-roster state, the module correctly refuses to plan claims until legality is restored and proposes the fix.
-**Update:**
-> _[To be completed]_
+**Update:** _Built, audited & fixed 2026-07-26._ New permanent `core/waiver.py`
+(`core→league` is the established acyclic import direction — `league` never imports
+`core`; Rule 8: never touches `draft/`). Flat `ziggurat waivers` CLI. 3.4 is **pure
+composition with one new piece**: it calls `marginal.build_board()` **once** and reads
+`board.ranked` (drop board) + `board.swaps` (add/drop pairs, already gain>0, already
+carrying `add_status` WAIVERS/FREEAGENT), joins `candidates.build_candidates` on
+`espn_id` for add-opportunity context, and pulls the roster + FA pool + `waiver_rank` +
+`is_transaction_locked` from `league/state`. It re-prices nothing. Frozen dataclasses
+`LegalityVerdict`/`DropRec`/`ClaimRec`/`WaiverPlan`; pure `format_waiver_plan`; no
+scoring (Rule 2). No migration (`schema_version` stays 7).
+
+**The one new piece is the roster-legality precheck** — the done-when's crux. It recounts
+IR itself (`active_players()`/`build_board` strip *all* IR rows unconditionally, so a
+naive count misses the exact 17>16 oversize), reslots an ineligible IR occupant IR→BE in
+a copy before pricing the forced drop, and runs independently of `build_board` (which
+raises `WeekResolutionError` at `scoring_period==0`) so the refuse-and-propose path never
+depends on pricing succeeding. Waiver-vs-FCFS keys only on `roster_status`; claims are
+gain-ordered with a distinct drop each and bounded to a k≤3 shortlist; streamed D/ST/K
+are segregated as "this week only — 3.5's lane". Done-when met on synthetic state
+(pre-draft DB has no rostered players): 16 active + 1 IR-slot occupant flipped
+OUT→QUESTIONABLE → blocked, empty claims, the ineligible occupant named, a forced-drop
+fix — flip to OUT → legal + claims.
+
+**IR eligibility and the whole IR-legality FIX MODEL ship as labelled hypotheses**
+(`IR_ELIGIBLE_STATUSES = {OUT, INJURY_RESERVE}`, `IR_FIX_MODEL_LABEL`): ESPN's
+authoritative `eligibleSlots` is not ingested and no draft has happened, so the block
+condition, the sub-16 non-block, and the move-vs-drop preference all rest on ESPN
+mechanics to **confirm in-app post-draft** — disclosed on every plan, same discipline as
+scoring §3.8. Open TODOs recorded: ingest `eligibleSlots` for machine-truth; DOUBTFUL/PUP;
+within-week priority-reset behaviour.
+
+Three verified workflows (recon → build+green-gate → 7-dimension adversarial audit with
+per-finding refute-first verification, 29 agents). **The audit found the seam clean (no
+leakage, no rules/boundary violations) and 18 real defects (6 major), all fixed. The
+headline: the legality *fix* was non-restorative and non-terminating** — an ineligible IR
+occupant was double-counted as an independent violation, so following the plan's own
+"drop this player" instruction never reached legality (17/16 → 16/16 → 15/16 … all still
+"illegal") while the true fix (move the reset player out of the IR slot) was never stated;
+and a costless IR-move fix (seat another IR-eligible body into the vacated slot) was never
+offered. Fixed by redefining legality as `active>16 OR ir>1` (restorative, terminating —
+proven by a re-run test) with a preference-ordered fix (zero-drop IR-move primary, drop
+secondary) and sub-16 rosters never told to drop. Other fixes: the UNVERIFIED IR
+disclosure was hidden behind `--reasons` on a destructive drop (now unconditional);
+duplicate display-names mis-joined a claim to the wrong `espn_id` that 3.6 would act on
+(now `SwapRow` carries `add_espn_id`/`drop_espn_id`, joined on identity); streamed 1-week
+D/ST/K were ranked against season-long claims by raw gain and evicted them under budget
+(now segregated); unpriceable drops rendered as confident top claims (now flagged in the
+default view + de-prioritised); `own_team_id=None` read the whole universe as your roster
+→ "drop 5 players" (now refused); a shared `classify_acquisition` so the drop board and
+claims can't contradict; plus test-rigor gaps (a real view-threading leakage test, the
+candidate join exercised non-empty, the legal-path render constrained, the budget/fallback
+branches covered). Suite green (**1305 passed, 4 skipped**; +27). Details:
+gitignored `intel/research/waiver-3.4-design.md`.
 
 ### 3.5 [Build] Lineup support & streaming
 **Goal:** Weekly starter recommendations with win-probability variance posture (opponent projected total → underdog/favorite mode), slot-lock optionality (Thursday players never in FLEX), time-contingent GTD handling, Sunday-morning inactives check; plus the D/ST + K streaming ranker using house scoring, opponent quality, Vegas totals, and weather. Hard-coded sanity checks (OUT/bye players never recommended) enforced in code with tests.

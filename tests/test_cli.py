@@ -399,6 +399,20 @@ def test_marginal_prints_a_drop_board_with_its_caveats(tmp_path):
     assert "Cli Runner" in result.output
 
 
+def test_waivers_prints_a_plan_with_legality_and_sections(tmp_path):
+    db_path = tmp_path / "marginal.sqlite"
+    _build_marginal_db(db_path)
+    result = runner.invoke(app, ["waivers", "--path", str(db_path), "--as-of",
+                                 "2026-09-15", "--season", "2026", "--team", "10",
+                                 "--from-week", "4"])
+    assert result.exit_code == 0, result.output
+    # a legal roster (8 active) plans claims; the legality verdict prints first
+    assert "roster legal" in result.output
+    assert "WAIVER CLAIMS" in result.output
+    assert "DROP BOARD" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_marginal_refuses_to_guess_the_current_week(tmp_path):
     """`--from-week` omitted, with no scoring period and no readable schedules:
     the command must fail legibly rather than pricing a whole season."""
