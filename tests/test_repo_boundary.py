@@ -31,13 +31,12 @@ PRIVATE_PATHS = [
     "config/.env",
 ]
 
-#: Private paths the MATCHER and the HOOK must catch, held separately from
-#: PRIVATE_PATHS for one reason, stated rather than hidden: `.gitignore` does not
-#: cover them yet (item 3.2c audit — see `test_a_database_backup_is_blocked`), so
-#: asserting them in PRIVATE_PATHS would fail `test_gitignore_covers_boundary_paths`
-#: for a real, still-open reason. The commit-time gate — the hook — DOES block
-#: them, which is what stops the file reaching the public remote.
-PRIVATE_PATHS_NOT_YET_GITIGNORED = [
+#: Private paths whose suffix arrives AFTER the recognised extension. Held as
+#: their own list because they are the shape every enforcement point missed, not
+#: because any point misses them now: the matcher and hook were widened by the
+#: 3.2c audit fix, `.gitignore` by the operator immediately after, so all THREE
+#: agree and these are asserted in `PRIVATE_PATHS` too (below).
+SUFFIXED_PRIVATE_PATHS = [
     "db/ziggurat.sqlite.bak-v7",       # the operator's actual pre-migration backup name
     "db/ziggurat.sqlite.gz",
     "db/ziggurat.sqlite.1",
@@ -45,6 +44,8 @@ PRIVATE_PATHS_NOT_YET_GITIGNORED = [
     ".env-prod",
     ".envrc",
 ]
+
+PRIVATE_PATHS += SUFFIXED_PRIVATE_PATHS
 
 PUBLIC_PATHS = [
     "ziggurat/data/__init__.py",  # the ingestion *package* is public
@@ -79,20 +80,23 @@ def test_a_database_backup_is_blocked(tmp_path):
     Asserted through the HOOK as well as the matcher, because the hook is the
     gate that actually runs at commit time.
 
-    STILL OPEN, deliberately out of this fix's ownership: `.gitignore` needs
-    `*.sqlite*` (it has `*.sqlite`), or a backup keeps showing up in
-    `git status` and `git add .` where a tired operator can stage it. The hook
-    then refuses the commit — which is the failure mode this test pins.
+    CLOSED 2026-07-25: `.gitignore` was widened too, so all three points agree.
+    But NOT with the `*.sqlite*` this docstring originally proposed — that
+    over-matches in the other direction and silently ignores a source file named
+    `foo.sqliteish.py` (it is in `PUBLIC_PATHS`, and it caught exactly that
+    mistake being made). The pattern is a SEPARATOR CLASS: the suffix must begin
+    with `.` or `-`. A boundary pattern can fail in both directions and only one
+    of them is loud.
     """
-    for path in PRIVATE_PATHS_NOT_YET_GITIGNORED:
+    for path in SUFFIXED_PRIVATE_PATHS:
         assert violations([path]) == [path], f"boundary path not matched: {path}"
     blocked = subprocess.run(
-        [sys.executable, str(HOOK), "--paths", *PRIVATE_PATHS_NOT_YET_GITIGNORED],
+        [sys.executable, str(HOOK), "--paths", *SUFFIXED_PRIVATE_PATHS],
         capture_output=True, text=True,
     )
     assert blocked.returncode == 1
     assert "COMMIT BLOCKED" in blocked.stderr
-    for path in PRIVATE_PATHS_NOT_YET_GITIGNORED:
+    for path in SUFFIXED_PRIVATE_PATHS:
         assert path in blocked.stderr
 
 

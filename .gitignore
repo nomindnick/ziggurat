@@ -3,14 +3,24 @@
 # package; only the top-level intel/ and data/ trees are league-private.
 /intel/
 /data/
-# Trailing-wildcard on purpose (item 3.2c): the anchored forms below matched
-# neither a backup named ziggurat.sqlite.bak-v7 nor ziggurat.sqlite.gz, and
-# repo_guard.py's pattern was anchored the same way — so a 43 MB file of
-# league-private data cleared TWO of the three enforcement points Rule 5 names.
-*.sqlite*
-*.sqlite3*
+# A SEPARATOR CLASS, not a trailing wildcard (item 3.2c). End-anchored `*.sqlite`
+# matched neither a backup named ziggurat.sqlite.bak-v7 nor ziggurat.sqlite.gz,
+# and repo_guard.py was anchored the same way — so a 43 MB file of league-private
+# data cleared TWO of the three enforcement points Rule 5 names. But a bare
+# `*.sqlite*` over-matches in the other direction and would swallow a source file
+# named foo.sqliteish.py, so the suffix must begin with `.` or `-`.
+*.sqlite
+*.sqlite3
+*.sqlite.*
+*.sqlite3.*
+*.sqlite-*
+*.sqlite3-*
 .env
 .env.*
+.env-*
+# direnv; routinely holds `export SECRET=...`. Named exactly, not `.env*`, which
+# would be the same over-matching mistake the sqlite block above documents.
+.envrc
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
