@@ -277,6 +277,51 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   `IMPLEMENTATION_PLAN.md` 3.2c + gitignored
   `intel/research/backfill-depthcharts-3.2c-design.md`.
 
+- **3.3 candidate generator & signals — built, audited & fixed 2026-07-26.**
+  Permanent `core/candidates.py` (Rule 8): three labelled signal blocks —
+  **usage-delta breakouts** (`usage_deltas`, full metric set, skill positions
+  only), **injury-triggered opportunity shocks**, and **`QB1_CHANGE`** as a
+  labelled hypothesis (folds `qb1_change_candidates` reasons verbatim; no
+  RB/WR/TE rank-change trigger, enforced by test) — rendered separately (high
+  recall, precision tuning is 4.2's), thin `ziggurat candidates` CLI, no
+  scoring/points (Rule 2). Built to the 3.2c rescope, not the original goal:
+  depth-chart demotion is measured-dead so it survives only as the QB hypothesis,
+  and **TD-regression is not built (no in-season source; deferred to Phase 4).**
+  **The build's shaping fact: the live injury signal cannot come from nflverse.**
+  `get_injuries` is backtest-only for 2025+ (nflverse dropped `date_modified`, so
+  every 2025 row is gameday-stamped with 0-day lead) and is blind to IR/season
+  enders entirely (Conner, Harris = 0 rows) — those shocks ride the usage arm
+  alone. So per operator decision the **injury arm ships BOTH sources**: a NEW
+  read-time `state.injury_transitions()` (diffs consecutive `league_player_state`
+  snapshots for availability crossings, no migration) is the live path,
+  `get_injuries` the historical/backtest path; the live helper is
+  **synthetic/smoke-tested only until real games produce transitions.** The
+  two-view seam is threaded throughout (live reads `historical`, the 2025
+  validation binds `base.latest_truth`, exposed as `ziggurat candidates
+  --validate`). Done-when met on the live 2025 backfill: the §7.3 five verified
+  targets all surface (Dowdle wk5, Tucker wk8, Henderson wk9, Monangai wk9,
+  Wilson wk11 — the snap-blind case caught via air-yards/targets) and the Gibbs
+  control does not dominate. Three verified workflows (recon → build+green-gate →
+  7-dimension adversarial audit with per-finding refute-first verification, 26
+  agents). **The audit found the seam clean (no leakage, no rules/boundary
+  violations) and 17 real defects (2 major), all fixed. Headline: an absence of
+  difference is not an absence of signal** — the usage arm silently dropped the
+  `prior_week=None` cohort, so a rookie who *debuts* for 22 carries after the
+  starter is ruled Out (all-`None` deltas — nothing to difference) was invisible
+  in BOTH arms with no note, exactly the cohort recon named as the one to
+  surface; fixed with an absolute-usage "role emergence" path (labelled floors,
+  fed into the beneficiary index, a ~1/week trickle on 2025). Also fixed: an
+  unhedged "opportunity opened by X" causal claim that fired on established WR1s;
+  WOPR triple-counted in the magnitude AND printed as bare jargon (dropped from
+  both — it is `1.5·target_share + 0.7·air_yards_share`); a `SCORE` column a
+  novice reads as points (→ `SIGNAL`); a past-season CLI whose only guidance
+  named a Python API it didn't expose; a whitespace-encoded position that
+  defeated the None-keep guard; a dual-source dedupe that double-emitted across a
+  gsis gap; a `--top` that hid star shocks under bench streamers (now
+  `percent_owned`-tiebroken); and four vacuous/dead-code tests. Suite green
+  (**1255 passed**; +14). Details: `IMPLEMENTATION_PLAN.md` 3.3 + gitignored
+  `intel/research/candidates-3.3-design.md`.
+
 **Two standing rules this item paid for, both about process rather than code:**
 **(1) The systemd timers run `ziggurat` from the working tree, so uncommitted
 code is the production cadence.** `db/ziggurat.sqlite` reached `schema_version 7`

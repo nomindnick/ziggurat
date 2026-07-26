@@ -569,6 +569,32 @@ def espn_by_gsis(conn: sqlite3.Connection) -> dict[str, str]:
     return out
 
 
+def name_by_gsis(conn: sqlite3.Connection) -> dict[str, str]:
+    """gsis_id -> display name from the latest players snapshot.
+
+    Crosswalk-at-now (like ``espn_by_gsis``): reads ``players`` at
+    ``MAX(retrieved_as_of)`` with NO as-of gate. A player's NAME is immutable
+    identity, so the as-of-gated ``players.id_crosswalk`` is the WRONG tool for a
+    display join in a past-``as_of`` (backtest / 2025 validation) read: the
+    backfilled ``players`` rows carry ``knowable_as_of`` = pull-day, so a past
+    ``as_of`` hides every name and the caller falls back to raw gsis strings —
+    which a football novice cannot read (Rule 6). This reads today's name.
+    """
+    out: dict[str, str] = {}
+    for r in conn.execute(
+        """
+        SELECT gsis_id, name FROM players p
+        WHERE name IS NOT NULL AND retrieved_as_of = (
+            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
+        )
+        """
+    ):
+        gsis, name = r["gsis_id"], r["name"]
+        if gsis is not None and gsis not in out:
+            out[gsis] = name
+    return out
+
+
 def gsis_by_espn(conn: sqlite3.Connection) -> dict[str, str]:
     """espn_id -> gsis_id from the latest players snapshot — the reverse of
     ``espn_by_gsis``, used by league state (item 3.1) whose rows arrive keyed by

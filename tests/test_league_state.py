@@ -702,3 +702,77 @@ def test_resolve_own_team_refuses_rather_than_guessing(crosswalked_db, league_wo
         state.resolve_own_team(
             crosswalked_db, as_of="2026-09-15", season=2026, swid="{OWNER-4}")
     assert "2 teams" in str(exc.value)
+
+
+# ------------------------------------------------ injury transitions (item 3.3)
+#
+# The LIVE in-season injury-shock source: diff consecutive daily snapshots for a
+# player crossing the availability boundary (ACTIVE/QUESTIONABLE/None <->
+# OUT/INJURY_RESERVE). Only three PRE-SEASON snapshots exist against real data
+# (all free agents, no transitions), so this is unit-tested on synthetic
+# snapshots and smoke-tested live until the season starts.
+
+
+def _pool_entry(pid, *, pos="RB", injury="ACTIVE", team_id=None):
+    return {
+        "id": int(pid),
+        "onTeamId": team_id or 0,
+        "status": "ONTEAM" if team_id else "FREEAGENT",
+        "player": {
+            "id": int(pid), "fullName": f"Player {pid}",
+            "defaultPositionId": {"QB": 1, "RB": 2, "WR": 3, "TE": 4}[pos],
+            "proTeamId": 1, "injuryStatus": injury,
+            "ownership": {"percentOwned": 50.0, "percentStarted": 40.0, "percentChange": 0.0},
+        },
+    }
+
+
+def _snap(db, entries, *, day, season=2026):
+    state.ingest_player_state(db, entries, retrieved_as_of=day, season=season,
+                              allow_shrink=True)
+
+
+def test_injury_transitions_detects_a_ruled_out_crossing(db):
+    _snap(db, [_pool_entry(7001, injury="ACTIVE"), _pool_entry(7002, injury="ACTIVE")],
+          day="2026-09-10")
+    _snap(db, [_pool_entry(7001, injury="OUT"), _pool_entry(7002, injury="ACTIVE")],
+          day="2026-09-11")
+    ts = state.injury_transitions(db, as_of="2026-09-11", season=2026)
+    assert len(ts) == 1
+    t = ts[0]
+    assert t["espn_player_id"] == "7001"
+    assert t["from_status"] == "ACTIVE" and t["to_status"] == "OUT"
+    assert t["direction"] == "ruled_out"
+    assert t["became_knowable"] == "2026-09-11"
+    assert t["player"] == "Player 7001" and t["position"] == "RB"
+
+
+def test_injury_transitions_detects_a_clearing_crossing(db):
+    _snap(db, [_pool_entry(7001, injury="INJURY_RESERVE")], day="2026-09-10")
+    _snap(db, [_pool_entry(7001, injury="ACTIVE")], day="2026-09-11")
+    ts = state.injury_transitions(db, as_of="2026-09-11", season=2026)
+    assert [t["direction"] for t in ts] == ["cleared"]
+    assert ts[0]["from_status"] == "INJURY_RESERVE" and ts[0]["to_status"] == "ACTIVE"
+
+
+def test_injury_transitions_ignores_within_class_moves(db):
+    # ACTIVE -> QUESTIONABLE and OUT -> INJURY_RESERVE do NOT cross the boundary.
+    _snap(db, [_pool_entry(7001, injury="ACTIVE"), _pool_entry(7002, injury="OUT")],
+          day="2026-09-10")
+    _snap(db, [_pool_entry(7001, injury="QUESTIONABLE"),
+               _pool_entry(7002, injury="INJURY_RESERVE")], day="2026-09-11")
+    assert state.injury_transitions(db, as_of="2026-09-11", season=2026) == []
+
+
+def test_injury_transitions_are_leakage_safe(db):
+    # A transition on 2026-09-11 must be invisible at an as_of before that day.
+    _snap(db, [_pool_entry(7001, injury="ACTIVE")], day="2026-09-10")
+    _snap(db, [_pool_entry(7001, injury="OUT")], day="2026-09-11")
+    assert state.injury_transitions(db, as_of="2026-09-10", season=2026) == []
+    assert len(state.injury_transitions(db, as_of="2026-09-11", season=2026)) == 1
+
+
+def test_injury_transitions_only_two_snapshots_needed_and_none_on_a_single(db):
+    # A single snapshot cannot form a transition (no prior to diff against).
+    _snap(db, [_pool_entry(7001, injury="OUT")], day="2026-09-10")
+    assert state.injury_transitions(db, as_of="2026-09-10", season=2026) == []

@@ -1767,8 +1767,63 @@ shocks. The depth-chart arm survives only as a QB-beneficiary hypothesis, and th
 leaves for Phase 4. Rescope the goal accordingly when this item opens rather than pretending the
 original three arms are all live.
 **Done when:** run against last season's data as-of mid-season, the generator's candidate lists visibly contain the known breakouts of the following weeks (informal sanity check; rigorous measurement is Phase 4).
-**Update:**
-> _[To be completed]_
+**Update:** _Built, audited & fixed 2026-07-26._ Permanent `core/candidates.py`
+(Rule 8 — never in `draft/`): frozen `CandidateRow`/`CandidateBoard`, thin
+`ziggurat candidates` CLI. Built to the rescope above, not the original goal —
+three labelled signal blocks rendered separately (high-recall, not merged
+precision): **usage-delta breakouts** (`usage_deltas`, full metric set, gsis→name
+join, skill positions only), **injury-triggered opportunity shocks**, and
+**`QB1_CHANGE`** as a labelled hypothesis (folds `qb1_change_candidates` reasons
+verbatim, `hypothesis=True`, no RB/WR/TE rank-change trigger enforced by test).
+No scoring/points (Rule 2). **TD-regression not built — no in-season source,
+deferred to Phase 4** (recorded per the amendment). Thresholds ship as labelled
+`MappingProxyType` hypotheses; precision tuning is 4.2's.
+
+**Operator decision (2026-07-26): the injury arm ships BOTH sources now.** The
+nflverse `get_injuries` feed grades the done-when on 2021–2024 lead time but is
+**backtest-only for 2025+** (nflverse dropped `date_modified`, so 100% of 2025
+rows are gameday-stamped, 0-day lead) and is blind to IR/season-enders entirely
+(measured: James Conner, Najee Harris = 0 rows). So the **live** in-season source
+is a NEW `state.injury_transitions()` in `ziggurat/league/state.py` — a pure
+read-time diff of consecutive `league_player_state` snapshots for availability
+crossings (ACTIVE/QUESTIONABLE/None ↔ OUT/INJURY_RESERVE), as-of-gated, no
+migration. It is **synthetic/smoke-tested only until real games produce
+transitions** (3 pre-season snapshots exist, all free agents) — stated in the
+docstring. The two-view seam is threaded throughout: live path reads `historical`,
+the 2025 validation path binds `base.latest_truth` (a `--validate` CLI flag
+exposes it), the silent-empty-vs-populated fact pinned in tests.
+
+**Done-when met on the live 2025 backfill under `latest_truth`:** the §7.3 five
+verified targets all surface — Rico Dowdle (wk5), Sean Tucker (wk8), TreVeyon
+Henderson (wk9), Kyle Monangai (wk9), Michael Wilson (wk11, the snap-blind case
+caught via air-yards-share + targets) — and the Jahmyr Gibbs negative control does
+not dominate.
+
+Three verified workflows (recon → build+green-gate → 7-dimension adversarial audit
+with per-finding refute-first verification). **The audit confirmed the seam is
+clean** (no leakage, no repo-boundary or rules violations) and found **17 real
+defects (2 major, 14 minor, 1 plausible), all fixed.** The headline major is that
+**an absence of difference is not an absence of signal**: the usage arm silently
+dropped the `prior_week=None` cohort — a rookie who *debuts* for 22 carries after
+the starter is ruled Out has all-`None` deltas (nothing to difference against), so
+`qualifies()` returned `{}` and the single highest-value waiver breakout of the
+week was invisible in **both** arms (the injury arm builds its beneficiary index
+from the same dropped usage rows), with no note — exactly the cohort the recon had
+named as "the rows to surface." Fixed with an absolute-usage "role emergence" path
+(raw target-week usage vs. provisional labelled-hypothesis floors, fed into the
+beneficiary index; verified a trickle of ~1/week on 2025, not a flood). Other
+fixes: hedged the unhedged "opportunity opened by X" causal claim (fired on
+established WR1s); dropped WOPR from magnitude+display (it is
+`1.5·target_share + 0.7·air_yards_share` — triple-counted *and* bare jargon);
+renamed the `SCORE` column to `SIGNAL` (a novice reads SCORE as points); made the
+past-season CLI actionable (`--validate`) and its errors honest ("bind
+latest_truth", not "pre-season"); `strip()`ed whitespace-encoded positions that
+defeated the None-keep guard; unified the dual-source injury dedupe across a gsis
+crosswalk gap; value-aware (`percent_owned`) tiebreak so `--top` stops hiding star
+shocks under bench streamers; and hardened four vacuous/dead-code tests (the
+forbidden-trigger guard was a tautology; the QB1 snap-to-panel branch was dead).
+Suite green (**1255 passed, 4 skipped**; +14). Details:
+gitignored `intel/research/candidates-3.3-design.md`.
 
 ### 3.4 [Build] Waiver module
 **Goal:** Claims-vs-FCFS logic (claims are queued and free — submit liberally), roster-legality precheck (IR eligibility after Tuesday status resets; forced-drop computation), drop recommendations from 3.2, all with reasons.

@@ -11,6 +11,7 @@ from typing import Annotated, Optional
 
 import typer
 
+from ziggurat.core.candidates import build_candidates, format_candidates
 from ziggurat.core.divergence import build_divergence, format_report
 from ziggurat.core.marginal import (
     DEFAULT_POOL_LIMIT,
@@ -264,6 +265,58 @@ def marginal(
     finally:
         conn.close()
     typer.echo(format_marginal(board, top=top, reasons=reasons))
+
+
+@app.command()
+def candidates(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="Season (default: current NFL season).")] = None,
+    week: Annotated[Optional[int], typer.Option(
+        help="Last fully-played week to analyze (default: resolved from the schedule).")] = None,
+    since: Annotated[Optional[str], typer.Option(
+        help="QB1-change baseline day; enables the QB1 labelled-hypothesis arm (season >= 2025).")] = None,
+    position: Annotated[Optional[str], typer.Option(
+        help="Restrict the usage arm to one position (RB/WR/TE).")] = None,
+    top: Annotated[Optional[int], typer.Option(help="Show only the top N per signal block.")] = None,
+    reasons: Annotated[bool, typer.Option("--reasons", help="Print every candidate's reasons.")] = False,
+    validate: Annotated[bool, typer.Option(
+        "--validate/--latest-truth", "--validate",
+        help="Bind the latest_truth view for a PAST-season validation read "
+             "(backfilled history reads EMPTY under the default historical view). "
+             "Leave off for the live current-season path.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Rank this week's breakout candidates from usage deltas and injury shocks,
+    plus the QB1-change hypothesis (item 3.3).
+
+    All ranking, thresholds and merge logic live in ``core/candidates.py``; this
+    command parses, calls, and prints (rule 3).
+    """
+    from ziggurat.core.candidates import NoCompletedWeek
+    from ziggurat.data.nfl import base
+
+    day = as_of or _today()
+    conn = open_db(path)
+    # --validate selects the latest_truth wrapper (past-season validation); the
+    # live path stays on the default historical view (Rule 3: the flag only picks
+    # which wrapper to call — no logic here).
+    generator = base.latest_truth(build_candidates) if validate else build_candidates
+    try:
+        board = generator(
+            conn,
+            as_of=day,
+            season=_season(season),
+            week=week,
+            positions=None if position is None else [canon_position(position)],
+            since=since,
+            today=_today(),
+        )
+    except NoCompletedWeek as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_candidates(board, top=top, reasons=reasons))
 
 
 @app.command("mock-draft")

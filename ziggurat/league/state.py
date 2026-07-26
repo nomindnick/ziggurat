@@ -802,6 +802,102 @@ def holder_timeline(conn, *, season, espn_player_id, since=None, until=None) -> 
     return segments
 
 
+# Availability boundary for the injury-transition detector. A player is
+# "unavailable" for the coming week when ESPN tags him OUT or INJURY_RESERVE;
+# ACTIVE / QUESTIONABLE / None are all "expected to play" (QUESTIONABLE is a
+# weekly game designation that resolves week to week and is not a shock on its
+# own — see marginal.AvailabilityModel). The set is the same one
+# marginal.DEFAULT_AVAILABILITY.hard_out_statuses uses, kept local so a caller
+# does not have to import the valuation layer to read league state.
+HARD_OUT_STATUSES = frozenset({"OUT", "INJURY_RESERVE"})
+
+
+def injury_transitions(conn, *, as_of, season, view: base.AsOfView = "historical") -> list[dict]:
+    """Injury-status transitions across consecutive daily snapshots, up to ``as_of``.
+
+    The **LIVE in-season** injury-shock source for item 3.3's candidate generator
+    (the historical/backtest source is nflverse ``injuries.get_injuries``, which
+    for 2025+ has no mid-week lead time — see IMPLEMENTATION_PLAN.md 3.3). This
+    diffs each player's ``injury_status`` between consecutive
+    ``league_player_state`` snapshot days and emits a transition when he crosses
+    the availability boundary:
+
+      * ``ruled_out``  — ACTIVE/QUESTIONABLE/None -> OUT/INJURY_RESERVE
+        (the opportunity shock: his role just vacated);
+      * ``cleared``    — OUT/INJURY_RESERVE -> ACTIVE/QUESTIONABLE/None
+        (he is back; the vacancy closed).
+
+    A move WITHIN a class (ACTIVE -> QUESTIONABLE, OUT -> INJURY_RESERVE) is not a
+    boundary crossing and is not reported — it does not change availability.
+
+    Each transition carries ``espn_player_id``, ``gsis_id``, ``player``,
+    ``position``, ``pro_team``, ``on_team_id`` (the roster holding him at the
+    to-snapshot), ``from_status``, ``to_status``, ``direction`` (ruled_out /
+    cleared), and ``became_knowable`` (the snapshot day the new status first
+    appeared — the day it became actionable).
+
+    Leakage-safe (Rule 1): only snapshots knowable at ``as_of`` are scanned
+    (``knowable_as_of`` gate under every view; ``retrieved_as_of`` gate too under
+    ``historical``), so a transition can never surface before the day it was
+    observed. Modeled on ``who_held`` / ``holder_timeline``; ``view`` is threaded
+    so the same code serves the live ``historical`` path and any latest-truth
+    replay. Returned ascending by ``(became_knowable, player)``.
+
+    HONESTY: as of 2026-07-26 only three PRE-SEASON snapshots exist
+    (2026-07-24/25/26), every player a free agent with ``injury_status`` unchanged,
+    so this helper produces NOTHING against real data yet. It is UNIT-TESTED on
+    synthetic snapshots and can only be smoke-tested live until the season starts.
+    That is expected and fine — it is wired now so the waiver cadence has it on
+    day one.
+    """
+    cutoff = normalize_as_of(as_of).isoformat()
+    # The knowledge gate. league_player_state stamps knowable_as_of ==
+    # retrieved_as_of (a live mutable snapshot), so both gates coincide here; we
+    # write both to match select_as_of's semantics under each view rather than
+    # relying on that coincidence.
+    gate = "knowable_as_of <= :as_of"
+    if view == "historical":
+        gate += " AND retrieved_as_of <= :as_of"
+    rows = conn.execute(
+        f"SELECT retrieved_as_of, espn_player_id, gsis_id, player, position, "
+        f"       pro_team, on_team_id, injury_status "
+        f"FROM league_player_state "
+        f"WHERE season = :season AND {gate} "
+        f"ORDER BY espn_player_id, retrieved_as_of",
+        {"season": season, "as_of": cutoff},
+    ).fetchall()
+
+    def _class(status):
+        return "OUT" if (status or "").strip().upper() in HARD_OUT_STATUSES else "IN"
+
+    out: list[dict] = []
+    prev_by_player: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        pid = row["espn_player_id"]
+        prev = prev_by_player.get(pid)
+        prev_by_player[pid] = row
+        if prev is None:
+            continue
+        before, after = _class(prev["injury_status"]), _class(row["injury_status"])
+        if before == after:
+            continue  # no availability-boundary crossing
+        out.append({
+            "season": season,
+            "espn_player_id": pid,
+            "gsis_id": row["gsis_id"],
+            "player": row["player"],
+            "position": row["position"],
+            "pro_team": row["pro_team"],
+            "on_team_id": row["on_team_id"],
+            "from_status": prev["injury_status"],
+            "to_status": row["injury_status"],
+            "direction": "ruled_out" if after == "OUT" else "cleared",
+            "became_knowable": row["retrieved_as_of"],
+        })
+    out.sort(key=lambda t: (t["became_knowable"], t["player"] or "", t["espn_player_id"]))
+    return out
+
+
 def get_matchups(conn, *, as_of, season, week=None, view: base.AsOfView = "historical"):
     """League matchups as of a date. Pairings are knowable pre-season; a read
     before a week is played correctly returns that week with zero points."""

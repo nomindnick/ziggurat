@@ -67,6 +67,88 @@ def test_intel_init_scaffolds_from_templates(tmp_path):
     assert "nothing created" in rerun.output
 
 
+def _build_signals_db(db_path):
+    """A temp facts DB seeded from the 2023 wk5-6 nflverse slice, retrieved in the
+    PAST so the CLI's default historical view (the live path) actually sees it."""
+    import pandas as pd
+
+    from ziggurat.data.nfl import injuries, players, schedules, snap_counts, weekly_stats
+
+    fx = Path(__file__).parent / "fixtures" / "nfl"
+
+    def load(name):
+        return pd.read_parquet(fx / f"{name}.parquet")
+
+    conn = connect(db_path)
+    apply_schema(conn)
+    players.ingest_players(conn, load("ids"), retrieved_as_of="2023-08-01")
+    schedules.ingest_schedules(conn, load("schedules"), retrieved_as_of="2023-08-01")
+    weekly_stats.ingest_weekly_stats(conn, load("weekly_stats"), retrieved_as_of="2023-10-17")
+    snap_counts.ingest_snap_counts(conn, load("snap_counts"), retrieved_as_of="2023-10-17")
+    injuries.ingest_injuries(conn, load("injuries"), retrieved_as_of="2023-10-17")
+    conn.close()
+
+
+def test_candidates_prints_board(tmp_path):
+    db_path = tmp_path / "signals.sqlite"
+    _build_signals_db(db_path)
+    result = runner.invoke(
+        app,
+        ["candidates", "--as-of", "2023-10-20", "--season", "2023", "--week", "6",
+         "--path", str(db_path), "--reasons"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "USAGE BREAKOUTS" in result.output
+    assert "INJURY SHOCKS" in result.output
+    # Rule 6: lead-time disclosure travels with the injury block
+    assert "lead-time reality" in result.output
+    # F11: the ranking-key legend is present and the misleading SCORE header is gone
+    assert "SIGNAL" in result.output and "NOT fantasy points" in result.output
+
+
+def _build_signals_db_future_stamp(db_path):
+    """Like _build_signals_db but retrieved in the FUTURE (production backfill), so
+    a past-season historical read sees NOTHING and only --validate surfaces rows."""
+    import pandas as pd
+
+    from ziggurat.data.nfl import injuries, players, schedules, snap_counts, weekly_stats
+
+    fx = Path(__file__).parent / "fixtures" / "nfl"
+
+    def load(name):
+        return pd.read_parquet(fx / f"{name}.parquet")
+
+    conn = connect(db_path)
+    apply_schema(conn)
+    stamp = "2026-07-16"  # retrieved in the FUTURE, as a real backfill is
+    players.ingest_players(conn, load("ids"), retrieved_as_of=stamp)
+    schedules.ingest_schedules(conn, load("schedules"), retrieved_as_of=stamp)
+    weekly_stats.ingest_weekly_stats(conn, load("weekly_stats"), retrieved_as_of=stamp)
+    snap_counts.ingest_snap_counts(conn, load("snap_counts"), retrieved_as_of=stamp)
+    injuries.ingest_injuries(conn, load("injuries"), retrieved_as_of=stamp)
+    conn.close()
+
+
+def test_candidates_validate_flag_surfaces_past_season_rows(tmp_path):
+    # F4: a production-stamped (future-retrieved) DB reads EMPTY under the default
+    # historical view for a past season; --validate binds latest_truth and surfaces
+    # the real candidates the guidance note points at.
+    db_path = tmp_path / "signals.sqlite"
+    _build_signals_db_future_stamp(db_path)
+    common = ["candidates", "--as-of", "2023-10-20", "--season", "2023", "--week", "6",
+              "--path", str(db_path)]
+
+    historical = runner.invoke(app, common)
+    assert historical.exit_code == 0, historical.output
+    assert "latest_truth" in historical.output or "--validate" in historical.output
+
+    validated = runner.invoke(app, [*common, "--validate"])
+    assert validated.exit_code == 0, validated.output
+    assert "USAGE BREAKOUTS" in validated.output
+    # the validated board actually has rows (a non-empty USAGE block)
+    assert "(0)" not in validated.output.split("INJURY SHOCKS")[0]
+
+
 def test_valuation_prints_board(tmp_path):
     db_path = tmp_path / "val.sqlite"
     _build_valuation_db(db_path)
