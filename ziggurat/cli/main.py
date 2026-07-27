@@ -19,7 +19,13 @@ from ziggurat.core.marginal import (
     build_board,
     format_marginal,
 )
+from ziggurat.core.lineup_support import build_lineup, format_lineup_recommendation
 from ziggurat.core.scoring import score
+from ziggurat.core.streaming import (
+    StreamPositionError,
+    format_stream_board,
+    rank_streamers,
+)
 from ziggurat.core.valuation import (
     build_valuation,
     build_value_view,
@@ -164,6 +170,17 @@ def _parse_weeks(weeks: Optional[str]):
         return range(int(lo), int(hi) + 1)
     w = int(spec)
     return range(w, w + 1)
+
+
+def _parse_now(now: Optional[str]):
+    """Parse a ``--now`` ISO datetime into a tz-aware ET datetime (the lineup
+    decision clock), or None. Pure parsing — the GTD/inactives logic lives in the
+    package. A naive datetime is interpreted as Eastern (the gameday timezone)."""
+    if now is None:
+        return None
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromisoformat(now.strip())
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=ZoneInfo("America/New_York"))
 
 
 @app.command()
@@ -322,6 +339,100 @@ def waivers(
     finally:
         conn.close()
     typer.echo(format_waiver_plan(plan, reasons=reasons))
+
+
+@app.command()
+def stream(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    week: Annotated[Optional[int], typer.Option(
+        help="Week to stream (default: the current week resolved from state/schedule).")] = None,
+    position: Annotated[Optional[str], typer.Option(
+        help="DST or K (default: rank both).")] = None,
+    last_week: Annotated[int, typer.Option("--last-week", help="Final week for week resolution.")] = 17,
+    top: Annotated[Optional[int], typer.Option(help="Show only the top N per position.")] = None,
+    reasons: Annotated[bool, typer.Option("--reasons", help="Print every candidate's reasons.")] = False,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Rank the free-agent D/ST and kickers to stream this week: opponent matchup,
+    Vegas, and weather tilts on the house projection (item 3.5).
+
+    All pricing, thresholds and labelled hypotheses live in ``core/streaming.py``;
+    this command parses, calls, and prints (rule 3).
+    """
+    day = as_of or _today()
+    resolved_season = _season(season)
+    positions = [position] if position is not None else ["DST", "K"]
+    conn = open_db(path)
+    try:
+        boards = [
+            rank_streamers(
+                conn, as_of=day, season=resolved_season, position=pos, week=week,
+                last_week=last_week, source=source, today=_today(),
+            )
+            for pos in positions
+        ]
+    except (WeekResolutionError, StreamPositionError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo("\n\n".join(format_stream_board(b, top=top, reasons=reasons) for b in boards))
+
+
+@app.command()
+def lineup(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your SWID's team).")] = None,
+    week: Annotated[Optional[int], typer.Option(
+        help="Week to seat (default: the current week resolved from state/schedule).")] = None,
+    opponent_total: Annotated[Optional[float], typer.Option("--opponent-total",
+        help="Override the opponent's projected total (else auto-computed from his roster).")] = None,
+    last_week: Annotated[int, typer.Option("--last-week", help="Final week for week resolution.")] = 17,
+    reasons: Annotated[bool, typer.Option("--reasons", help="Print every starter's reasons.")] = False,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    now: Annotated[Optional[str], typer.Option(
+        help="Decision clock (ET ISO datetime) for GTD/inactives logic; default midnight ET of --as-of.")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Recommend the week's starting lineup to maximise P(win): opponent-aware
+    favorite/underdog posture, slot-lock optionality, GTD contingencies and an
+    inactives watch (item 3.5).
+
+    All seating, variance priors, posture and sanity logic live in
+    ``core/lineup_support.py``; this command parses, calls, and prints (rule 3).
+    """
+    day = as_of or _today()
+    resolved_season = _season(season)
+    now_et = _parse_now(now)
+    conn = open_db(path)
+    try:
+        team_id = team
+        if team_id is None:
+            creds = load_espn_credentials()
+            team_id = resolve_own_team(
+                conn, as_of=day, season=resolved_season, swid=creds["swid"]
+            )
+        rec = build_lineup(
+            conn,
+            as_of=day,
+            season=resolved_season,
+            own_team_id=team_id,
+            week=week,
+            opponent_total=opponent_total,
+            last_week=last_week,
+            source=source,
+            now=now_et,
+            today=_today(),
+        )
+    except (WeekResolutionError, OwnTeamUnresolved) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_lineup_recommendation(rec, reasons=reasons))
 
 
 @app.command()

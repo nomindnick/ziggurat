@@ -1885,8 +1885,75 @@ gitignored `intel/research/waiver-3.4-design.md`.
 ### 3.5 [Build] Lineup support & streaming
 **Goal:** Weekly starter recommendations with win-probability variance posture (opponent projected total → underdog/favorite mode), slot-lock optionality (Thursday players never in FLEX), time-contingent GTD handling, Sunday-morning inactives check; plus the D/ST + K streaming ranker using house scoring, opponent quality, Vegas totals, and weather. Hard-coded sanity checks (OUT/bye players never recommended) enforced in code with tests.
 **Done when:** for a synthetic week, the lineup changes appropriately when the opponent's projection swings from −20 to +20, and the streaming ranker's weather sensitivity is demonstrable.
-**Update:**
-> _[To be completed]_
+**Update:** _Built, audited & fixed 2026-07-26._ Two new **permanent** core modules,
+pure composition over existing as-of-gated accessors (no migration; `schema_version`
+stays 7; no new table): **`core/streaming.py`** (the D/ST + K streaming ranker,
+`rank_streamers` + `format_stream_board`, thin `ziggurat stream` CLI) and
+**`core/lineup_support.py`** (the weekly starter recommender — win-probability variance
+posture + slot-lock + GTD + inactives, `build_lineup` + `format_lineup_recommendation`,
+thin `ziggurat lineup` CLI). Import direction is the established `core→league→data`;
+neither imports `draft/` (Rule 8).
+
+**The shaping recon finding is the same flat-rate feed 3.2 found, and it forks the whole
+item.** The 2026 projections are a flat SEASON RATE (median week-to-week CV ~1% for skill
+positions; D/ST the only real mover at ~12%), which has two consequences: (1) a bare "rank
+D/STs by projected house points" is a season-long defense ranking wearing a streaming
+label — it names the same defense every week — so the streaming ranker's **opponent-quality
+tilt is the load-bearing signal**; and (2) the feed carries no per-week dispersion, so the
+win-probability model's **variance is measured off historical realised scoring** (nflverse
+2021-2025 REG re-scored through `scoring.py`, per-(player|team)-season, ≥8 games, OLS of
+weekly σ on weekly mean) and frozen as `DEFAULT_VARIANCE` — a labelled hypothesis with its
+cohort + R² quoted in every reason (Rule 6), kept OUT of `scoring.py` (Rule 2: σ
+parametrises a downstream win-prob model, it is not a scoring quantity). Fits: RB(2.25,0.395
+R²0.70) WR(2.16,0.421 R²0.72) TE(1.43,0.503 R²0.77); QB/DST ~flat as expected; **K σ=3.5 a
+PURE hypothesis** (`weekly_stats` carries no FG line — unmeasurable locally); **QB↔own
+pass-catcher ρ=+0.35 unmeasured** (the strongest "correlated starts" underdog lever). All
+Phase-4-tunable.
+
+The decision: `P(win) = Φ((mu(L)−mu_opp)/√(var(L)+var_opp))` (Φ via stdlib `erf`), `var(L) =
+Σσ² + 2Σρσσ` with ρ≠0 only for a QB + own-team pass-catcher. Seat the greedy E-points lineup;
+inside a close band `c = max(5, 0.3·√var)` return it verbatim (points-for is the league
+tiebreaker); outside it, hill-climb legal single swaps maximising the win-prob z-score,
+capped at a 2.0-pt E(points) sacrifice. Underdog promotes ceilings/keeps stacks, favorite
+promotes floors/breaks stacks — from `dz/dvar`'s sign, no special case. **Done-when 1 met**
+on a synthetic near-tie flex contest (floor RB vs boom TE): `opponent_total=own−20` seats the
+floor (FAVORITE), `own+20` seats the boom (UNDERDOG), and the **starter sets differ** (the
+load-bearing assertion, not a label change). Slot-lock is a **points-neutral relabel** over
+`fill_lineup` (latest-locking flex-eligible player → FLEX, total+starters byte-identical),
+keyed generically on tz-aware ET kickoff (2026 opener is a *Wednesday*). GTD takes a
+keyword-only `now` (decision clock, separate from the `as_of` data gate): `status_known_by =
+kickoff−90min`, a later-locking alternative is a "safe wait" → a lock-time-ordered
+contingency, not a point pick. `assert_no_illegal_starters` **hard-raises** on a seated
+bye/live-OUT player (gated through `live_status_from` so preseason tags don't bench studs).
+
+Streaming: `house_points` is **verbatim** from `weekly_lines` (the same `scoring.py` spine
+marginal uses); `stream_score = house_points × Π(bounded labelled multipliers)`, disclosed as
+"matchup-adjusted (HYPOTHESIS — not house scoring)". Opponent-quality is the primary tilt;
+**Vegas is context-only + leakage-fenced** (`game_odds.knowable=gameday`, so a Tue/Wed waiver
+read sees no line and discloses "line not yet posted" — never `latest_truth` in the live
+path); weather is the **demonstrable done-when** (same K, calm vs windy → different rank), run
+on injected synthetic rows since `game_weather` is empty live. Refuse-and-disclose (never
+phantom-zero) for bye/OUT/unpriceable; `lineup_support` seats your rostered K/DST and surfaces
+the ranker's pick as an optional upgrade note (never an implicit add/drop).
+
+Three verified workflows (recon 7 agents → build+green-gate → 8-dimension adversarial audit
+with per-finding refute-first verification, 16 agents). **The audit found the seam clean (no
+leakage, no rules/boundary violations) and 8 real defects (2 major), all fixed; the two
+highest-value fixes are mutation-verified.** Headline: **bye-week teams polluted the
+opponent-quality reference** — a fully-bye team entered the reference at 0.0 and was not
+filtered, inflating its pstdev ~3.5× (2026 wk5: 6.22→21.58) and collapsing the `tanh(z)` tilt
+toward zero, **disabling the streaming module's primary signal exactly on the bye weeks when
+streaming matters most**, plus printing a false "league average" the novice can't smell (fixed
+by restricting the reference + printed average to teams playing this week). Also: the Vegas
+home/away sign (correct, but a future inversion shipped green — now three tests, inversion
+fails them); the GTD contingency wasn't `now`-gated (a live swap shown after a slot locked →
+`window_closed`); an all-dome slate raised a false "DEGRADED weather" banner (split into
+`weather_readable` = a row existed vs `weather_available` = an adjustment applied); and four
+coverage gaps (correlation cross-term, μ-cap binding, GTD gamble branch, D/ST weather bump)
+each now load-bearing-tested. Suite green (**1364 passed, 4 skipped**; +14). Deferrals
+(archetype `k_p`, all adjustment magnitudes, close-band/cap widths, live inactives+weather,
+playoff-week opponent) recorded in the design note. Details:
+gitignored `intel/research/lineup-streaming-3.5-design.md`.
 
 ### 3.6 [Build] Push layer
 **Goal:** Post-waiver-window morning scan + briefing (scheduled just after ESPN's overnight processing, surfacing FCFS grabs at breakfast), event-triggered alerts from the news speed lane (starter down → handcuff available), all headless via the routing interface on the Strix Halo.

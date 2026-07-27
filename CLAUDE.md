@@ -363,6 +363,50 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   Details: `IMPLEMENTATION_PLAN.md` 3.4 + gitignored
   `intel/research/waiver-3.4-design.md`.
 
+- **3.5 lineup support & streaming — built, audited & fixed 2026-07-26.** Two new
+  **permanent** core modules, pure composition over existing as-of accessors (no
+  migration, `schema_version` stays 7): `core/streaming.py` (D/ST + K streaming ranker,
+  `ziggurat stream`) and `core/lineup_support.py` (weekly starter recommender — win-prob
+  variance posture + slot-lock + GTD + inactives, `ziggurat lineup`). `core→league→data`;
+  never `draft/` (Rule 8). **The shaping fact is 3.2's flat-rate feed, and it forks the
+  item:** projections are a flat SEASON RATE (skill CV ~1%, D/ST ~12%), so (1) a bare
+  points-ranked D/ST is a season-long ranking wearing a streaming label — hence the
+  ranker's **opponent-quality tilt is the load-bearing signal**; and (2) the feed carries
+  no per-week dispersion, so the win-prob model's **variance is MEASURED off historical
+  realised scoring** (nflverse 2021-2025 REG re-scored through `scoring.py`, per-unit ≥8
+  games, OLS σ-on-mean) and frozen as `DEFAULT_VARIANCE` — a labelled hypothesis with its
+  cohort/R² quoted in every reason (Rule 6), kept OUT of `scoring.py` (Rule 2: σ is a
+  dispersion prior, not a scoring number). K σ is a PURE hypothesis (no FG line in
+  `weekly_stats`); QB↔own-pass-catcher ρ=+0.35 is unmeasured (the strongest underdog
+  "correlated starts" lever). The decision is `P(win)=Φ((mu−mu_opp)/√(var+var_opp))` with a
+  close-band that returns the greedy points lineup verbatim (points-for tiebreaker) and,
+  outside it, a hill-climb over legal single swaps capped at a 2-pt E(points) sacrifice;
+  underdog promotes ceilings, favorite floors — from `dz/dvar`'s sign. **Done-when 1 met:**
+  opponent swing −20→+20 flips the seated STARTER SET (floor↔boom), not just a label.
+  Slot-lock is a **points-neutral relabel** over `fill_lineup` (latest-locking → FLEX,
+  keyed generically on ET kickoff — 2026 opener is a *Wednesday*); GTD takes a keyword-only
+  `now` decision clock (separate from the `as_of` data gate) and emits a lock-time-ordered
+  contingency, not a point pick; `assert_no_illegal_starters` hard-raises on a seated
+  bye/live-OUT player. Streaming prices `house_points` VERBATIM through `weekly_lines`
+  (the same spine marginal uses); `stream_score` is a separately-**labelled non-house**
+  multiplier; **Vegas is context-only + leakage-fenced** (`game_odds.knowable=gameday`, so
+  a Tue/Wed read discloses "line not yet posted" — never `latest_truth` live); weather is
+  the demonstrable done-when on injected synthetic rows (`game_weather` empty live). Three
+  verified workflows (recon 7 → build+green-gate → 8-dimension refute-first audit, 16
+  agents). **The audit found the seam clean (no leakage/rules violations) and 8 real
+  defects (2 major), all fixed, the two highest-value mutation-verified. Headline: bye-week
+  teams polluted the opponent-quality reference** — a fully-bye team entered at 0.0 and was
+  not filtered, inflating pstdev ~3.5× (2026 wk5: 6.22→21.58) and collapsing the tilt
+  toward zero, **disabling the streaming module's PRIMARY signal exactly on the bye weeks
+  when streaming matters most**, plus printing a false "league average" (fixed: reference +
+  average restricted to teams playing this week). Also fixed: the Vegas home/away sign had
+  no correctness test (a future inversion shipped green — now mutation-caught); the GTD
+  contingency wasn't `now`-gated (a live swap shown after a slot locked → `window_closed`);
+  an all-dome slate raised a false "DEGRADED weather" banner (`weather_readable` split from
+  `weather_available`); and four coverage gaps each now load-bearing-tested. Suite green
+  (**1364 passed, 4 skipped**; +14). Details: `IMPLEMENTATION_PLAN.md` 3.5 + gitignored
+  `intel/research/lineup-streaming-3.5-design.md`.
+
 **Two standing rules this item paid for, both about process rather than code:**
 **(1) The systemd timers run `ziggurat` from the working tree, so uncommitted
 code is the production cadence.** `db/ziggurat.sqlite` reached `schema_version 7`
