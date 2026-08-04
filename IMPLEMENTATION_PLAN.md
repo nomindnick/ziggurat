@@ -2061,6 +2061,29 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 > journal) needs a drafted roster; final verification is a fresh-session run
 > the first in-season Tuesday, under Checkpoint 3. Suite green (1435 passed,
 > 4 skipped; +4).
+>
+> **Fresh-session run, same day (2026-08-04):** an Opus subagent given the bare
+> operator instruction "Run the Tuesday workflow" executed it end-to-end from
+> CLAUDE.md alone — preflight, legality precheck (legal, pre-draft empty),
+> recommendation (queue nothing), journal (`intel/weekly/2026-wk00.md`) — and
+> returned six friction findings, all doc-fixed the same day. The two that
+> would bite on a real in-season Tuesday: **(b)** step 4 ("queue every
+> positive-marginal claim") was unexecutable with step 2's command — the
+> default `--claim-budget 3` TRUNCATES each claim list and nothing prints past
+> it (Tuesday now quotes `--claim-budget 10` plus an explicit
+> re-run-deeper-if-the-last-claim-is-positive rule); **(c)** the preflight's
+> "'empty' is healthy" made a push layer that has NEVER RUN read as healthy —
+> the actual string `no push runs recorded yet` means not-installed/no
+> `NTFY_TOPIC`, and tomorrow's Wednesday step 1 has no briefing until it is
+> (the preflight now branches to `scripts/install-push.sh`). The cheap fixes:
+> **(a)** `candidates` exits pre-season with "no REG week is fully played" while
+> the doc claimed all commands run (now the stated exception, step 3 skipped
+> pre-Week-1); **(d)** the journal naming had no preseason slot (now
+> `<season>-wk00.md`); **(e)** a zero-action Tuesday's journaling was ambiguous
+> between two defensible behaviors (now explicit: the decision not to act is
+> journaled and retro-graded); **(f)** run timestamps print UTC, so "did
+> today's sync land" is now keyed to the `snapshot <date>` line. In-season
+> fresh-session re-verification stays under Checkpoint 3.
 
 ### ✦ Checkpoint 3: Week 1 live shakedown
 Operate the full loop through NFL Week 1 for real. Journal every friction, wrong output, and manual workaround; validate `scoring.py` against actual ESPN box scores (the anchored TODO from 1.3); fix and amend the plan.

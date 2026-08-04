@@ -468,10 +468,13 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   the decision log AND the Monday retro. The cadence section is treated as an
   interface, not prose: `tests/test_operating_cadence.py` resolves every quoted
   `ziggurat` invocation + flag against the real CLI, so a renamed command rots
-  loudly. Done-when verified pre-draft only (commands run and disclose
-  empty-roster reality); the true end-to-end Tuesday needs a drafted roster —
-  final verification is a fresh-session run the first in-season Tuesday
-  (Checkpoint 3). Suite green (**1435 passed, 4 skipped**).
+  loudly. Done-when exercised same day by a fresh Opus subagent running the
+  bare instruction "Run the Tuesday workflow": executed end-to-end pre-draft,
+  six friction findings, all doc-fixed same day — the two that would have bitten
+  in-season were the truncating default `--claim-budget` (step 4 was
+  unexecutable as quoted) and a never-installed push layer reading as healthy
+  (`no push runs recorded yet` ≠ healthy-empty). In-season re-verification
+  under Checkpoint 3. Suite green (**1435 passed, 4 skipped**).
 
 Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
 (monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).
@@ -646,9 +649,12 @@ by writing what was decided and why to the week's journal.
 
 **Journal discipline:** one file per NFL week at `intel/weekly/<season>-wkNN.md`,
 created from `intel/weekly/week-TEMPLATE.md` when the week's first decision is
-made. Log decisions the day they happen; Monday grades them on **process, not
-outcome** (correct-but-unlucky is variance, not error — and wrong-but-lucky is
-still wrong).
+made (preseason dry-runs, when no NFL week exists yet, journal to
+`<season>-wk00.md`). Log decisions the day they happen — **a workflow that
+decided to do nothing is still journaled as that decision**, and gets
+retro-graded like any other. Monday grades on **process, not outcome**
+(correct-but-unlucky is variance, not error — and wrong-but-lucky is still
+wrong).
 
 **Every workflow starts with the same preflight:**
 
@@ -662,23 +668,37 @@ Missing league days go in the journal (that history is gone — item 3.1). A
 source that `ingest status` calls stale and that feeds today's decision gets
 disclosed alongside the recommendation, not silently priced through.
 
+Two output notes: (1) `'empty' is healthy` refers to empty alert TICKS — the
+distinct string `no push runs recorded yet` means the push layer has never run
+on this box (not installed, or `NTFY_TOPIC` unset; see `scripts/install-push.sh`
+under Dev workflow). Until that is fixed, Wednesday step 1 has no briefing to
+read — journal that, don't treat the silence as healthy. (2) Run timestamps
+print in UTC; judge "did today's sync land" by the `snapshot <date>` line, not
+the run timestamp — UTC rolls past midnight hours before a Pacific evening does.
+
 ### Tuesday — roster legality + waiver claims
 1. Preflight. If today's league sync hasn't landed, run
    `.venv/bin/ziggurat league sync` — Tuesday reads today's rosters.
-2. `.venv/bin/ziggurat waivers --reasons`. The roster-legality precheck runs
-   FIRST and is the point: ESPN blocks ALL transactions while a roster is
-   illegal, and Tuesday's league-wide status reset is exactly when an IR-slot
-   occupant flips Out → Questionable and breaks legality. On a refusal: relay
-   the proposed fix (usually a costless IR move) to the operator, re-sync
-   after they apply it, re-run.
+2. `.venv/bin/ziggurat waivers --reasons --claim-budget 10` — the deeper
+   budget is deliberate: the cap TRUNCATES each claim list and nothing prints
+   past it, so Tuesday (when claims are free) never runs at the quick-scan
+   default of 3. The roster-legality precheck runs FIRST and is the point:
+   ESPN blocks ALL transactions while a roster is illegal, and Tuesday's
+   league-wide status reset is exactly when an IR-slot occupant flips
+   Out → Questionable and breaks legality. On a refusal: relay the proposed
+   fix (usually a costless IR move) to the operator, re-sync after they apply
+   it, re-run.
 3. Cross-reference `.venv/bin/ziggurat candidates --reasons` for the breakout
    context behind each add. Where the two disagree, surface the disagreement —
    never smooth it over.
 4. Recommend the final claim list with drops. Claims are free: queue every
-   positive-marginal claim, not just the `--claim-budget` shortlist. The
-   operator submits in the app before the overnight batch.
+   positive-marginal claim shown — and if the LAST claim listed is still
+   clearly positive, re-run with a deeper `--claim-budget` (the list may be
+   truncated, not exhausted). The operator submits in the app before the
+   overnight batch.
 5. Journal each claim: add, drop, the tool's stated reasons verbatim, and what
-   would make it wrong.
+   would make it wrong. A no-claim Tuesday is journaled as the decision not to
+   claim.
 
 ### Wednesday — post-waiver scan
 1. The 06:00 PT briefing (timer) is on the phone; the full text is in
@@ -731,10 +751,13 @@ Distill the accumulated journals into `intel/rest_of_season_priors.md`
 tendencies, calibration notes. Raw journals stay archived out of the default
 reading path.
 
-**Before Week 1** (pre-draft/preseason) the commands all run but disclose
-empty-roster reality honestly (`waivers` prints "no roster rows at this
-as-of", `lineup` seats a greedy empty-context lineup). That is correct, not
-broken; the cadence starts for real the Tuesday after the draft.
+**Before Week 1** (pre-draft/preseason): `waivers`, `lineup`, `marginal`, and
+`stream` run but disclose empty-roster reality honestly (`waivers` prints "no
+roster rows at this as-of", `lineup` seats a greedy empty-context lineup) —
+correct, not broken. `candidates` is the exception: it EXITS with "no REG week
+is fully played and knowable" until a real week completes, so Tuesday step 3
+and any other `candidates` step is skipped before Week 1. The cadence starts
+for real the Tuesday after the draft.
 
 ## Heuristics promotion criteria
 
