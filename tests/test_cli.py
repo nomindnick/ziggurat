@@ -182,6 +182,10 @@ def test_valuation_espn_value_view(tmp_path, monkeypatch):
     monkeypatch.setenv("SWID", "{TEST-SWID}")
     monkeypatch.setenv("ESPN_S2", "test-s2-cookie")
     raw_players = json.loads(_ESPN_FIXTURE.read_text())
+    # Pin the CLI's "today" to the fixture date: `ensure_board` only live-pulls
+    # when as_of >= today, and a hard-coded as_of silently becomes "the past"
+    # once the wall clock passes it (this test broke exactly that way).
+    monkeypatch.setattr(main_module, "_today", lambda: "2026-08-01")
     with patch.object(espn_source, "fetch_player_universe", return_value=raw_players) as fetch:
         result = runner.invoke(
             app,
