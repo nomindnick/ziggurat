@@ -1,0 +1,30 @@
+# Ziggurat morning-briefing schedule (item 3.6) — systemd USER timer.
+#
+# ONCE A WEEK, Wednesday 06:00 box-local. Timing rationale (recon R5): ESPN
+# processes waiver claims ~03:00-04:30 ET Wednesday. THIS BOX runs on Pacific
+# time (America/Los_Angeles), so systemd OnCalendar= times are PT: 03:00-04:30 ET
+# is 00:00-01:30 PT, and the existing league-sync 05:15 PT run already lands well
+# after the batch. 06:00 PT gives a ~45-minute buffer past that sync's
+# RandomizedDelaySec + run time, so the briefing normally reads a same-morning
+# post-waiver snapshot. The staleness banner in the briefing discloses it loudly
+# if the snapshot is nonetheless stale (a failed/late sync) — the banner, not the
+# wall-clock buffer, is the real robustness mechanism.
+#
+# Alerts run on a SEPARATE, frequent timer (ziggurat-alerts.timer) — the briefing
+# is a weekly digest; alerts need continuous monitoring.
+
+[Unit]
+Description=Ziggurat morning-briefing schedule (Wednesday post-waiver)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=Wed *-*-* 06:00:00
+# Persistent: if the machine was asleep/off at 06:00, run at the next opportunity
+# rather than skipping the week's briefing entirely.
+Persistent=true
+RandomizedDelaySec=300
+AccuracySec=1m
+Unit=ziggurat-brief.service
+
+[Install]
+WantedBy=timers.target

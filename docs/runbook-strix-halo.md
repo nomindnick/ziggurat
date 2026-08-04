@@ -231,6 +231,43 @@ systemctl --user start ziggurat-league-sync.service
 .venv/bin/ziggurat league status     # confirm the gap is only the days you lost
 ```
 
+### The push layer — briefing + alerts to your phone (item 3.6)
+
+One-time setup on the desktop:
+
+```bash
+# 1. Pick a HIGH-ENTROPY ntfy topic (the topic name IS the password on ntfy.sh).
+#    Put it in .env (never committed, never logged — treat it like SWID):
+#      NTFY_TOPIC=zig-<32 random chars>
+#      NTFY_SERVER=https://ntfy.sh        # optional; this is the default
+#      NTFY_TOKEN=tk_...                  # optional; only for a reserved/self-hosted topic
+# 2. Install the ntfy app on your phone and SUBSCRIBE to that topic string.
+# 3. Install the timers (Wed 06:00 briefing + a 20-min alert tick, both Pacific):
+scripts/install-push.sh
+loginctl enable-linger "$USER"           # or the timers die at logout
+
+# Test without pushing / without spending an LLM call:
+.venv/bin/ziggurat brief run  --no-push --no-llm
+.venv/bin/ziggurat alerts run --no-push
+# Then a real one:
+systemctl --user start ziggurat-brief.service
+.venv/bin/ziggurat brief status          # last briefing runs (silence is not success)
+.venv/bin/ziggurat alerts status         # last alert ticks ('empty' is HEALTHY)
+```
+
+The **outbound scrub** is what makes the cheap public-topic config safe: a colleague's
+team name can never cross to ntfy even on a world-readable topic (the teaser is built
+from counts + public player names + your own team only, and a data-driven denylist
+refuses anything else). If you want real transport privacy too, the upgrade is
+`.env`-only, no code change: **self-host ntfy on the desktop behind Tailscale** (deny-all
++ token, `NTFY_SERVER` = the tailnet URL) or an **ntfy.sh Pro reserved topic**.
+
+The briefing writes the full markdown to gitignored `intel/weekly/briefings/` regardless
+of whether the LLM prose or the ntfy push succeed — a token hiccup or a dead topic never
+costs you the underlying facts. `injury_transitions` (the live injury→handcuff arm)
+produces nothing until real games start; the news wire and the briefing are useful before
+then, the alert arm proves out in Week 1.
+
 ---
 
 ## 6. Things that will bite

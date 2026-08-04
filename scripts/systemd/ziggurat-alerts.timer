@@ -1,0 +1,28 @@
+# Ziggurat event-alert schedule (item 3.6) — systemd USER timer.
+#
+# EVERY 20 MINUTES, 06:00-23:00 box-local (Pacific). Rationale (recon R5): ntfy
+# pushes go straight to the phone, so a 3 AM push for a minor status change is bad
+# UX; the daytime window matches when the operator would act. The interval is a
+# placeholder inside the operator's 15-30 min band; it mainly governs news-wire
+# latency (injury transitions land at the league-sync grain, 4x/day, regardless).
+#
+# SEPARATE from the once-a-week briefing timer, deliberately: the briefing is a
+# digest, alerts are continuous monitoring, and an alert-push failure must never
+# be able to disturb the briefing (or vice versa).
+
+[Unit]
+Description=Ziggurat event-alert schedule (every 20 min, daytime)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=*-*-* 06..23:00/20:00
+# Persistent is harmless at this cadence on an always-on box; keep it for fleet
+# consistency. A missed tick is not a loss — the next tick recomputes from state,
+# and the dedup ledger means nothing double-pushes.
+Persistent=true
+RandomizedDelaySec=60
+AccuracySec=1m
+Unit=ziggurat-alerts.service
+
+[Install]
+WantedBy=timers.target

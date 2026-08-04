@@ -420,6 +420,44 @@ neither `ziggurat.sqlite.bak-v7` nor `.sqlite.gz`, in `.gitignore` *and* in
 `repo_guard.py`, so a database backup full of league-private data cleared two of
 the three. Both widened; a boundary pattern is now assumed narrow until tested.
 
+- **3.6 push layer — built, audited & fixed 2026-07-30. The FIRST live LLM
+  backend.** Everything through 3.5 was deterministic; 3.6 implements `claude_cli`
+  (headless `claude -p` on the Max subscription) as the one sanctioned model
+  shell-out (Rule 4). Two scheduled deliverables + plumbing: `ziggurat brief run`
+  (Wed 06:00 PT) composes waiver+lineup+signals+alerts into a two-minute briefing
+  (`core/briefing.py`, pure), writes the full markdown to gitignored
+  `intel/weekly/briefings/`, asks the router (`morning_briefing`→claude_cli→sonnet)
+  for the prose, and pushes an **allowlist-safe teaser** (counts+legality+week, NO
+  names) to a private **ntfy.sh** topic; `ziggurat alerts run` (every 20 min) pulls
+  the **ESPN news wire** (`data/nfl/news.py`, `athleteId==players.espn_id` direct
+  join), computes alert-worthy events (`core/alerts.py`, pure: starter down → his
+  handcuff on waivers; news on an owned/rosterable player), dedups, and pushes the
+  top few. New permanent `ziggurat/push/` package is the **egress choke point**:
+  the Rule-5 **outbound scrub** (a data-driven denylist of this league's other-team
+  names, checked before any send — the guarantee that makes a public-by-obscurity
+  topic safe), the run-log/dedup helpers, and the orchestration. `marginal.handcuff_links()`
+  reuses the existing depth kernel + `DEFAULT_HANDCUFFS` hypothesis (Rule 2, not
+  reinvented). Migration `008` (`schema_version` 8: `player_news`/`player_news_links`
+  fact tables + `push_runs`/`alert_ledger` operational tables) was iterated on a
+  scratch DB and only moved into `db/migrations/` once final. **Done-when met on
+  REAL preseason data** (Kittle OUT → handcuff Tonges FA surfaced through the whole
+  pipeline; the claude_cli prose is genuinely good), though `injury_transitions` is
+  synthetic-tested only until Week 1. **36-agent adversarial audit: seam clean; 19
+  confirmed + 5 plausible defects, all fixed** — headline was **dry-run ledger
+  poisoning** (a `--no-push` preview reserved the dedup ledger and permanently
+  suppressed the real push; rewritten to publish-then-record). Also fixed: the
+  scrub over-blocked on substring (→ word-boundary) and missed the title/tags
+  headers; news `knowable_as_of` was UTC-truncated (→ bucketed in the box's Pacific
+  calendar); an injury vacancy was wrongly bye-suppressed; the env scrub missed
+  `ANTHROPIC_AUTH_TOKEN`/`_BASE_URL`/`CLAUDE_CONFIG_DIR`. Suite green (**1435
+  passed**). Details: `IMPLEMENTATION_PLAN.md` 3.6 + gitignored
+  `intel/research/push-layer-3.6-design.md`. **Standing lesson this item paid for:
+  a dedup/idempotency ledger must be written ONLY after a real side effect
+  (publish-then-record) — reserving before the effect means a preview/dry-run, or a
+  transient failure, silently consumes the event.** Remaining before it earns its
+  keep: an OPERATOR step (`NTFY_TOPIC` in `.env`, install the ntfy app, run
+  `scripts/install-push.sh`) + real games (~Sept 10).
+
 Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
 (monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).
 
@@ -476,7 +514,10 @@ ziggurat/            the Python package (deterministic tools)
   core/              scoring.py (single source of truth), valuation, signals
   league/            league state sync (source/state/sync), opponent layer, Monte Carlo
   draft/             DELETABLE draft tool (Phase 2, deleted after draft day)
-  llm/               the LLM routing interface (router.py, backends.py)
+  push/              scheduled briefing/alert delivery (item 3.6): outbound.py is
+                     the ntfy egress choke point + Rule-5 scrub; runs.py = run-log +
+                     dedup ledger; run.py orchestrates (imports core, never vice versa)
+  llm/               the LLM routing interface (router.py, backends.py — claude_cli live)
   cli/               thin Typer commands — no logic
   net.py             shared network bounding (bounded_socket / HTTP_TIMEOUT)
   repo_guard.py      public-repo boundary patterns (shared by hook + tests)
@@ -508,11 +549,17 @@ git config core.hooksPath scripts/hooks   # per clone, required
 # in-season, on the machine that runs the cadence, once each:
 scripts/install-league-sync.sh            # item 3.1 — systemd user timer, 4x/day
 scripts/install-nfl-ingest.sh             # item 3.1b — daily / weekly / gameday timers
+scripts/install-push.sh                   # item 3.6 — Wed briefing + 20-min alert tick
 # re-run install-league-sync.sh on any box where it is ALREADY installed: the 3.1b
 # audit corrected that unit's no-op After=network-online.target and its restart limiter.
+# install-push.sh needs NTFY_TOPIC in .env (a high-entropy string = the topic password);
+# the outbound scrub is what keeps a public topic safe. Test first without pushing:
+#   ziggurat brief run --no-push --no-llm   ;   ziggurat alerts run --no-push
 loginctl enable-linger "$USER"            # or every timer dies at logout
 .venv/bin/ziggurat league status          # last run + UNRECOVERABLE missing days
 .venv/bin/ziggurat ingest status          # per-source last successful pull + staleness
+.venv/bin/ziggurat brief status           # item 3.6 — last briefing runs
+.venv/bin/ziggurat alerts status          # item 3.6 — last alert ticks ('empty' is healthy)
 
 # before any first/manual NFL pull, see the plan without touching the network:
 .venv/bin/ziggurat ingest run --dry-run

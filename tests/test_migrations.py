@@ -49,7 +49,7 @@ from ziggurat.paths import MIGRATIONS_DIR, SCHEMA_PATH
 
 #: Bump with every migration. A literal, not a computed value: if this file
 #: derived the number from the directory it would agree with any mistake.
-LATEST_SCHEMA_VERSION = 7
+LATEST_SCHEMA_VERSION = 8
 
 #: sha256 of every shipped migration. Pinned as literals for the reason spelled
 #: out in `test_an_applied_migration_is_never_edited` — this is the guard against
@@ -68,6 +68,8 @@ MIGRATION_DIGESTS: dict[str, str] = {
         "d50729ea3e8c25d72b890546bb2b15dc78b72403032e43e0cc0668505a2c8ab6",
     "007_backfill_and_depth_charts.sql":
         "c207a857f0e6304be3dcfce1e73248dacb0f735d53af1c0e1eb5dce614163448",
+    "008_push_layer.sql":
+        "5e6c32ebd7dbe4c9115dfed931a64afd0a7bfc69b0977d51364b092bc7934dd4",
 }
 
 #: The doctrine, printed by the test that enforces it. Long on purpose: the next

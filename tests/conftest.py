@@ -28,6 +28,18 @@ def db():
 
 
 @pytest.fixture()
+def push_db():
+    """A full-schema in-memory DB for the item-3.6 push-layer tests (schema 8+
+    includes player_news / player_news_links / push_runs / alert_ledger).
+    Currently identical to `db`; kept as a distinct name so the push tests read
+    clearly and so a future push-only seed can hang off it."""
+    conn = connect(":memory:")
+    apply_schema(conn)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture()
 def nfl_fixture():
     """Return the loader so a test can pull any captured source frame by name."""
     return load_nfl_fixture

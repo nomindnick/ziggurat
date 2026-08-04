@@ -1226,6 +1226,34 @@ def _prune_pool(pool: Sequence[_Entry], limit: int | None) -> list[_Entry]:
     return list(keep.values())
 
 
+def _rank_depth_chart(
+    lines, weeks: Sequence[int]
+) -> dict[tuple[str | None, str], list[tuple[float, str, object]]]:
+    """Group priced players by ``(team, position)`` among ``_HANDCUFF_POSITIONS``
+    and rank each group by remaining-window house projection (rank 1 = starter,
+    rank 2 = his handcuff). A zero-or-negative total is not a depth-chart member
+    (no forecast — the coverage-not-sum discipline).
+
+    THE SHARED KERNEL behind ``_depth_links`` (the board's entry-keyed handcuff
+    links) and ``handcuff_links`` (the identity-keyed public wrapper the item-3.6
+    alert path consumes). Extracting it keeps the two from drifting onto two
+    different depth orderings.
+    """
+    depth: dict[tuple[str | None, str], list[tuple[float, str, object]]] = {}
+    for pkey, line in lines.items():
+        if line.position not in _HANDCUFF_POSITIONS or line.team is None:
+            continue
+        total = sum(line.points.get(w, 0.0) for w in weeks)
+        if total <= 0.0:
+            continue
+        depth.setdefault((line.team, line.position), []).append(
+            (total, str(line.player or pkey), pkey)
+        )
+    for ranked in depth.values():
+        ranked.sort(key=lambda t: (-t[0], t[1]))
+    return depth
+
+
 def _depth_links(lines, entries: Mapping[str, _Entry],
                  weeks: Sequence[int]) -> tuple[dict[str, str], dict[str, tuple]]:
     """v1 handcuff link: same team + same position, ordered by remaining-window
@@ -1246,16 +1274,7 @@ def _depth_links(lines, entries: Mapping[str, _Entry],
 
     Returns ``(starter_key -> backup_key, backup_key -> (starter_name, on_roster))``.
     """
-    depth: dict[tuple[str | None, str], list[tuple[float, str, object]]] = {}
-    for pkey, line in lines.items():
-        if line.position not in _HANDCUFF_POSITIONS or line.team is None:
-            continue
-        total = sum(line.points.get(w, 0.0) for w in weeks)
-        if total <= 0.0:
-            continue
-        depth.setdefault((line.team, line.position), []).append(
-            (total, str(line.player or pkey), pkey)
-        )
+    depth = _rank_depth_chart(lines, weeks)
 
     by_proj_key = {}
     for k, e in entries.items():
@@ -1266,8 +1285,7 @@ def _depth_links(lines, entries: Mapping[str, _Entry],
 
     links: dict[str, str] = {}
     detail: dict[str, tuple] = {}
-    for ranked in depth.values():
-        ranked.sort(key=lambda t: (-t[0], t[1]))
+    for ranked in depth.values():  # already ranked by _rank_depth_chart
         if len(ranked) < 2:
             continue
         starter_total, starter_name, starter_pkey = ranked[0]
@@ -1280,6 +1298,110 @@ def _depth_links(lines, entries: Mapping[str, _Entry],
             links[starter_key] = backup_key
         detail[backup_key] = (starter_name, starter_key, starter_total, backup_total)
     return links, detail
+
+
+@dataclass(frozen=True)
+class HandcuffLink:
+    """One ``(team, position)`` starter -> handcuff pair, keyed by PLAYER IDENTITY
+    (espn/gsis) rather than the board's internal entry keys, for the item-3.6
+    alert path: when a starter is ruled OUT, who is his rank-2 backup and what is
+    that backup worth as insurance. ``uplift`` is the DEFAULT_HANDCUFFS labelled
+    hypothesis (Rule 2: the number is not invented here, it is the measured
+    within-pair event-study value); ``reasons`` carry its source/CI/n and hedges
+    (Rule 6)."""
+
+    team: str
+    position: str
+    starter_name: str
+    starter_espn_id: str | None
+    starter_gsis_id: str | None
+    backup_name: str
+    backup_espn_id: str | None
+    backup_gsis_id: str | None
+    uplift: float
+    reasons: tuple[str, ...]
+
+
+def _handcuff_link_reasons(starter_name, position, uplift, handcuffs: HandcuffModel):
+    """The insurance sentence for the alert context (a standalone sibling of
+    ``_handcuff_reason``, which is _Entry-bound). Ships the hypothesis label,
+    sample size, CI and the ~54% single-handcuff hedge (Rule 6)."""
+    if uplift <= 0.0:
+        return ()
+    lo, hi = handcuffs.ci.get(position, (0.0, 0.0))
+    n = handcuffs.pairs_n.get(position, 0)
+    out = [
+        f"if {starter_name} misses TIME (after an Out week only ~29% of players are "
+        f"back the next week, ~38% never return that season), players in this role "
+        f"have scored {uplift:+.1f} house pts/wk more than when their starter plays "
+        f"({handcuffs.label}, n={n} pairs, 95% CI {lo:+.1f} to {hi:+.1f})",
+        "naming one handcuff is right ~54% of the time (the 2nd and 3rd backup "
+        "together cover ~77%), so treat the link itself as a guess",
+    ]
+    spread = handcuffs.workload_spread.get(position)
+    if spread:
+        out.append(
+            f"this board does not know whether {starter_name} is a bellcow or in a "
+            f"committee — the uplift runs {spread[0]:+.1f} (committee) to "
+            f"{spread[1]:+.1f} (bellcow), so treat the number as a range"
+        )
+    return tuple(out)
+
+
+def handcuff_links(
+    conn,
+    *,
+    as_of,
+    season: int,
+    weeks: Sequence[int] | None = None,
+    last_week: int = 17,
+    source: str = "sleeper_rotowire",
+    handcuffs: HandcuffModel = DEFAULT_HANDCUFFS,
+    view: base.AsOfView = "historical",
+) -> list[HandcuffLink]:
+    """The public, identity-keyed handcuff resolver the item-3.6 alert path calls
+    instead of reaching into the private ``_depth_links`` OR re-implementing the
+    QB/RB/TE gate and the uplift hypothesis (Rule 2/8-clean reuse).
+
+    Reuses ``weekly_lines`` (the ONE pricing spine) and the same
+    ``_rank_depth_chart`` kernel ``_depth_links`` uses, so the alert path can
+    never drift onto a different depth ordering or an invented score. Raises
+    ``WeekResolutionError`` preseason (``resolve_weeks``); the caller degrades
+    ("grab decision stays valid; pricing unavailable") rather than crashing the
+    alert tick.
+    """
+    if weeks is None:
+        weeks = resolve_weeks(conn, as_of=as_of, season=season, last_week=last_week, view=view)
+    weeks = list(weeks)
+    lines = weekly_lines(conn, as_of=as_of, season=season, weeks=weeks, source=source, view=view)
+    depth = _rank_depth_chart(lines, weeks)
+
+    out: list[HandcuffLink] = []
+    for (team, position), ranked in depth.items():
+        if len(ranked) < 2:
+            continue
+        _starter_total, _starter_name, starter_key = ranked[0]
+        _backup_total, _backup_name, backup_key = ranked[1]
+        starter = lines[starter_key]
+        backup = lines[backup_key]
+        uplift = handcuffs.uplift_for(position)
+        out.append(
+            HandcuffLink(
+                team=team,
+                position=position,
+                starter_name=starter.player or str(starter_key),
+                starter_espn_id=starter.espn_id,
+                starter_gsis_id=starter.gsis_id,
+                backup_name=backup.player or str(backup_key),
+                backup_espn_id=backup.espn_id,
+                backup_gsis_id=backup.gsis_id,
+                uplift=uplift,
+                reasons=_handcuff_link_reasons(
+                    starter.player or str(starter_key), position, uplift, handcuffs
+                ),
+            )
+        )
+    return out
 
 
 # --------------------------------------------------------------------- reasons

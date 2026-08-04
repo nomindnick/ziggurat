@@ -79,6 +79,9 @@ from ziggurat.league.state import (
 from ziggurat.league.sync import format_run, format_status, run_sync
 from ziggurat.llm import Router
 from ziggurat.paths import DEFAULT_DB_PATH, REPO_ROOT
+from ziggurat.push import outbound
+from ziggurat.push import runs as push_runs
+from ziggurat.push.run import run_alert_tick, run_briefing
 from ziggurat.scaffold import ensure_intel_tree
 
 app = typer.Typer(
@@ -1062,6 +1065,119 @@ def ingest_coverage(
     finally:
         conn.close()
     typer.echo(format_coverage(rows))
+
+
+# ============================ item 3.6: push layer ============================
+
+brief_app = typer.Typer(help="Scheduled morning briefing + phone push (item 3.6).",
+                        no_args_is_help=True)
+alerts_app = typer.Typer(help="Event-triggered alerts + news wire (item 3.6).",
+                         no_args_is_help=True)
+app.add_typer(brief_app, name="brief")
+app.add_typer(alerts_app, name="alerts")
+
+
+def _resolve_team(conn, *, team, as_of, season):
+    """The shared own-team resolution the composing commands use: an explicit
+    --team, else the SWID in .env matched against the synced league (never a
+    hardcoded id — Rule 6)."""
+    if team is not None:
+        return team
+    creds = load_espn_credentials()
+    return resolve_own_team(conn, as_of=as_of, season=season, swid=creds["swid"])
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+@brief_app.command("run")
+def brief_run(
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your SWID's team).")] = None,
+    week: Annotated[Optional[int], typer.Option(help="Week to brief (default: resolved from state).")] = None,
+    no_push: Annotated[bool, typer.Option("--no-push", help="Write the briefing file but do not push to ntfy.")] = False,
+    no_llm: Annotated[bool, typer.Option("--no-llm", help="Skip the claude_cli two-minute-prose summary.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Compose the morning briefing, write it to intel/weekly/briefings/, and push
+    an allowlist-safe teaser to the phone. All composition/render/push logic lives
+    in ziggurat/core/briefing.py + ziggurat/push/ (Rule 3)."""
+    day = as_of or _today()
+    resolved_season = _season(season)
+    conn = open_db(path)
+    try:
+        team_id = _resolve_team(conn, team=team, as_of=day, season=resolved_season)
+        router = None if no_llm else Router.from_toml()
+        result = run_briefing(
+            conn, as_of=day, season=resolved_season, own_team_id=team_id,
+            now=_now_iso(), week=week, today=_today(), router=router, push=not no_push,
+        )
+    except (OwnTeamUnresolved, outbound.OutboundBoundaryError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(
+        f"briefing [{result['status']}] -> {result['artifact']} "
+        f"(ntfy: {result['ntfy']})"
+        + (f"\n  note: {result['error']}" if result.get("error") else "")
+    )
+
+
+@brief_app.command("status")
+def brief_status(
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Last briefing runs — silence is not success (item 3.1b stance)."""
+    conn = open_db(path)
+    typer.echo(push_runs.format_status(conn, kind="brief"))
+    conn.close()
+
+
+@alerts_app.command("run")
+def alerts_run(
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your SWID's team).")] = None,
+    week: Annotated[Optional[int], typer.Option(help="Current week (default: resolved from state).")] = None,
+    cap: Annotated[int, typer.Option(help="Max phone pushes per tick (overflow collapses to one).")] = 4,
+    no_push: Annotated[bool, typer.Option("--no-push", help="Compute + record but do not push to ntfy.")] = False,
+    no_news: Annotated[bool, typer.Option("--no-news", help="Skip the news-wire pull this tick.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """One alert tick: pull the news wire, compute alert-worthy events, dedup, and
+    push the top few to the phone. Fires on a frequent timer (item 3.6)."""
+    day = as_of or _today()
+    resolved_season = _season(season)
+    conn = open_db(path)
+    try:
+        team_id = _resolve_team(conn, team=team, as_of=day, season=resolved_season)
+        result = run_alert_tick(
+            conn, as_of=day, season=resolved_season, own_team_id=team_id,
+            now=_now_iso(), week=week, cap=cap, today=_today(),
+            pull_news=not no_news, push=not no_push,
+        )
+    except (OwnTeamUnresolved, outbound.OutboundBoundaryError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(
+        f"alert tick [{result['status']}] found={result['found']} pushed={result['pushed']}"
+        + (f"\n  note: {result['error']}" if result.get("error") else "")
+    )
+
+
+@alerts_app.command("status")
+def alerts_status(
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Last alert ticks — an empty tick is HEALTHY, not a failure (item 3.6)."""
+    conn = open_db(path)
+    typer.echo(push_runs.format_status(conn, kind="alert"))
+    conn.close()
 
 
 @app.command()

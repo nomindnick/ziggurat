@@ -55,6 +55,7 @@ from ziggurat.data.nfl import (
     espn_ranks,
     game_odds,
     injuries,
+    news,
     ngs,
     players,
     projections,
@@ -105,6 +106,14 @@ _ACCESSORS = {
                             {"season": 2023, "week": 6}),
     "depth_chart_slots": (depth_charts.get_depth_chart, {"season": 2025}),
     "depth_chart_panels": (depth_charts.get_depth_chart_observed, {"season": 2025}),
+    # Item 3.6 news wire. recent_news resolves the ARTICLE table through
+    # select_as_of (source, news_id). Its child links table is read by EXACT
+    # article-version match (not select_as_of) — the ghost-link fix (audit D1)
+    # requires exact-version semantics so a correction that drops an athlete does
+    # not leave a stale link; it is leakage-tested transitively via recent_news
+    # (links follow the gated article) in test_news_wire.py, and is listed in
+    # `ignored` below rather than here.
+    "player_news": (news.recent_news, {}),
 }
 
 #: Columns that are in the PK but are NOT part of the identity a read resolves
@@ -130,7 +139,7 @@ def captured_keys(db, monkeypatch):
 
     for module in (players, schedules, weekly_stats, snap_counts, ngs, injuries,
                    team_defense, game_odds, weather, adp_rankings, espn_ranks,
-                   projections, depth_charts_weekly, depth_charts):
+                   projections, depth_charts_weekly, depth_charts, news):
         if hasattr(module, "base"):
             monkeypatch.setattr(module.base, "select_as_of", spy_as_of, raising=False)
             monkeypatch.setattr(module.base, "select_observed_as_of", spy_observed,
@@ -172,6 +181,12 @@ def test_every_table_with_an_as_of_accessor_is_covered(db):
     ignored = {
         # Run logs and metadata: no as-of accessor, by design.
         "meta", "nfl_ingest_runs", "league_sync_runs",
+        # Item 3.6 push-layer operational tables: run log + dedup ledger, no as-of.
+        "push_runs", "alert_ledger",
+        # player_news_links carries as-of columns but is read by EXACT article-
+        # version match (not select_as_of) — the ghost-link fix; leakage-tested
+        # transitively through recent_news (see the _ACCESSORS note above).
+        "player_news_links",
         # Item 3.1 owns the league tables and their own accessors/tests.
         "league_teams", "league_matchups", "league_player_state",
         "league_transactions",

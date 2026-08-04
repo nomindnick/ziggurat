@@ -1,0 +1,39 @@
+# Ziggurat event-alert tick (item 3.6) — systemd USER service.
+#
+# Installed by scripts/install-push.sh, which substitutes @REPO@ and @SEASON@.
+# Runs unattended and FREQUENTLY (see the timer): pulls the ESPN news wire,
+# computes alert-worthy events (a starter down -> his handcuff on waivers; news on
+# an owned/rosterable player), dedups them against the ledger, and pushes the top
+# few to the phone. Then exits.
+#
+# An EMPTY tick is HEALTHY and is the overwhelmingly common outcome — push_runs
+# records it as 'empty', which is NOT a failure and does NOT trip Restart=. A real
+# problem shows as a nonzero exit, a 'failed' push_runs row, and `ziggurat alerts
+# status`.
+#
+# NOTE ON LATENCY: injury transitions can only appear at the grain of the
+# league-state snapshots (4x/day via ziggurat-league-sync.timer). Running every
+# 20 minutes buys faster NEWS-WIRE latency, not sub-4-hour injury detection.
+
+[Unit]
+Description=Ziggurat event-alert tick (news wire + injury/handcuff alerts -> phone)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+StartLimitBurst=3
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec) = 3 x (120+60) = 540.
+StartLimitIntervalSec=1800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=ZIGGURAT_CLAUDE_BIN=%h/.local/bin/claude
+# Wait for name resolution, bounded (item 3.1b). The news pull hits
+# site.api.espn.com; the push hits ntfy.sh.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts site.api.espn.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+ExecStart=@REPO@/.venv/bin/ziggurat alerts run --season @SEASON@
+Restart=on-failure
+RestartSec=60
+# Type=oneshot defaults TimeoutStartSec to INFINITY. A hung news pull or ntfy POST
+# must become a recorded failure, not a parked timer (items 3.1/3.1b).
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal

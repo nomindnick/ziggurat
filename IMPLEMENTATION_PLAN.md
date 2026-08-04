@@ -1959,7 +1959,78 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 **Goal:** Post-waiver-window morning scan + briefing (scheduled just after ESPN's overnight processing, surfacing FCFS grabs at breakfast), event-triggered alerts from the news speed lane (starter down → handcuff available), all headless via the routing interface on the Strix Halo.
 **Done when:** a real scheduled run produces a briefing the operator can read in two minutes, and a simulated injury event produces an alert.
 **Update:**
-> _[To be completed]_
+> **Built, audited & fixed 2026-07-30. The FIRST live LLM backend** — everything
+> through 3.5 was deterministic; 3.6 implements `claude_cli` (headless `claude -p`
+> on the Max subscription) as the one sanctioned model shell-out (Rule 4).
+> Operator decisions (locked at start): delivery = full briefing to gitignored
+> `intel/weekly/briefings/` + a short teaser curl'd to a private **ntfy.sh** topic
+> (public-by-obscurity — **the outbound scrub is the real guarantee**; self-host/
+> reserved is a `.env`-only upgrade); news lane = build a real wire NOW; process =
+> full recon→build→audit.
+>
+> **What shipped.** Two scheduled deliverables + plumbing. `ziggurat brief run`
+> (Wed 06:00 PT timer) composes waiver(3.4)+lineup(3.5)+candidates(3.3)+the alert
+> feed into a structured `Briefing` (`core/briefing.py`, pure), writes the full
+> markdown to disk, asks the router (`morning_briefing`→claude_cli→sonnet) for the
+> two-minute prose, and pushes an **allowlist-safe teaser** (counts+legality+week,
+> NO names). `ziggurat alerts run` (every 20 min 06:00–23:00 PT) pulls the ESPN
+> news wire, computes alert-worthy events (`core/alerts.py`, pure: a starter down →
+> his handcuff on waivers; news on an owned/rosterable player), dedups, and pushes
+> the top few. New: `llm/backends.py` `ClaudeCLIBackend`+`BackendError`;
+> `config/llm.toml` two tasks; **migration `008_push_layer.sql`** (schema 8 — four
+> append-only tables: `player_news`+`player_news_links` fact/as-of, `push_runs`+
+> `alert_ledger` operational/no-as-of); `data/nfl/news.py` (ESPN wire, primary —
+> `athleteId==players.espn_id` direct join, zero fuzzy; RotoWire fallback deferred);
+> `marginal.handcuff_links()` (reuse — a shared `_rank_depth_chart` kernel + the
+> existing `DEFAULT_HANDCUFFS` labelled hypothesis, Rule 2); `ziggurat/push/`
+> package (the Rule-5 outbound scrub + the single ntfy choke point via stdlib
+> `urllib`, the run-log/dedup helpers, the `run_briefing`/`run_alert_tick`
+> orchestration); thin `brief`/`alerts` CLI; `scripts/install-push.sh` + two
+> systemd unit pairs. **Migration 008 was iterated against a scratch DB copy and
+> only moved into `db/migrations/` once final** — the desktop's live timers apply
+> any file there within hours (the standing rule).
+>
+> **Done-when MET on REAL data, not just simulated:** the whole pipeline produced a
+> two-minute briefing and surfaced real preseason injury→handcuff alerts (Kittle
+> OUT → handcuff Tonges FA; Kraft OUT → Musgrave FA) end-to-end, and the
+> `claude_cli` prose summary is genuinely good (leads with the urgent action,
+> preserves every number/name). `injury_transitions` remains **synthetic/
+> smoke-tested only until Week 1** produces a real transition (the 3.3 caveat).
+>
+> **Adversarial audit: 36 agents, 8 dimensions, refute-first per finding. Seam
+> clean** (no real leak, no rules/boundary violation that ships private data).
+> **19 CONFIRMED + 5 PLAUSIBLE defects, all fixed; 4 refuted. Headline: dry-run
+> ledger poisoning** — a `--no-push` preview reserved the dedup ledger before the
+> (dry) publish, so the next REAL cadence tick treated every previewed event as
+> already-seen and never pushed it; rewritten to **publish-then-record** (ledger
+> written only after a confirmed real send — never on a dry run, never on an infra
+> failure; a content/scrub block is recorded reserved-not-pushed so it doesn't
+> retry forever). Also fixed: the Rule-5 scrub over-blocked on substring ("Rivals"
+> blocked "Arrivals") → word-boundary, missed the title/tags headers → scrubs the
+> combination, failed OPEN on an empty denylist → fail CLOSED on a real send; the
+> news `knowable_as_of` was a UTC-date truncation that withheld evening-Pacific
+> notes until local midnight → bucketed in `America/Los_Angeles` to match the live
+> gate; a news correction that DROPPED an athlete left a ghost link → links now
+> follow the article's resolved version; an injury vacancy was wrongly
+> bye-suppressed (an OUT player is hurt, not on bye) → gate removed; an owned K/DST
+> OUT fired a high-priority alert outranking a real handcuff → own edge-guard is
+> None-position only; own-player OUT printed a raw `INJURY_RESERVE` enum → plain
+> language + next-step; `claude_cli` crashed on non-object JSON and its env scrub
+> missed `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL`/`CLAUDE_CONFIG_DIR` (all
+> reroute off the subscription) → both fixed; `STATUS_EMPTY` keyed on the
+> ever-growing candidate count → keys on new-count; briefing per-section isolation
+> was asymmetric → broad per-section fallback + guarded staleness. Suite green
+> (**1435 passed, 4 skipped**; +71). Details:
+> gitignored `intel/research/push-layer-3.6-design.md`.
+>
+> **Remaining is operator + calendar.** OPERATOR: set `NTFY_TOPIC` (+ optional
+> `NTFY_SERVER`/`NTFY_TOKEN`) in `.env`, install the ntfy phone app, then run
+> `scripts/install-push.sh` on the desktop and `loginctl enable-linger`. CALENDAR:
+> the injury-alert arm and the news wire's real value need live games (~Sept 10);
+> `injury_transitions` has produced nothing real yet. DEFERRED (labelled): the
+> RotoWire fallback, the `news_summarization` LLM step (task tag reserved, tick
+> does no LLM work yet), and the ensure-fresh inline `run_sync` self-heal (v1
+> discloses staleness via the banner instead).
 
 ### 3.7 [Build] CLAUDE.md operating cadence v1
 **Goal:** Encode the weekly rhythm: Tuesday legality + claims, Wednesday post-waiver scan, Thu–Sat monitoring, Sunday inactives + final lineup, Monday journal. Journal and decision-log templates in `intel/weekly/`.

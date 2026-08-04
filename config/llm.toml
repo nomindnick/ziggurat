@@ -16,8 +16,23 @@
 backend = "echo"
 tier = "routine"
 
+# --- item 3.6 push layer: the first live claude_cli tasks ---
+# The scheduled Wednesday briefing prose: standard tier -> the stronger
+# summarizer. One call per weekly briefing, so `sonnet` is affordable.
+[tasks.morning_briefing]
+backend = "claude_cli"
+model = "sonnet"
+tier = "standard"
+
+# Per-alert / news blurb summarization: routine, high-volume (fires up to ~50x/day
+# on the alert cadence), so `haiku` for speed and cost.
+[tasks.news_summarization]
+backend = "claude_cli"
+model = "haiku"
+tier = "routine"
+
 # Real task tags land with their features, e.g.:
-#   morning_briefing         (3.6, standard)
-#   news_summarization       (3.6, routine)
 #   podcast_claim_extraction (4.3, routine)
 #   trade_pitch_drafting     (5.3, standard)
+#   <a future high-stakes task> would route backend = "anthropic_api" (metered) —
+#   which is why claude_cli and anthropic_api stay distinct backends.

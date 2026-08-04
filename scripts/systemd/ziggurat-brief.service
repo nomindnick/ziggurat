@@ -1,0 +1,42 @@
+# Ziggurat morning briefing (item 3.6) — systemd USER service.
+#
+# Installed by scripts/install-push.sh, which substitutes @REPO@ and @SEASON@.
+# Runs unattended: composes the Wednesday post-waiver briefing, writes it to the
+# gitignored intel/weekly/briefings/, summarizes it via headless `claude -p`, and
+# pushes an allowlist-safe teaser to the phone via ntfy. Then exits.
+#
+# Failures are visible three ways: a nonzero exit here (journal + `systemctl
+# --user status`), a `failed`/`partial` row in push_runs, and `ziggurat brief
+# status`. Note: the briefing FILE is written even if the LLM prose or the ntfy
+# push fail (the run is degraded, not lost) — a token hiccup never costs the read.
+
+[Unit]
+Description=Ziggurat morning briefing (waiver + lineup + signals + alerts -> phone)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+# Rate limit for Restart= below; in [Unit], not [Service] (systemd >= 229).
+StartLimitBurst=3
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec) = 3 x (300+120) = 1260.
+StartLimitIntervalSec=3600
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# The claude CLI lives in ~/.local/bin, which a --user unit's PATH may not carry;
+# point the backend at it explicitly, and keep HOME set so ~/.claude auth resolves.
+Environment=ZIGGURAT_CLAUDE_BIN=%h/.local/bin/claude
+# `After=network-online.target` is a NO-OP in a USER unit (item 3.1b audit) — wait
+# for name resolution explicitly, bounded, and never fail the unit on it. ntfy.sh
+# is the push endpoint; api.anthropic.com is the LLM prose call.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts ntfy.sh >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+ExecStart=@REPO@/.venv/bin/ziggurat brief run --season @SEASON@
+# Retry a couple of times (rate-limited above) before conceding the run.
+Restart=on-failure
+RestartSec=120
+# Type=oneshot defaults TimeoutStartSec to INFINITY. Without this, one hung
+# claude -p subprocess or ntfy POST holds the service Active forever and every
+# later trigger is silently skipped. Bound it so a hang becomes a recorded failure.
+TimeoutStartSec=300
+# Credentials + NTFY_TOPIC live in the repo .env, loaded by the package (never
+# echoed into logs — rule 5).
+StandardOutput=journal
+StandardError=journal
