@@ -458,6 +458,21 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   keep: an OPERATOR step (`NTFY_TOPIC` in `.env`, install the ntfy app, run
   `scripts/install-push.sh`) + real games (~Sept 10).
 
+- **3.7 operating cadence v1 — built 2026-08-04.** The "Weekly operating
+  cadence" section below is live: day-keyed workflows (Tue legality+claims, Wed
+  post-waiver scan, Thu–Sat monitoring, Sun inactives+final lineup, Mon
+  process-not-outcome retro, ~4-weekly compaction), a shared preflight, and an
+  explicit division of labor (tools recommend; only the operator acts in the
+  ESPN app). One journal template per NFL week
+  (`templates/intel/weekly/week-TEMPLATE.md`, scaffolded by `intel init`) holds
+  the decision log AND the Monday retro. The cadence section is treated as an
+  interface, not prose: `tests/test_operating_cadence.py` resolves every quoted
+  `ziggurat` invocation + flag against the real CLI, so a renamed command rots
+  loudly. Done-when verified pre-draft only (commands run and disclose
+  empty-roster reality); the true end-to-end Tuesday needs a drafted roster —
+  final verification is a fresh-session run the first in-season Tuesday
+  (Checkpoint 3). Suite green (**1435 passed, 4 skipped**).
+
 Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
 (monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).
 
@@ -617,9 +632,109 @@ committed files or logs).
 
 ## Weekly operating cadence
 
-> **PLACEHOLDER — lands with item 3.7.** Will encode: Tuesday roster-legality
-> check + waiver claims, Wednesday post-waiver scan, Thu–Sat monitoring,
-> Sunday inactives + final lineup, Monday retro & journal.
+The in-season loop, keyed by day. "Run the Tuesday workflow" means: do the
+steps under **Tuesday**, in order, and journal the result — each day below is
+executable by a fresh session from this file alone. Two ESPN facts shape the
+rhythm: queued waiver claims are processed in overnight batches (~3:00–4:30 AM
+ET Wednesday) and priority resets after a successful claim, so **Tuesday claims
+are free — queue liberally**; what clears waivers is first-come-first-served,
+so **Wednesday morning is when speed matters**.
+
+**Division of labor:** the tools recommend and explain; only the operator acts
+in the ESPN app (claims, adds, lineup changes, IR moves). Every workflow ends
+by writing what was decided and why to the week's journal.
+
+**Journal discipline:** one file per NFL week at `intel/weekly/<season>-wkNN.md`,
+created from `intel/weekly/week-TEMPLATE.md` when the week's first decision is
+made. Log decisions the day they happen; Monday grades them on **process, not
+outcome** (correct-but-unlucky is variance, not error — and wrong-but-lucky is
+still wrong).
+
+**Every workflow starts with the same preflight:**
+
+```bash
+.venv/bin/ziggurat league status   # last sync + UNRECOVERABLE missing days
+.venv/bin/ziggurat ingest status   # per-source staleness (a stale read is Rule-1-invisible)
+.venv/bin/ziggurat alerts status   # the 20-min tick is alive ('empty' is healthy)
+```
+
+Missing league days go in the journal (that history is gone — item 3.1). A
+source that `ingest status` calls stale and that feeds today's decision gets
+disclosed alongside the recommendation, not silently priced through.
+
+### Tuesday — roster legality + waiver claims
+1. Preflight. If today's league sync hasn't landed, run
+   `.venv/bin/ziggurat league sync` — Tuesday reads today's rosters.
+2. `.venv/bin/ziggurat waivers --reasons`. The roster-legality precheck runs
+   FIRST and is the point: ESPN blocks ALL transactions while a roster is
+   illegal, and Tuesday's league-wide status reset is exactly when an IR-slot
+   occupant flips Out → Questionable and breaks legality. On a refusal: relay
+   the proposed fix (usually a costless IR move) to the operator, re-sync
+   after they apply it, re-run.
+3. Cross-reference `.venv/bin/ziggurat candidates --reasons` for the breakout
+   context behind each add. Where the two disagree, surface the disagreement —
+   never smooth it over.
+4. Recommend the final claim list with drops. Claims are free: queue every
+   positive-marginal claim, not just the `--claim-budget` shortlist. The
+   operator submits in the app before the overnight batch.
+5. Journal each claim: add, drop, the tool's stated reasons verbatim, and what
+   would make it wrong.
+
+### Wednesday — post-waiver scan
+1. The 06:00 PT briefing (timer) is on the phone; the full text is in
+   `intel/weekly/briefings/`. Read it.
+2. `.venv/bin/ziggurat league sync`, then compare the roster against Tuesday's
+   journal: which claims won, which lost.
+3. `.venv/bin/ziggurat waivers --reasons` again — the pool has re-formed, and a
+   FREEAGENT-status add is first-come: flag anything worth grabbing NOW.
+4. First lineup pass: `.venv/bin/ziggurat lineup --reasons`. Note the GTD /
+   Questionable starters to track through the practice week.
+5. Journal claim outcomes, grabs made or passed on, and the provisional lineup.
+
+### Thursday–Saturday — monitoring
+- The 20-minute alert timer covers breaking news. When a push fires, evaluate
+  with `.venv/bin/ziggurat waivers` / `lineup` — never react on the headline.
+- Injury reports: Wed–Fri practice participation is trajectory; **Friday's
+  designation is ground truth.** Re-run `.venv/bin/ziggurat lineup --reasons`
+  after Friday's reports.
+- Before the week's FIRST kickoff (usually Thursday night — but check the
+  schedule; the 2026 opener is a Wednesday), settle any starter playing in it.
+  Slot-lock discipline is in the tool: earliest kickoffs in dedicated slots,
+  FLEX preserved for the latest-locking player.
+- Streaming week for D/ST or K: `.venv/bin/ziggurat stream --reasons`.
+- Journal anything acted on; an empty day is fine.
+
+### Sunday — inactives + final lineup
+1. Inactives surface ~90 minutes before each kickoff wave. Run
+   `.venv/bin/ziggurat lineup --reasons --now "<current ET ISO datetime>"` —
+   the real clock matters: the GTD contingency ladder only offers swaps whose
+   window is still open (`window_closed` means that door shut).
+2. Walk the ladder for each Questionable starter in lock-time order; execute
+   the branch matching the news.
+3. A hard refusal from the seated-lineup legality check (bye/OUT starter) on a
+   Sunday morning means something upstream was missed all week — journal it as
+   an incident, don't just fix the slot.
+4. Journal the final lineup and any late swaps with their triggers.
+
+### Monday — retro & journal close
+1. `.venv/bin/ziggurat league sync` — capture the completed week.
+2. Retro every logged decision (template's Monday section): process first,
+   outcome second, verdict one of good call / variance / lucky / error.
+3. Anything observed that smells like a repeatable lesson gets written to
+   `intel/heuristics.md` as an **observation** (promotion rules land with 5.2).
+4. Skim `.venv/bin/ziggurat brief status` and `.venv/bin/ziggurat alerts status`
+   for the week's push-layer health; a missed briefing is a process finding.
+
+### Every ~4 weeks — memory compaction
+Distill the accumulated journals into `intel/rest_of_season_priors.md`
+(scheduled synthesis, not an emergency measure): standing lessons, opponent
+tendencies, calibration notes. Raw journals stay archived out of the default
+reading path.
+
+**Before Week 1** (pre-draft/preseason) the commands all run but disclose
+empty-roster reality honestly (`waivers` prints "no roster rows at this
+as-of", `lineup` seats a greedy empty-context lineup). That is correct, not
+broken; the cadence starts for real the Tuesday after the draft.
 
 ## Heuristics promotion criteria
 

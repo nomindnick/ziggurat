@@ -2036,7 +2036,31 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 **Goal:** Encode the weekly rhythm: Tuesday legality + claims, Wednesday post-waiver scan, Thu–Sat monitoring, Sunday inactives + final lineup, Monday journal. Journal and decision-log templates in `intel/weekly/`.
 **Done when:** a fresh Claude Code session can execute "run the Tuesday workflow" end-to-end from CLAUDE.md alone.
 **Update:**
-> _[To be completed]_
+> **Built 2026-08-04.** CLAUDE.md's "Weekly operating cadence" placeholder is
+> replaced with the day-keyed loop (shared preflight → Tuesday legality+claims,
+> Wednesday post-waiver scan, Thu–Sat monitoring, Sunday inactives+final lineup,
+> Monday process-not-outcome retro, ~4-weekly compaction into
+> `intel/rest_of_season_priors.md`). Design choices: every step quotes the exact
+> `.venv/bin/ziggurat` invocation (the done-when makes the section an interface,
+> not prose); the division of labor is explicit (tools recommend, ONLY the
+> operator acts in the ESPN app); the two ESPN facts that shape the rhythm
+> (overnight claim batches ~3:00–4:30 AM ET Wed; priority reset ⇒ claim
+> liberally Tuesday, speed matters Wednesday) are stated inline with the steps
+> they justify, per SPEC §waivers. One journal template ships instead of two —
+> `templates/intel/weekly/week-TEMPLATE.md` holds the decision log AND the
+> Monday retro, because SPEC specifies one file per NFL week and a decision and
+> its grade belong on the same page; `ziggurat intel init` scaffolds it (live
+> tree confirmed). `tests/test_operating_cadence.py` is the doc-rot guard: it
+> re-parses every `ziggurat` invocation + flag the cadence section quotes and
+> resolves them against the real Typer app (a renamed command or dropped flag
+> now fails the suite), plus a guard-the-guard floor so an empty parse can't
+> vacuously pass. **Done-when status: executable pre-draft, verified live only
+> partially** — all quoted commands run today and disclose empty-roster reality
+> honestly (`waivers`: "no roster rows at this as-of"; `lineup`: greedy
+> no-opponent card), but a true end-to-end Tuesday (legality trap, real claims,
+> journal) needs a drafted roster; final verification is a fresh-session run
+> the first in-season Tuesday, under Checkpoint 3. Suite green (1435 passed,
+> 4 skipped; +4).
 
 ### ✦ Checkpoint 3: Week 1 live shakedown
 Operate the full loop through NFL Week 1 for real. Journal every friction, wrong output, and manual workaround; validate `scoring.py` against actual ESPN box scores (the anchored TODO from 1.3); fix and amend the plan.
