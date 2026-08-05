@@ -68,9 +68,10 @@ def fetch_espn_news(limit: int = DEFAULT_LIMIT) -> dict:
     parks the alert cadence forever. This runs on the ~20-minute alert tick.
     """
     url = f"{ESPN_NEWS_URL}?{urllib.parse.urlencode({'limit': limit})}"
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "ziggurat/3.6 (personal fantasy tool)"}
-    )
+    # No custom User-Agent: ESPN's edge (measured 2026-08-04) 403s UAs that don't
+    # match the client fingerprint — the 3.6 identifying UA and even browser UAs
+    # are blocked from this client, while urllib's own default passes.
+    req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=net.HTTP_TIMEOUT) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))
 
