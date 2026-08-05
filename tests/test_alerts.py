@@ -119,6 +119,35 @@ def test_news_event_for_owned_player(push_db):
     assert news_events[0].dedup_key == "news:espn:900"
     # news never outranks a real OUT
     assert news_events[0].severity < alerts._SEV_INJURY_OUT
+    # own-roster news is the speed layer for "your starter went down" -> phone
+    assert news_events[0].phone_worthy
+
+
+def test_phone_policy_a_push_must_name_an_action(push_db):
+    """Operator decision 2026-08-05: the phone lane carries only events that
+    name an action. INJURY_OUT always qualifies; NEWS only for an OWN-roster
+    player. Free-agent/context news is computed (briefing + alert log) but
+    never phone_worthy — pre-draft, when the whole universe is a free agent,
+    that rule is what keeps the phone silent."""
+    _player(push_db, 100, "00-0000100", "Star Back", "RB")
+    _snap(push_db, "2026-09-09", 100, "00-0000100", "Star Back", "RB", "ATL", 1, "ACTIVE")
+    _snap(push_db, "2026-09-10", 100, "00-0000100", "Star Back", "RB", "ATL", 1, "OUT")
+    _player(push_db, 500, "00-0000500", "Camp Hero", "WR")
+    _snap(push_db, "2026-09-10", 500, "00-0000500", "Camp Hero", "WR", "DEN", None, "ACTIVE")
+    push_db.commit()
+    payload = {"articles": [{
+        "id": 901, "type": "Story", "headline": "Camp Hero turning heads at practice",
+        "description": "Feature piece.", "published": "2026-09-10T12:00:00Z",
+        "links": {"web": {"href": "x"}},
+        "categories": [{"type": "athlete", "athleteId": 500, "description": "Camp Hero"}],
+    }]}
+    news.pull_news(push_db, retrieved_as_of="2026-09-10", fetch=lambda limit: payload)
+
+    board = alerts.build_alerts(push_db, as_of="2026-09-10", season=SEASON, own_team_id=1, week=2)
+    outs = [e for e in board.events if e.kind == "INJURY_OUT"]
+    assert outs and all(e.phone_worthy for e in outs)
+    fa_news = [e for e in board.events if e.kind == "NEWS" and not e.is_own]
+    assert len(fa_news) == 1 and not fa_news[0].phone_worthy
 
 
 def test_own_kicker_out_does_not_fire_a_high_priority_injury_alert(push_db):

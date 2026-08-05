@@ -110,6 +110,37 @@ def test_content_blocked_alert_is_recorded_not_crashed_or_retried(push_db):
     assert row["payload_summary"].startswith("BLOCKED")  # and never records the private reason
 
 
+def test_alert_tick_never_pushes_context_news(push_db):
+    """Operator decision 2026-08-05: the phone lane is action-only. A news story
+    about a free agent is computed for the alert log but NOT pushed and NOT
+    ledgered (it may still surface in the briefing), and a tick holding only
+    such events is honestly EMPTY."""
+    from ziggurat.data.nfl import news
+
+    _seed_own_team(push_db)
+    push_db.execute(
+        "INSERT INTO players (gsis_id, espn_id, name, position, retrieved_as_of, knowable_as_of) "
+        "VALUES ('00-000500', '500', 'Camp Hero', 'WR', '2026-09-01', '2026-09-01')")
+    _snap(push_db, "2026-09-10", 500, "Camp Hero", None, "ACTIVE")  # a FREE AGENT
+    push_db.commit()
+    payload = {"articles": [{
+        "id": 902, "type": "Story", "headline": "Camp Hero turning heads at practice",
+        "description": "Feature piece.", "published": "2026-09-10T12:00:00Z",
+        "links": {"web": {"href": "x"}},
+        "categories": [{"type": "athlete", "athleteId": 500, "description": "Camp Hero"}],
+    }]}
+    news.pull_news(push_db, retrieved_as_of="2026-09-10", fetch=lambda limit: payload)
+
+    sent = []
+    r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                now="2026-09-10T13:00:00", week=2, pull_news=False,
+                                config=_cfg(), poster=lambda u, b, h, t: (sent.append(b) or 200))
+    assert sent == [] and r["pushed"] == 0
+    assert r["status"] == runs.STATUS_EMPTY  # a context-only tick is healthy-empty
+    assert push_db.execute(
+        "SELECT 1 FROM alert_ledger WHERE dedup_key = 'news:espn:902'").fetchone() is None
+
+
 def test_alert_tick_empty_is_healthy(push_db):
     _seed_own_team(push_db)
     r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,

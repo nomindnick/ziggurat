@@ -79,6 +79,14 @@ class AlertEvent:
     dedup_key: str
     handcuff_name: str | None = None
     handcuff_espn_id: str | None = None
+    #: The phone-push policy (operator decision 2026-08-05): a push must NAME AN
+    #: ACTION. INJURY_OUT always does (seat someone else / grab the handcuff);
+    #: NEWS qualifies only for a player on the operator's own roster — the news
+    #: wire is the speed layer for "your starter just went down" (league sync is
+    #: 4x/day, the news tick 20-min). Everything else is briefing/alert-log
+    #: context, computed but never pushed. Safe-by-default: a new kind does not
+    #: reach the phone until it explicitly opts in.
+    phone_worthy: bool = False
 
 
 @dataclass(frozen=True)
@@ -231,6 +239,7 @@ def build_alerts(
                 dedup_key=f"inj:{espn_id}:{tr['became_knowable']}:{tr['direction']}",
                 handcuff_name=handcuff_name,
                 handcuff_espn_id=handcuff_espn,
+                phone_worthy=True,  # every surviving INJURY_OUT names an action
             )
         )
 
@@ -256,7 +265,8 @@ def build_alerts(
 def _news_events(conn, *, as_of, season, own_roster, own_team_id, lookback_days, view):
     """News about a player the operator owns or could roster (a FA), as low-tier
     events. News precision is UNTUNED (a feature article and an injury note look
-    alike here) — bounded by the run layer's rate cap; 4.2 tunes it."""
+    alike here); only OWN-roster news is ``phone_worthy`` — FA/context news is
+    computed for the briefing and the alert log but never pushed. 4.2 tunes it."""
     from datetime import date, timedelta
 
     from ziggurat.data.asof import normalize_as_of
@@ -296,6 +306,7 @@ def _news_events(conn, *, as_of, season, own_roster, own_team_id, lookback_days,
                     event_day=(art["published_at"] or "")[:10],
                     severity=_SEV_NEWS + (_OWN_BUMP if is_own else 0.0),
                     dedup_key=f"news:{art['source']}:{art['news_id']}",
+                    phone_worthy=is_own,
                 )
             )
     return out

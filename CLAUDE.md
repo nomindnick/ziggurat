@@ -430,9 +430,14 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   for the prose, and pushes an **allowlist-safe teaser** (counts+legality+week, NO
   names) to a private **ntfy.sh** topic; `ziggurat alerts run` (every 20 min) pulls
   the **ESPN news wire** (`data/nfl/news.py`, `athleteId==players.espn_id` direct
-  join), computes alert-worthy events (`core/alerts.py`, pure: starter down → his
-  handcuff on waivers; news on an owned/rosterable player), dedups, and pushes the
-  top few. New permanent `ziggurat/push/` package is the **egress choke point**:
+  join), computes alert-worthy events (`core/alerts.py`, pure), dedups, and pushes
+  the top few — where the phone lane is **action-only** (operator decision
+  2026-08-05, `AlertEvent.phone_worthy`): `INJURY_OUT` always (seat someone /
+  grab the handcuff), news ONLY about an own-roster player (the 20-min speed
+  layer vs the 4x/day sync); free-agent/context news is computed for the
+  briefing + alert log but never pushed — the operator is running an
+  experiment, not following football, and pre-draft "rosterable" matched the
+  entire NFL (46 news pushes in one evening, measured). New permanent `ziggurat/push/` package is the **egress choke point**:
   the Rule-5 **outbound scrub** (a data-driven denylist of this league's other-team
   names, checked before any send — the guarantee that makes a public-by-obscurity
   topic safe), the run-log/dedup helpers, and the orchestration. `marginal.handcuff_links()`

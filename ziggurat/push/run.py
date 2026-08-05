@@ -185,11 +185,15 @@ def run_alert_tick(
             week=week, last_week=last_week, today=today or as_of,
         )
 
-        # dedup vs ledger (phone channel), then rank + cap. `new` (NOT the raw
-        # candidate count) drives everything: injury_transitions re-emits every
-        # historical crossing each tick, so a steady deduped tick is honestly EMPTY.
+        # phone lane = phone_worthy ONLY (the push must name an action — operator
+        # decision 2026-08-05; context events still land in the briefing + log
+        # below), then dedup vs ledger (phone channel), then rank + cap. `new`
+        # (NOT the raw candidate count) drives everything: injury_transitions
+        # re-emits every historical crossing each tick, so a steady deduped tick
+        # is honestly EMPTY.
         new = [e for e in board.events
-               if not runs.already_seen(conn, season=season, dedup_key=e.dedup_key, channel=PHONE_CHANNEL)]
+               if e.phone_worthy
+               and not runs.already_seen(conn, season=season, dedup_key=e.dedup_key, channel=PHONE_CHANNEL)]
         new.sort(key=lambda e: (-e.severity, e.event_day or "", e.player or ""))
         new_count = len(new)
         to_push, overflow = new[:cap], new[cap:]
@@ -248,7 +252,8 @@ def run_alert_tick(
             "tick": now, "as_of": str(as_of), "candidates": len(board.events),
             "new": new_count, "pushed_new": len(to_push), "overflow": len(overflow),
             "events": [{"kind": e.kind, "player": e.player, "headline": e.headline,
-                        "dedup_key": e.dedup_key, "severity": e.severity} for e in board.events],
+                        "dedup_key": e.dedup_key, "severity": e.severity,
+                        "phone_worthy": e.phone_worthy} for e in board.events],
             "notes": list(board.notes),
         })
 

@@ -2031,6 +2031,23 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 > RotoWire fallback, the `news_summarization` LLM step (task tag reserved, tick
 > does no LLM work yet), and the ensure-fresh inline `run_sync` self-heal (v1
 > discloses staleness via the banner instead).
+>
+> **Amendment 2026-08-05 — the phone lane is action-only.** First live evening:
+> 46 pushes, all `kind=NEWS` (camp roundups, a columnist's sleeper, a contract
+> extension) — partly ledger catch-up on the backlog, but structurally the
+> "news on an owned/rosterable player" gate matched the ENTIRE NFL pre-draft
+> (everyone is a free agent), and even in-season it is a news stream. Operator
+> decision: a push must NAME AN ACTION — the operator is running an experiment,
+> not following football. Implemented as `AlertEvent.phone_worthy`
+> (safe-by-default False): `INJURY_OUT` always (every surviving variant already
+> names an action), NEWS only for an own-roster player (the 20-min news tick is
+> the speed layer for "your starter went down"; league sync is 4x/day).
+> FA/context news is still computed — it feeds the briefing and the append-only
+> alert log — but never the phone; `found` now counts the phone lane only, so a
+> context-only tick is honestly `empty`. Measured live: found=166 → 0, no
+> ledger surgery. Also that evening: ESPN's edge began 403'ing the news wire's
+> identifying User-Agent (fingerprint-consistency rule; browser UAs blocked
+> too) — fixed by sending urllib's default UA. Suite 1435 → 1437.
 
 ### 3.7 [Build] CLAUDE.md operating cadence v1
 **Goal:** Encode the weekly rhythm: Tuesday legality + claims, Wednesday post-waiver scan, Thu–Sat monitoring, Sunday inactives + final lineup, Monday journal. Journal and decision-log templates in `intel/weekly/`.
