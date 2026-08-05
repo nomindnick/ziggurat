@@ -454,9 +454,12 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   `intel/research/push-layer-3.6-design.md`. **Standing lesson this item paid for:
   a dedup/idempotency ledger must be written ONLY after a real side effect
   (publish-then-record) — reserving before the effect means a preview/dry-run, or a
-  transient failure, silently consumes the event.** Remaining before it earns its
-  keep: an OPERATOR step (`NTFY_TOPIC` in `.env`, install the ntfy app, run
-  `scripts/install-push.sh`) + real games (~Sept 10).
+  transient failure, silently consumes the event.** Operator step complete
+  2026-08-04: `NTFY_TOPIC` set, phone subscribed, timers installed on the
+  desktop; first live ticks pushed `ntfy=200` end-to-end, and the install
+  surfaced + fixed an ESPN news-wire 403 (edge now rejects UAs that don't match
+  the client fingerprint; urllib's default UA passes). Remaining: real games
+  (~Sept 10).
 
 - **3.7 operating cadence v1 — built 2026-08-04.** The "Weekly operating
   cadence" section below is live: day-keyed workflows (Tue legality+claims, Wed
