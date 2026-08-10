@@ -670,6 +670,64 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > discount, web cockpit, quick-pick strip) are already landed and audited.
 > **Phase 3 begins now** — its ~Sept 10 hard deadline binds regardless of
 > draft scheduling.
+>
+> **DRAFT SCHEDULED — 2026-08-10. The two deferred items now have hard dates,
+> and a live probe of `draftSettings`/`mTeam` changed three assumptions.**
+> Operator reports: draft **Mon 2026-08-31 19:00**, order drawn **from a hat
+> Mon 2026-08-24 12:00**. Probed against ESPN rather than taken on
+> transcription (`view=mSettings,mDraftDetail,mTeam`), which confirmed the dates
+> (`date`/`availableDate` epochs → 19:00 / 18:00 PT) and surfaced:
+>
+> 1. **`timePerSelection` is 90 s, not 60.** Every rehearsal in this checkpoint
+>    was run against a 60 s clock, and the quick-pick strip exists because
+>    TRANSCRIPTION cost 5-8 s/pick at 60 s. At 90 s the margin is far wider —
+>    this is slack, not a new risk, but it means the search fallback is more
+>    viable mid-draft than the rehearsal notes above imply.
+> 2. **`orderType` is `MANUAL` and `pickOrder` is readable live**, and
+>    `state.resolve_own_team(swid=…)` already maps our cookie identity to a
+>    team id. So slot discovery on 08-24 is a **read**, not an operator
+>    transcription — verified end-to-end today against the placeholder array.
+>    The array ESPN serves before the commissioner enters the hat draw is NOT
+>    the real order; any pre-08-24 read is provisional by definition.
+> 3. **2 of 10 seats still carry zero owners** (unchanged since 2026-07-21).
+>    Unowned at draft time = autodraft, i.e. the 2.2 prior (2 of 10 autodrafted
+>    in 2025) is holding. Note the asymmetry this creates: the survival model
+>    treats every rival as ESPN-rank + noise at σ=17.78, but an autodraft seat
+>    is ≈σ=0. Knowing WHICH slots autodraft would sharpen survival between our
+>    turns — an available improvement, gated on the seats still being empty
+>    near draft day (a seat can fill hours before the draft).
+>
+> Post-draft roster capture needs no new code: `league sync` snapshots the whole
+> player universe with `on_team_id` 4×/day (05/11/17/23:15), so the 23:15 run on
+> 08-31 captures the completed draft — and the 2026-07-24 live-sync spike showed
+> ESPN flushes the draft atomically at completion, so that snapshot is complete
+> rather than partial.
+>
+> **DRAFT MACHINE SETTLED — the DESKTOP, not the laptop (operator, 2026-08-10).**
+> The laptop plan in `docs/runbook-strix-halo.md` §4 assumed an office draft; a
+> Monday 19:00 draft is at home. This **removes** the whole copied-database path
+> (and with it the divergence risk §2 warns about): the desktop already holds the
+> authoritative db, runs the timers, refreshes the board daily via 3.1b, and has
+> Chrome installed. `ziggurat/draft/` never writes to the db (§4), so drafting on
+> the timer box is safe — the timers keep running throughout.
+>
+> Two concrete gaps found by inspection on 2026-08-10, both cheap, neither
+> previously written down:
+> 1. **Tampermonkey is NOT installed in Chrome on the desktop** (checked
+>    `~/.config/google-chrome/*/Extensions`). Without it there is no DOM sync at
+>    all and the draft falls back to manual quick-pick entry.
+> 2. **`draft-web --pick-order` takes 0-BASED SEAT IDS; ESPN's `pickOrder`
+>    serves 1-BASED TEAM IDS.** Getting that translation wrong on 08-24 seats the
+>    engine in the wrong chair and silently corrupts every survival estimate —
+>    no error is raised, the draft just quietly plays someone else's hand. This
+>    is the single highest-consequence hand-transcription left in the system and
+>    is exactly what a thin read-and-translate command should own.
+>
+> Remaining, with dates: (1) slot-conditional strategy — preparable for all 10
+> slots BEFORE 08-24 since the draw is uniform, reducing 08-24 to a lookup;
+> (2) desktop draft readiness — install Tampermonkey, one full dress rehearsal
+> on this box; (3) near-day board refresh is now self-healing (3.1b pulls
+> projections/adp/espn_ranks daily onto the very machine that will draft).
 
 ---
 
@@ -2102,8 +2160,32 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 > today's sync land" is now keyed to the `snapshot <date>` line. In-season
 > fresh-session re-verification stays under Checkpoint 3.
 
+### 3.8 [Build] Ground-truth reconciliation — retire the UNVERIFIED hypotheses
+**Goal:** Close every open confirmation that could only ever be settled by real ESPN data, now that a drafted roster (2026-08-31) and played weeks (Week 1 completes 2026-09-14) finally produce it. Six items across the build accrued here by explicit deferral, each shipped as a *labelled hypothesis* rather than a guess — this is where they become machine-checked truth or get corrected.
+
+**Section added 2026-08-10.** Seven references to "item 3.8" existed across CLAUDE.md and this plan (from 1.3, 1.5, 3.4 and `core/scoring.py`'s boxed TODO) with **no such section** — Phase 3 stopped at 3.7. The work was real and anchored in code; only the plan entry was missing, so it existed solely as a one-line mention inside Checkpoint 3. Rule 7: the plan on disk is the real plan.
+
+**Scope — wave A, needs only the completed draft (from 2026-09-01):**
+1. **IR legality model (3.4).** `IR_ELIGIBLE_STATUSES` and `IR_FIX_MODEL_LABEL` are disclosed UNVERIFIED on every waiver plan because ESPN's `eligibleSlots` is not ingested and no roster existed to test against. Ingest `eligibleSlots` for machine truth, confirm which statuses ESPN actually accepts into the IR slot, and settle DOUBTFUL/PUP handling. Removing an UNVERIFIED banner is the deliverable, not just a passing test.
+2. **`acquisitionBudget = 100` semantics (1.5 open confirmation D).** Season transaction-count cap or inert default? Verify against the live ESPN UI with a real roster. It gates whether the waiver module should be counting spend at all.
+3. **Trade deadline** (epoch ≈ early-Dec 2026) localized precisely from league settings.
+
+**Scope — wave B, needs a played + finalized week (from 2026-09-15):**
+4. **`scoring.py` box-score reconciliation** — the anchored TODO from 1.3, boxed in the module. Reconcile the engine against actual ESPN weekly D/ST and kicker totals for every team in the league, not just ours (10 teams × ~16 starters is the real sample; one roster is too thin to catch a bracket-edge bug).
+5. **D/ST charge semantics (1.5 deferral).** Pin the exact `points_allowed` / `yards_allowed` derivation. Known v1 defect: it **over-charges** — opponent defensive/return TDs scored against *our* offense are counted as points we allowed, and ESPN does not count them. The `team_score`/`opp_score` audit columns were retained in `team_defense` precisely so this refines **without re-ingesting**.
+6. **Return-TD attribution.** ESPN credits kick/punt-return TDs to the D/ST (`def_tds`); confirm the feed agrees and that individual returners are not *also* credited (double count).
+
+**Explicitly NOT in scope:** the kicker 50–59 vs 60+ split, which cannot be recovered from Sleeper's `fgm_50p` at all (a 60+ FG scores +5, not +6). That is a source limitation, not an open question — it stays a known, bounded, rare error.
+
+**Done when:** every UNVERIFIED / hypothesis banner listed above is either retired against ESPN ground truth or re-stated with measured error bars; `scoring.py`'s boxed TODO is deleted (or narrowed to what genuinely cannot be settled); and a reconciliation note lands in `intel/research/` recording per-position agreement between Ziggurat's re-scored week and ESPN's published box score, with any residual disagreement explained rather than averaged away.
+
+**Rule note:** any scoring correction lands in `core/scoring.py` **only** (Rule 2), and any derivation fix lands at the ingestion layer where the 1.3 TODO says it belongs — `score_dst` brackets an already-derived value and must not learn to derive one.
+
+**Update:**
+> _[To be completed — wave A from 2026-09-01, wave B from 2026-09-15.]_
+
 ### ✦ Checkpoint 3: Week 1 live shakedown
-Operate the full loop through NFL Week 1 for real. Journal every friction, wrong output, and manual workaround; validate `scoring.py` against actual ESPN box scores (the anchored TODO from 1.3); fix and amend the plan.
+Operate the full loop through NFL Week 1 for real. Journal every friction, wrong output, and manual workaround; validate `scoring.py` against actual ESPN box scores (the anchored TODO from 1.3, now scoped as **item 3.8**); fix and amend the plan.
 **Checkpoint notes:**
 > _[To be completed]_
 

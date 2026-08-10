@@ -162,13 +162,40 @@ name stays gitignored and hook-blocked.
 
 ---
 
-## 4. Draft day, if you run it from the laptop
+## 4. Draft day
 
-This is cleaner than it looks, because **`ziggurat/draft/` never writes to the
-database.** It contains no `INSERT`, `UPDATE`, `DELETE`, `upsert`, or `commit()`
-— it reads the board and persists only to a local timestamped
+**DECIDED 2026-08-10: the 2026 draft runs from the DESKTOP.** The draft is
+Monday 2026-08-31 19:00 PT — at home, not the office, which is what the laptop
+plan below was written for. Drafting on the desktop is the simpler path in every
+respect and it is the one to follow; §4.2 is kept only as the fallback if you
+ever do have to draft away from this box.
+
+This is all cleaner than it looks, because **`ziggurat/draft/` never writes to
+the database.** It contains no `INSERT`, `UPDATE`, `DELETE`, `upsert`, or
+`commit()` — it reads the board and persists only to a local timestamped
 `session-*.jsonl` journal, which is what `--resume` replays. So there is no
-merge problem and nothing to copy back.
+merge problem and nothing to copy back, and **drafting on the timer box is safe:
+leave the timers running throughout.**
+
+### 4.1 From the desktop (the 2026 plan)
+
+No database copy, no second environment, no divergence risk — the board is
+already refreshed daily here by the 3.1b timers. What actually needs doing:
+
+- **Install Tampermonkey in Chrome** (as of 2026-08-10 it is NOT installed on
+  this box — verified against `~/.config/google-chrome/*/Extensions`). Without
+  it there is no DOM sync and every pick is manual entry.
+- Start the cockpit, open `http://127.0.0.1:8811/sync.user.js` once to install
+  the per-run script (the port and token are baked in at serve time).
+- **Get the seat translation right — this is the one that silently ruins a
+  draft.** ESPN's `draftSettings.pickOrder` is a list of **1-based team ids** in
+  draft-position order; `draft-web --pick-order` wants **0-based seat ids**, and
+  `--slot` is 1-based. Seating the engine in the wrong chair raises no error —
+  it just plays someone else's hand, with every survival estimate wrong. Derive
+  it, do not eyeball it.
+- One full dress rehearsal on this box against sim rivals before the day.
+
+### 4.2 From the laptop (fallback only)
 
 **Before (a day or two out), on the desktop:**
 

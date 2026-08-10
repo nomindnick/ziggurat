@@ -484,8 +484,26 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   (`no push runs recorded yet` ≠ healthy-empty). In-season re-verification
   under Checkpoint 3. Suite green (**1435 passed, 4 skipped**).
 
-Calendar anchors: draft expected mid-to-late August 2026, still unscheduled
-(monitor ESPN — 2 of 10 seats still invite-pending as of 2026-07-21).
+Calendar anchors (draft SCHEDULED 2026-08-10; all confirmed against ESPN's own
+`draftSettings`, not operator transcription):
+- **2026-08-24, 12:00** — draft order drawn from a hat, then entered in ESPN by
+  the commissioner. `draftSettings.orderType` is `MANUAL` and `pickOrder` is
+  readable live, so the slot is a **read**, not a transcription. Until it is
+  entered, the array ESPN serves is a placeholder — treat any pre-08-24 read as
+  provisional.
+- **2026-08-31, 19:00 PT** — draft (`draftSettings.date`); room opens 18:00
+  (`availableDate`). **SNAKE, 16 rounds, `timePerSelection` = 90 s** — half again
+  the 60 s every Checkpoint-2 rehearsal assumed.
+- **2026-09-09 (a Wednesday)** — NFL Week 1 opener, confirmed against the
+  ingested `schedules` table; Week 1 runs through 09-14. This is the Phase 3
+  hard deadline and the Checkpoint 3 trigger.
+
+Room composition as of 2026-08-10: **2 of 10 seats still have no owner
+attached** (ESPN default names, unchanged since 2026-07-21). Unowned at draft
+time means autodraft — which is exactly the 2025 pattern the 2.2 opponent model
+was calibrated on (2 of 10 seats autodrafted), so the prior is holding. Re-check
+ownership near draft day: a seat that stays empty is the most *predictable* seat
+in the room, and a seat that fills late invalidates that.
 
 Update this section whenever a phase or checkpoint closes.
 
