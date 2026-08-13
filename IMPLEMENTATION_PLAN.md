@@ -793,6 +793,17 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > Standing risk: ESPN can rebuild that bundle at any time, so a rehearsal on
 > 08-30 proves nothing about 08-31 — which is the strongest argument for the
 > queue being the load-bearing safety layer rather than the script.
+>
+> **APPROVED TO BUILD 2026-08-13 — spec at `docs/draft-auto-entry-spec.md`.**
+> Operator decisions recorded there: push-on-refusal is wanted but is
+> **best-effort only** (they expect to be unavailable from roughly an hour into
+> the draft and will ignore pushes then), so no design may depend on a response;
+> and they can cover rounds 1–3 in person, so the autonomous window is roughly
+> round 5 onward. **The operator identified the build blocker: queue EDIT is
+> untested.** The probe proved *append* only — not *remove*, not *reorder* — and
+> a queue that can only be appended to is useless by round 3 as the board
+> re-ranks. That is P0; if `Remove` cannot be driven, the queue-first design is
+> dead and the fallback is active card-path clicking with verify-after-commit.
 
 ---
 
