@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ziggurat draft-control probe
 // @namespace    ziggurat
-// @version      1.0
-// @description  DIAGNOSTIC ONLY. Answers one question: can page-side code drive ESPN's draft-room controls (Queue, Draft)? Nothing runs on load; every test is operator-triggered from the badge.
+// @version      1.1
+// @description  DIAGNOSTIC ONLY. Can page-side code drive ESPN's draft-room controls (Queue, Draft) — and can it EDIT the queue? Nothing runs on load; every test is operator-triggered from the badge.
 // @match        https://fantasy.espn.com/football/draft*
 // @match        https://fantasy.espn.com/football/mockdraft*
 // @grant        none
@@ -105,11 +105,24 @@
     return null;
   }
 
+  // `el.className` is an SVGAnimatedString on SVG nodes, so the usual
+  // `(el.className || "").toString()` yields "[object SVGAnimatedString]" —
+  // and a remove control rendered as a bare <svg> icon is exactly the case
+  // this probe has to be able to see.
+  function clsOf(el) {
+    if (!el || !el.getAttribute) return "";
+    const attr = el.getAttribute("class");
+    if (attr) return attr;
+    const c = el.className;
+    if (typeof c === "string") return c;
+    return (c && c.baseVal) || "";
+  }
+
   function describe(el) {
     const r = el.getBoundingClientRect();
     return {
       tag: el.tagName,
-      cls: (el.className || "").toString().slice(0, 90),
+      cls: clsOf(el).slice(0, 90),
       role: el.getAttribute("role") || null,
       disabled: el.disabled === true || el.getAttribute("aria-disabled") === "true",
       txt: (el.textContent || "").trim().slice(0, 40),
@@ -349,14 +362,14 @@
     "font:10px monospace;color:#9aa7b8";
   box.appendChild(out);
 
-  function addBtn(label, color, fn) {
+  function addBtn(label, color, fn, parent) {
     const b = document.createElement("button");
     b.textContent = label;
     b.style.cssText =
       `font:11px monospace;padding:3px 7px;border-radius:4px;cursor:pointer;` +
       `background:#1c222b;color:${color};border:1px solid #3a4553`;
     b.addEventListener("click", fn);
-    row.appendChild(b);
+    (parent || row).appendChild(b);
     return b;
   }
 
@@ -527,6 +540,550 @@
     } finally { busy = false; }
   }
 
+  // ======================================================================
+  // P0 — QUEUE EDIT (spec §4). The queue-first design rests entirely on
+  // this. The 2026-08-12 probe proved APPEND and nothing else, and a queue
+  // that can only be appended to is useless by round 3 because the board
+  // re-ranks every time another team picks. Three questions:
+  //
+  //   Q1  can a synthetic click REMOVE a queued player?      <- load-bearing
+  //   Q2  does add APPEND, or does ESPN insert by its own rank?
+  //   Q3  is reorder possible at all (HTML5 DnD / mouse-drag / a control)?
+  //
+  // If Q1 is yes, Q3 stops mattering: clear-and-refill produces ANY order,
+  // and N clicks is nothing against a 90 s pick clock. If Q1 is no, the
+  // design is dead and we fall back to active card-path clicking (spec §9).
+  // ======================================================================
+
+  function queuePanel() { return document.querySelector(".pick-queue"); }
+
+  // We do not get to ASSUME the queue's row markup. Report which selector
+  // actually matched, so a future ESPN rebuild reads as a changed mode in
+  // the log instead of a silent zero that looks like an empty queue.
+  const QUEUE_ROW_SELECTORS = [
+    '[class*="fixedDataTableRowLayout_main"]',
+    "li",
+    '[class*="Table__TR"]',
+    "tr",
+  ];
+  function queueEntries() {
+    const p = queuePanel();
+    if (!p) return { mode: "NO_PANEL", rows: [] };
+    for (const sel of QUEUE_ROW_SELECTORS) {
+      const rows = [...p.querySelectorAll(sel)].filter((r) => {
+        if (/header/i.test(clsOf(r))) return false;
+        if (r.closest('[class*="headerLayout"]')) return false;
+        return (r.textContent || "").trim().length > 3;
+      });
+      if (rows.length) return { mode: sel, rows };
+    }
+    return { mode: "NO_ROWS", rows: [] };
+  }
+
+  // The anchor carries a CLEAN player name; the row's full text carries
+  // rank/position/team noise that will never match pick-history text — and
+  // matching pick history is how the confounder below gets witnessed.
+  function entryName(row) {
+    const a = row.querySelector("a");
+    const t = a ? (a.textContent || "").trim() : "";
+    if (t) return t;
+    return (row.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+  }
+  function queueNames() { return queueEntries().rows.map(entryName); }
+
+  // THE CONFOUNDER for every test below: ESPN drops a queued player from
+  // YOUR queue the moment ANY team drafts him. Same observable, different
+  // cause — precisely the class of mistake that cost three false CONFIRMEDs
+  // on 2026-08-12. Pick History and Pick Queue are tabs in the same panel,
+  // so this check is frequently UNAVAILABLE; say so out loud rather than
+  // report a clean result from a measurement that never ran.
+  function historyProbe() {
+    const p = document.querySelector(".pick-history");
+    const txt = p ? (p.textContent || "").toLowerCase() : "";
+    return { available: !!p && txt.length > 20, txt };
+  }
+
+  // A control that only exists on hover has NO DOM node until React sees a
+  // mouseover, so query-then-click finds nothing and reports a confident
+  // false negative. Synthesize the hover, then re-query.
+  function hoverRow(row) {
+    const o = centerOpts(row);
+    const seq = [
+      ["pointerover", PointerEvent, true],
+      ["pointerenter", PointerEvent, false],
+      ["mouseover", MouseEvent, true],
+      ["mouseenter", MouseEvent, false],
+      ["mousemove", MouseEvent, true],
+    ];
+    for (const [type, Ctor, bubbles] of seq) {
+      try { row.dispatchEvent(new Ctor(type, Object.assign({}, o, { bubbles }))); }
+      catch (e) { /* older event ctor missing is not a finding */ }
+    }
+  }
+
+  function reactPropsOf(el) {
+    for (const k of Object.keys(el)) {
+      if (k.startsWith("__reactProps$") || k.startsWith("__reactEventHandlers$")) return el[k];
+    }
+    return null;
+  }
+
+  // Which handlers React has bound tells us the reorder MECHANISM before we
+  // try to drive it: onDragStart => HTML5 DnD; onMouseDown with no drag
+  // handlers => a mouse-move drag library; neither => not reorderable here.
+  function handlerNames(el, depth) {
+    const names = new Set();
+    let node = el;
+    for (let d = 0; node && d <= (depth == null ? 4 : depth); d++, node = node.parentElement) {
+      const p = reactPropsOf(node);
+      if (!p) continue;
+      for (const k of Object.keys(p)) {
+        if (/^on[A-Z]/.test(k) && typeof p[k] === "function") names.add(k + "@" + d);
+      }
+    }
+    return [...names];
+  }
+
+  // Which node is the remove control is not knowable in advance, so rank
+  // every plausible candidate and let the test try them in order.
+  const REMOVE_HINT = /(remove|delete|dequeue|trash|cancel|close|minus)/i;
+  function removeCandidatesIn(row) {
+    const hits = [];
+    for (const el of row.querySelectorAll("*")) {
+      const cls = clsOf(el);
+      const label = [
+        el.getAttribute("aria-label"),
+        el.getAttribute("title"),
+        el.getAttribute("data-testid"),
+      ].filter(Boolean).join(" ");
+      const txt = (el.textContent || "").trim();
+      const clickable = el.tagName === "BUTTON" || el.getAttribute("role") === "button";
+      let score = null;
+      if (REMOVE_HINT.test(cls) || REMOVE_HINT.test(label)) score = clickable ? 0 : 1;
+      else if (/^(×|✕|✖|x|−|-)$/i.test(txt)) score = clickable ? 0 : 2;
+      else if (clickable && txt.length <= 14) score = 3;
+      if (score === null) continue;
+      hits.push({ el, score, cls: cls.slice(0, 60), label, txt: txt.slice(0, 20), tag: el.tagName });
+    }
+    hits.sort((a, b) => a.score - b.score);
+    return hits;
+  }
+
+  // Set by test C when a candidate is PROVEN to remove. Test E then reuses
+  // that exact signature instead of blind-clicking its own best guess — two
+  // tests silently driving two different controls is how a rebuild result
+  // ends up meaning nothing.
+  let confirmedRemoveSig = null;
+
+  function pickRemoveControl(row) {
+    const list = removeCandidatesIn(row);
+    if (confirmedRemoveSig) {
+      const m = list.find(
+        (c) =>
+          c.cls === confirmedRemoveSig.cls &&
+          c.txt === confirmedRemoveSig.txt &&
+          c.tag === confirmedRemoveSig.tag
+      );
+      if (m) return m;
+    }
+    return list[0] || null;
+  }
+
+  // A candidate that turns out to be the player-card opener leaves a modal
+  // covering the panel, which would fail every LATER candidate for a reason
+  // that has nothing to do with removal.
+  function dismissModal() {
+    const m = openModal();
+    if (!m) return false;
+    const x = [...m.querySelectorAll("button,[role=button]")].find((b) =>
+      /close|dismiss|×|✕/i.test(
+        (b.getAttribute("aria-label") || "") + " " + clsOf(b) + " " + (b.textContent || "").trim()
+      )
+    );
+    if (x) { try { x.click(); } catch (e) { /* fall through to Escape */ } }
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, which: 27, bubbles: true })
+    );
+    return true;
+  }
+
+  // Ladder variant that judges on an EXPLICIT predicate rather than "the
+  // signature changed" — a change detector cannot tell our removal from a
+  // rival drafting the same player out of our queue.
+  async function runLadderUntil(label, getEl, verify, waitMs) {
+    emit(`--- ${label} ---`);
+    let fired = 0;
+    for (const level of LADDER) {
+      const el = getEl();
+      if (!el) { emit(level.name, "SKIP — target not found"); continue; }
+      if (!document.contains(el)) { emit(level.name, "SKIP — target detached"); continue; }
+      fired++;
+      let threw = null;
+      try { level.fire(el); } catch (e) { threw = String(e); }
+      if (threw) { emit(level.name, "THREW", threw); continue; }
+      const deadline = Date.now() + (waitMs || 2500);
+      while (Date.now() < deadline) {
+        await sleep(100);
+        const note = verify();
+        if (note) { emit(level.name, "*** WORKED ***", note); return { level: level.name, note, fired }; }
+      }
+      emit(level.name, `no effect (${waitMs || 2500}ms)`);
+    }
+    if (!fired) emit("INCONCLUSIVE — no level fired; the target was never found.");
+    return { level: null, note: null, fired };
+  }
+
+  // ---- shared add step (L1 only; L1 is the proven level) ---------------
+  async function addOne(name) {
+    const before = queueNames();
+    const row = findPlayerRow(name);
+    if (!row) {
+      emit(`  "${name}" SKIP — no rendered available-player row (P1: the grid is virtualized)`);
+      return null;
+    }
+    const qb =
+      row.querySelector("button.Button--queue") ||
+      [...row.querySelectorAll("button")].find(
+        (b) => (b.textContent || "").trim().toLowerCase() === "queue"
+      );
+    if (!qb) {
+      emit(`  "${name}" SKIP — no Queue button in that row (on the clock? it becomes Draft)`);
+      return null;
+    }
+    qb.click();
+    let after = before;
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      await sleep(100);
+      after = queueNames();
+      if (after.length > before.length) break;
+    }
+    if (after.length <= before.length) { emit(`  "${name}" — queue did not grow in 3s`); return null; }
+    const index = after.findIndex((x) => x.toLowerCase().includes(name.toLowerCase()));
+    emit(`  "${name}" landed at index ${index} of ${after.length}`, after);
+    return { name, index, of: after.length };
+  }
+
+  // ---- test A: read the panel, click nothing ---------------------------
+  async function inspectQueue() {
+    emit("--- INSPECT QUEUE PANEL (read-only) ---");
+    const p = queuePanel();
+    if (!p) { emit("no .pick-queue in the DOM — open the Pick Queue tab in the draft room"); return; }
+    emit("panel class:", clsOf(p).slice(0, 90), "| empty-flag:", clsOf(p).includes("empty"));
+    const { mode, rows } = queueEntries();
+    emit("row selector that matched:", mode, "| rows:", String(rows.length));
+    emit("queue order:", queueNames());
+    emit("elements with draggable=true:", String(p.querySelectorAll('[draggable="true"]').length));
+    for (const [i, r] of rows.slice(0, 3).entries()) {
+      emit(`  row[${i}] "${entryName(r)}"`);
+      emit("    row handlers:", handlerNames(r, 2));
+      const beforeHover = removeCandidatesIn(r).length;
+      hoverRow(r);
+      await sleep(250);
+      const cands = removeCandidatesIn(r);
+      emit(`    candidate controls: ${beforeHover} before hover, ${cands.length} after hover`);
+      cands.slice(0, 5).forEach((c, j) =>
+        emit(`      cand[${j}] score=${c.score}`, {
+          tag: c.tag, cls: c.cls, label: c.label, txt: c.txt, handlers: handlerNames(c.el, 2),
+        })
+      );
+    }
+    const hp = historyProbe();
+    emit("pick-history readable from this tab (confounder check):", String(hp.available));
+  }
+
+  // ---- test B: Q2, append or rank-insert? ------------------------------
+  async function queueAddOrdered(csv) {
+    const names = String(csv || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (names.length < 2) { emit('P0-B: type at least two surnames, comma-separated'); return; }
+    emit(`--- P0-B QUEUE ADD, ORDERED: ${names.join(" -> ")} ---`);
+    emit("Q2: does add APPEND, or does ESPN insert by its own rank?");
+    if (!queuePanel()) { emit("ABORT — no .pick-queue panel"); return; }
+    const landed = [];
+    for (const n of names) {
+      const r = await addOne(n);
+      if (r) landed.push(r);
+    }
+    if (!landed.length) { emit("VERDICT Q2: INCONCLUSIVE — nothing was added."); return; }
+    const appended = landed.every((l) => l.index === l.of - 1);
+    emit("landings:", landed.map((l) => `${l.name}@${l.index}/${l.of}`));
+    emit(
+      appended
+        ? "VERDICT Q2: APPEND — add order IS queue order, so clear-and-refill controls ordering."
+        : "VERDICT Q2: NOT a plain append — ESPN placed an entry by its own rule. Ordering needs reorder."
+    );
+    emit("final queue:", queueNames());
+  }
+
+  // ---- test C: Q1, the load-bearing one --------------------------------
+  async function queueRemove(fragment) {
+    emit("--- P0-C QUEUE REMOVE (Q1 — the load-bearing test) ---");
+    const { rows } = queueEntries();
+    if (!rows.length) { emit("ABORT — queue is empty; run the ADD test first"); return; }
+    const names = rows.map(entryName);
+    // The P0 input is a comma-separated list shared with the add/rebuild
+    // tests; removal takes the FIRST name, or row 0 when the box is empty.
+    const frag = String(fragment || "").split(",")[0].trim().toLowerCase();
+    let idx = 0;
+    if (frag) {
+      idx = names.findIndex((n) => n.toLowerCase().includes(frag));
+      if (idx < 0) { emit(`ABORT — "${fragment}" is not in the queue:`, names); return; }
+    }
+    const target = names[idx];
+    const others = names.filter((_, i) => i !== idx);
+    emit("queue before:", names);
+    emit(`target: index ${idx} "${target}" — these must SURVIVE:`, others);
+
+    const hp0 = historyProbe();
+    if (hp0.available && hp0.txt.includes(target.toLowerCase())) {
+      emit("ABORT — target already appears in pick history; he was drafted, not removable.");
+      return;
+    }
+    if (!hp0.available) {
+      emit("NOTE: pick-history is not readable from this tab, so the");
+      emit("  drafted-by-a-rival confounder cannot be witnessed directly.");
+      emit("  Prefer a target nobody in the room would take.");
+    }
+
+    // The verdict is a CONJUNCTION: the target left AND everything else
+    // stayed. A rival's pick removes exactly one name too — but it does not
+    // arrive within 2 s of our click on that specific row.
+    const verify = () => {
+      const now = queueNames();
+      if (now.some((n) => n.toLowerCase() === target.toLowerCase())) return null;
+      const kept = others.every((o) => now.some((n) => n.toLowerCase() === o.toLowerCase()));
+      return `queue is now ${JSON.stringify(now)} | other entries intact: ${kept}`;
+    };
+
+    const rowAt = () => queueEntries().rows[idx] || null;
+    const r0 = rowAt();
+    if (r0) { hoverRow(r0); await sleep(250); }
+    const cands = r0 ? removeCandidatesIn(r0) : [];
+    emit(`remove candidates in that row: ${cands.length}`);
+    cands.slice(0, 6).forEach((c, j) =>
+      emit(`  cand[${j}] score=${c.score}`, { tag: c.tag, cls: c.cls, label: c.label, txt: c.txt })
+    );
+    if (!cands.length) {
+      emit("VERDICT Q1: no candidate control in that row. Run 'inspect QUEUE' and send the markup.");
+      return;
+    }
+
+    for (let j = 0; j < Math.min(cands.length, 4); j++) {
+      const sig = { cls: cands[j].cls, txt: cands[j].txt, tag: cands[j].tag };
+      // Re-resolve per level BY SIGNATURE: the panel re-renders and the
+      // captured node goes stale (this is what broke remote automation).
+      const getEl = () => {
+        const r = rowAt();
+        if (!r) return null;
+        hoverRow(r);
+        const list = removeCandidatesIn(r);
+        const match =
+          list.find((c) => c.cls === sig.cls && c.txt === sig.txt && c.tag === sig.tag) || list[j];
+        return match ? match.el : null;
+      };
+      const res = await runLadderUntil(
+        `remove cand[${j}] ${sig.tag}.${sig.cls.slice(0, 30)}`, getEl, verify, 2000
+      );
+      if (res.level) {
+        confirmedRemoveSig = sig;
+        emit(`*** VERDICT Q1: REMOVE WORKS — "${target}" left the queue via ${res.level}, cand[${j}].`);
+        emit("    selector hint:", sig);
+        emit("    => clear-and-refill is viable; the queue-first design lives.");
+        return;
+      }
+      if (dismissModal()) { emit(`  (cand[${j}] opened a modal — dismissed before the next candidate)`); await sleep(400); }
+    }
+    emit("VERDICT Q1: no candidate removed the target.");
+    emit("  Queue-first is in doubt — see spec §9 kill criteria (fall back to card-path clicking).");
+  }
+
+  // ---- test D: Q3, reorder ---------------------------------------------
+  async function queueReorder() {
+    emit("--- P0-D QUEUE REORDER (Q3) ---");
+    const { rows } = queueEntries();
+    if (rows.length < 2) { emit("ABORT — need at least 2 queued players; run ADD first"); return; }
+    const before = rows.map(entryName);
+    emit("queue before:", before);
+    emit("target order (swap the top two):", [before[1], before[0], ...before.slice(2)]);
+
+    const src = () => queueEntries().rows[1] || null;
+    const dst = () => queueEntries().rows[0] || null;
+    const s0 = src();
+    if (!s0) { emit("ABORT — row[1] vanished between reads"); return; }
+    emit("row[1] handlers:", handlerNames(s0, 3));
+    emit("row[1] draggable attr:", String(s0.getAttribute("draggable")),
+         "| draggable descendants:", String(s0.querySelectorAll('[draggable="true"]').length));
+
+    // Same-set-different-order is the assertion. A drop or an add is not a
+    // reorder, and ESPN removing a drafted player would otherwise read as one.
+    const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+    const verify = () => {
+      const now = queueNames();
+      if (!sameSet(now, before)) return null;
+      if (now.join("|") === before.join("|")) return null;
+      return `order is now ${JSON.stringify(now)}`;
+    };
+
+    const at = (x, y, buttons) => ({
+      bubbles: true, cancelable: true, composed: true, view: window,
+      button: 0, buttons, clientX: Math.round(x), clientY: Math.round(y),
+    });
+
+    async function html5Drag() {
+      const s = src(), d = dst();
+      if (!s || !d) return false;
+      let dt;
+      try { dt = new DataTransfer(); } catch (e) { emit("  DataTransfer unavailable:", String(e)); return false; }
+      const so = centerOpts(s), dof = centerOpts(d);
+      const fire = (type, el, o) =>
+        el.dispatchEvent(new DragEvent(type, Object.assign({ dataTransfer: dt }, o)));
+      fire("dragstart", s, so);
+      await sleep(120);
+      fire("dragenter", d, dof);
+      fire("dragover", d, dof);
+      await sleep(120);
+      fire("drop", d, dof);
+      fire("dragend", s, so);
+      return true;
+    }
+
+    // Drag libraries listen on document/window, not on the row, so the moves
+    // go to the document even though the press and release go to the rows.
+    async function mouseDrag() {
+      const s = src(), d = dst();
+      if (!s || !d) return false;
+      const a = centerOpts(s), b = centerOpts(d);
+      s.dispatchEvent(new PointerEvent("pointerdown", at(a.clientX, a.clientY, 1)));
+      s.dispatchEvent(new MouseEvent("mousedown", at(a.clientX, a.clientY, 1)));
+      for (let i = 1; i <= 10; i++) {
+        const x = a.clientX + ((b.clientX - a.clientX) * i) / 10;
+        const y = a.clientY + ((b.clientY - a.clientY) * i) / 10;
+        document.dispatchEvent(new PointerEvent("pointermove", at(x, y, 1)));
+        document.dispatchEvent(new MouseEvent("mousemove", at(x, y, 1)));
+        await sleep(40);
+      }
+      document.dispatchEvent(new PointerEvent("pointerup", at(b.clientX, b.clientY, 0)));
+      document.dispatchEvent(new MouseEvent("mouseup", at(b.clientX, b.clientY, 0)));
+      return true;
+    }
+
+    for (const [name, fn] of [["HTML5 drag-and-drop", html5Drag], ["mouse-move drag", mouseDrag]]) {
+      emit(`trying ${name}...`);
+      if (!(await fn())) { emit(`  ${name}: could not fire`); continue; }
+      const deadline = Date.now() + 2500;
+      let note = null;
+      while (Date.now() < deadline) { await sleep(100); note = verify(); if (note) break; }
+      if (note) { emit(`*** VERDICT Q3: REORDER WORKS via ${name} —`, note); return; }
+      emit(`  ${name}: order unchanged`);
+    }
+    emit("VERDICT Q3: no reorder mechanism responded.");
+    emit("  Only fatal if Q1 ALSO failed — clear-and-refill needs no reorder at all.");
+  }
+
+  // ---- test E: the actual production operation -------------------------
+  async function queueRebuild(csv) {
+    const want = String(csv || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!want.length) { emit("P0-E: type the desired queue, comma-separated"); return; }
+    emit(`--- P0-E QUEUE REBUILD (the production operation): ${want.join(" -> ")} ---`);
+    const t0 = Date.now();
+    let clicks = 0;
+
+    for (let guard = 0; guard < 20; guard++) {
+      const rows = queueEntries().rows;
+      if (!rows.length) break;
+      const n = rows.length;
+      hoverRow(rows[0]);
+      await sleep(150);
+      const ctl = pickRemoveControl(queueEntries().rows[0] || rows[0]);
+      if (!ctl) { emit("STOP — no remove control on row 0"); break; }
+      if (guard === 0) emit("  removing via:", { tag: ctl.tag, cls: ctl.cls, txt: ctl.txt, proven: !!confirmedRemoveSig });
+      try { ctl.el.click(); } catch (e) { emit("STOP — remove click threw:", String(e)); break; }
+      clicks++;
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline) { await sleep(100); if (queueEntries().rows.length < n) break; }
+      if (queueEntries().rows.length >= n) { emit("STOP — removal did not take"); break; }
+    }
+    emit(`after clear: ${JSON.stringify(queueNames())} (${clicks} clicks, ${Date.now() - t0}ms)`);
+
+    for (const n of want) { if (await addOne(n)) clicks++; }
+
+    const got = queueNames();
+    const ok =
+      got.length === want.length &&
+      want.every((w, i) => (got[i] || "").toLowerCase().includes(w.toLowerCase()));
+    emit("final queue:", got);
+    emit(
+      ok
+        ? `*** REBUILD OK — desired order achieved: ${clicks} clicks, ${Date.now() - t0}ms (budget: 90s/pick)`
+        : `*** REBUILD MISMATCH — wanted ${JSON.stringify(want)}, got ${JSON.stringify(got)}`
+    );
+  }
+
+  // ---- test F: P1, drive the search box (virtualized-grid access) ------
+  // Cheap to answer while we are already in a live room, and the queue
+  // writer cannot queue a player whose row was never rendered.
+  function searchInputs() {
+    const hits = [];
+    for (const el of document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])')) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 8) continue;
+      hits.push(el);
+    }
+    const hint = (e) =>
+      /player|search|name/i.test(
+        (e.placeholder || "") + " " + clsOf(e) + " " + (e.getAttribute("aria-label") || "")
+      ) ? 0 : 1;
+    hits.sort((a, b) => hint(a) - hint(b));
+    return hits;
+  }
+
+  // React tracks the previous value on the node, so a plain `el.value = x`
+  // is swallowed as a no-op change. Go through the prototype's native setter.
+  function setNativeValue(el, value) {
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value");
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  async function searchProbe(name) {
+    const q = String(name || "").split(",")[0].trim();
+    if (!q) { emit("P1: type a surname first"); return; }
+    emit(`--- P1 SEARCH: drive the player filter to "${q}" ---`);
+    const ins = searchInputs();
+    emit(`visible text inputs: ${ins.length}`);
+    ins.slice(0, 4).forEach((el, i) =>
+      emit(`  [${i}]`, { ph: el.placeholder || null, cls: clsOf(el).slice(0, 50), aria: el.getAttribute("aria-label") })
+    );
+    if (!ins.length) { emit("P1 FAILED — no search input found"); return; }
+    const el = ins[0];
+    emit("target before search:", findPlayerRow(q) ? "already rendered" : "not rendered");
+    setNativeValue(el, q);
+    await sleep(1500);
+    const row = findPlayerRow(q);
+    emit(
+      row
+        ? `*** P1 OK — "${q}" rendered after driving the search box: ${(row.textContent || "").trim().slice(0, 60)}`
+        : `P1 FAILED — "${q}" still not in the grid after 1.5s`
+    );
+    // A left-over filter would starve every later test of rows and read as a
+    // failure that has nothing to do with what was being tested.
+    setNativeValue(el, "");
+    emit("(search box cleared)");
+  }
+
+  // Every P0 test shares the one-run-at-a-time mutex: two live ladders on
+  // the same panel interleave into an uninterpretable result.
+  function guarded(fn) {
+    return async (...args) => {
+      if (busy) { emit("REFUSED — a run is already in flight"); return; }
+      busy = true;
+      try { await fn(...args); } catch (e) { emit("TEST THREW:", String(e)); }
+      finally { busy = false; }
+    };
+  }
+
   const nameInput = document.createElement("input");
   nameInput.placeholder = "player surname";
   nameInput.style.cssText =
@@ -565,6 +1122,31 @@
     draftBtn.style.background = "#1c222b";
     fullChain(nameInput.value);
   });
+
+  // ---- P0 row: queue editing. Its own row, deliberately away from the
+  // pick-COMMITTING button above — nothing here can spend a pick.
+  const p0label = document.createElement("div");
+  p0label.textContent = "P0 queue-edit — run OFF-TURN, hands off the mouse:";
+  p0label.style.cssText = "color:#e0c46c;margin:8px 0 4px;border-top:1px solid #2a323d;padding-top:6px";
+  box.insertBefore(p0label, out);
+
+  const row2 = document.createElement("div");
+  row2.style.cssText = "display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px";
+  box.insertBefore(row2, out);
+
+  const listInput = document.createElement("input");
+  listInput.placeholder = "surnames, comma-sep";
+  listInput.style.cssText =
+    "font:11px monospace;padding:3px 5px;border-radius:4px;width:170px;" +
+    "background:#0d1116;color:#d8dee9;border:1px solid #3a4553";
+  row2.appendChild(listInput);
+
+  addBtn("inspect QUEUE", "#7aa2f7", guarded(() => inspectQueue()), row2);
+  addBtn("B: add ordered", "#45c98b", guarded(() => queueAddOrdered(listInput.value)), row2);
+  addBtn("C: REMOVE", "#e0c46c", guarded(() => queueRemove(listInput.value)), row2);
+  addBtn("D: reorder", "#e0c46c", guarded(() => queueReorder()), row2);
+  addBtn("E: rebuild", "#45c98b", guarded(() => queueRebuild(listInput.value)), row2);
+  addBtn("P1: search", "#7aa2f7", guarded(() => searchProbe(listInput.value)), row2);
 
   addBtn("copy log", "#9aa7b8", () => {
     navigator.clipboard.writeText(log.join("\n")).then(
