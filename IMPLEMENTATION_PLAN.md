@@ -728,6 +728,71 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > (2) desktop draft readiness — install Tampermonkey, one full dress rehearsal
 > on this box; (3) near-day board refresh is now self-healing (3.1b pulls
 > projections/adp/espn_ranks daily onto the very machine that will draft).
+>
+> **Draft-day auto-entry — FEASIBILITY PROBED 2026-08-12, NOT BUILT.** The
+> operator asked whether the last mile could be automated (7pm on 08-31 is
+> toddler bedtime). Probed with a throwaway diagnostic userscript,
+> `ziggurat/draft/espn_probe.user.js` (Rule 8: lives in the deletable package;
+> nothing auto-runs, every test is operator-triggered from its own badge).
+>
+> **Finding: ESPN's draft room accepts UNTRUSTED synthetic clicks.** A bare
+> `element.click()` (ladder level 1 of 4 — no pointer-sequence synthesis, no
+> React-fiber poking) drives the real controls. React 16 delegation, `onClick`
+> at depth 0, no `isTrusted` check. Confirmed controls:
+> `BUTTON.Button--draft.PlayerCard__action-btn` (player-card commit, bound to
+> ONE player by construction), `BUTTON.Button--queue` (row queue), and
+> `BUTTON.Button--alt.Button--draft` (header commit). The row's action button
+> is **Queue off-turn and Draft on-turn** — a third commit path needing no modal.
+> So the automation path is a userscript; the CDP/Playwright fallback is NOT
+> needed. Live picks ride a private WebSocket — no REST write path exists.
+>
+> **The methodological lesson is the durable part: three consecutive rounds of
+> this probe produced CONFIRMED verdicts that were all false.** A pick landing
+> under your team after a click has two innocent explanations that a pick-history
+> detector cannot distinguish from success — the operator's own rescue click
+> (they were manually clicking to avoid burning a practice pick, and each ladder
+> level waits 2.5 s, so a hand anywhere in that window is attributed to whichever
+> level was running), and **expiry autodraft**, which takes best-available and
+> therefore looks exactly like a plausible pick. The tell was visible and missed:
+> the "working" level wandered L1/L2/L3 across runs, and a real mechanism does
+> not move. Two design changes made the measurement sound, and both generalize:
+> (1) **prefer an experiment whose effect nothing else in the environment can
+> produce** — the queue chain runs OFF-TURN, where there is no clock, no
+> autodraft, and nothing else populates YOUR queue, so a named player appearing
+> there is attributable to the click alone (confirmed twice: T. Higgins, J.
+> Price); (2) **witness the confounder directly** — the commit ladder now records
+> the draft clock at fire time, and autodraft fires only at 0:00, so the three
+> exact-target commits (Flowers p8, Irving p13, Tuten p33, all L1, clock 00:16 /
+> 00:19 / 00:22) exclude it. Earlier probe bugs of the same family, each fixed:
+> an all-levels-SKIPPED run printed a confident negative verdict instead of
+> INCONCLUSIVE; a selector matching bare `div`s returned 192 "Draft buttons" and
+> put a wrapper ahead of the real one; and overlapping runs (no mutex) interleaved
+> into an uninterpretable wrong-player commit.
+>
+> **The danger this exposed, if it is ever built:** committing is easy,
+> TARGETING is not. The header Draft button is enabled on your turn regardless
+> of what is selected, and a plain row-cell click does NOT move ESPN's
+> selection — so an early version drafted the default best-available three times
+> running (Brown, McMillan, Loveland) while reporting success. Only the
+> player-card button is bound to a specific player. Any build must commit
+> through a player-bound control, verify-after-commit, and refuse rather than
+> guess.
+>
+> **Proposed architecture if the operator green-lights it (NOT yet decided):**
+> keep the Pick Queue continuously populated with the cockpit's ranked board, so
+> ESPN's own autopick — which auto-engages after repeated clock expiry — becomes
+> a fallback that picks from ZIGGURAT's rankings instead of ESPN's. The
+> userscript then makes the pick at the turn via the card path, and refuses on
+> ambiguity. Worst case degrades to "autodrafted from our own board," which is
+> strictly better than the current manual-entry plan. Remaining engineering (all
+> tractable, none research): turn detection; **driving ESPN's search filter to
+> bring a non-rendered player into the virtualized grid** (`findPlayerRow` only
+> sees rendered rows); reuse of the existing DOM-sync resolver for name→row;
+> verify-after-commit. Acceptance test would be a full 16-round hands-off
+> practice draft PLUS a deliberate mid-draft kill to exercise the queue fallback.
+> Standing risk: ESPN can rebuild that bundle at any time, so a rehearsal on
+> 08-30 proves nothing about 08-31 — which is the strongest argument for the
+> queue being the load-bearing safety layer rather than the script.
 
 ---
 
