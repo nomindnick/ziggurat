@@ -239,8 +239,10 @@ expire at any moment.
 
 ### Components to write
 
-- `ziggurat/draft/espn_queue.user.js` — the queue writer. Extends (or ships
-  alongside) `espn_sync.user.js`. Same `{{PORT}}`/`{{TOKEN}}` templating.
+- ~~`ziggurat/draft/espn_queue.user.js` — the queue writer~~ — **BUILT
+  2026-08-15** (v1.1 after a 35-agent audit; §6b below). Served at
+  `/queue.user.js`, same `{{PORT}}`/`{{TOKEN}}` templating as sync.
+  **Code-complete but live-unrehearsed** — §8.2/§8.3 are what ship it.
 - ~~Cockpit endpoint `GET /api/queue`~~ — **BUILT 2026-08-15** (§6a below).
 - ~~Cockpit endpoint `POST /api/queue/status`~~ — **BUILT 2026-08-15**,
   log-only: records the report + a consecutive-failure streak; the
@@ -292,15 +294,65 @@ Rules the writer may rely on, each pinned by a test:
   The reasons stay verbatim (Rule 6); the response says so at the top level.
 
 `POST /api/queue/status` (token-authed like `/api/sync`): body
-`{league, overall, achieved: [names…], ok, reason?}` — **`ok` must be a JSON
-boolean** (a stringly `"false"` is rejected 400; a coerced True would silently
-reset the failure streak step 4 pushes on). The endpoint **validates the
+`{league, overall, achieved: [names…], ok, reason?, autopick?}` — **`ok` must
+be a JSON boolean** (a stringly `"false"` is rejected 400; a coerced True would
+silently reset the failure streak step 4 pushes on). `autopick` is the writer's
+per-cycle observation of ESPN's Autopick toggle (`"on"/"off"/"unknown"`; junk
+records null) — the P2 evidence gatherer. The endpoint **validates the
 first-room league binding but never claims it** — the binding belongs to the
 pick feed (`/api/sync`) alone; a picks-free telemetry POST that claimed it
 could bind a fresh cockpit to `""` before the harvester's first batch and brick
 sync for the whole unattended remainder (audit, demonstrated live). Bounded
 storage; response carries `bad_streak` (consecutive `ok: false` reports).
 Surfaced in `/api/state` under `"queue"`.
+
+### 6b. The queue writer (step 3, built 2026-08-15; v1.1 after audit)
+
+`espn_queue.user.js` runs the §6 loop as an **iterative fix loop**, converging
+position by position from the TOP of the queue (the position autopick reads
+first): the row at the first wrong position is removed — unless the player who
+belongs there is absent entirely, in which case he is ADDED first — so the
+queue never drains to zero while a wanted player can still be fetched. One
+retry against a fresh `/api/queue` read, then refuse and report (§6).
+
+**Identity is the load-bearing piece, and v1.0 got it wrong** (35-agent audit:
+6 criticals, all fixed and node-verified against the audit's own repros):
+
+- suffix-stripped surname + first initial is NECESSARY, never sufficient —
+  "Brian Thomas Jr." vs "B. Robinson Jr." both reduced to *(jr, b)* and
+  verified green with the wrong player at the queue head;
+- **team/position evidence from the row text confirms or contradicts** (the
+  queue abbreviates names but renders team+pos; Jameson vs Javonte Williams
+  both render "J. Williams" and only the team code separates them);
+- **ambiguity → the row is PROTECTED**: never removed, never claimed, reported
+  as not-ok (§7 refuse-not-guess). An unreadable D/ST row while any D/ST is
+  desired is protected, not stale.
+
+Other audit-paid rules now in the writer:
+
+- **The skip ledger only charges evidence about the player** — one failure per
+  player per cycle, nothing on `on_clock`, and a pass where every add fails
+  identically charges nobody (that is evidence about the environment). ok
+  additionally requires the §7 depth floor (`achieved ≥ min(3, |desired|)`),
+  so an emptied queue can never report ok (v1.0's all-skipped state wiped the
+  queue and reset the escalation streak).
+- **On the operator's own turn: head-fix only.** Adds are impossible on-turn
+  (`Button--queue` is off-turn only), so a rebuild could only strip the queue
+  while the clock runs. If `desired[0]` is queued below the top, rows above
+  him are removed; if he is absent, the writer touches nothing and reports.
+- **A HALTED writer keeps reporting** (`ok:false, "writer HALTED …"` every
+  cycle) so the server streak keeps growing for step 4 — v1.0 went silent and
+  froze the streak at 1 in exactly the state that most needs a push. The §5c
+  tripwire matches on full identity, not bare surname (bare surnames made
+  false halts LIKELY: every "Jr." collided, every D/ST collided).
+- Landing verification = a NEW queue row that matches the added player —
+  panel-text substring accepted an existing same-surname row as success.
+
+**Rehearsal must verify two DOM assumptions the audit flagged as unmeasured**
+(both fail SAFE — protected rows + degraded reports — but noisy): (1) queue
+rows actually render team codes next to the abbreviated name (the namesake
+disambiguation depends on it); (2) what a D/ST row looks like in the queue.
+Also watch the badge's `autopick ON/OFF` readout — that observation is P2.
 
 ---
 
@@ -349,7 +401,12 @@ Nothing ships without these, on **live practice drafts**:
 2. ~~`GET /api/queue` + ordering policy, server-side, unit-tested~~ — **DONE
    2026-08-15** (§6a; 20-agent adversarial audit: 11 confirmed findings — 3
    major — all fixed same day; suite 1457).
-3. Queue writer userscript: read → diff → rebuild → verify.
+3. ~~Queue writer userscript: read → diff → rebuild → verify~~ —
+   **CODE-COMPLETE 2026-08-15** (§6b; 35-agent audit: 28 confirmed findings —
+   6 critical — all fixed; identity fixes node-verified against the audit's
+   repros; suite 1458). **Unrehearsed against live ESPN** — steps 5's
+   rehearsals are the acceptance gate, and §6b names the two DOM assumptions
+   they must verify first.
 4. Refusal + push path.
 5. Rehearsals (§8.2, §8.3).
 6. *Stretch, only if 1–5 are clean well before 08-31:* active card-path

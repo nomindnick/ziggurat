@@ -54,6 +54,7 @@ from ziggurat.draft.sync import ParsedPick, parse_payload_pick, resolve_synced_p
 
 _UI_PATH = Path(__file__).with_name("webui.html")
 _USERSCRIPT_PATH = Path(__file__).with_name("espn_sync.user.js")
+_QUEUE_USERSCRIPT_PATH = Path(__file__).with_name("espn_queue.user.js")
 
 # Sync bookkeeping caps: pending picks are bounded by draft size; conflict
 # messages are display-only and bounded so a pathological feed can't grow RAM.
@@ -357,6 +358,12 @@ class WebCockpit:
         overall = payload.get("overall")
         reason = str(payload.get("reason") or "")[:300]
         achieved = [str(a)[:80] for a in achieved_raw[:_QUEUE_K_MAX * 2]]
+        # The writer observes ESPN's Autopick toggle every cycle — the P2
+        # load-bearing unknown (does expiry draw from the queue?). Recorded so
+        # rehearsals gather the evidence; "off" is the state that would defeat
+        # the whole queue-first design.
+        autopick_raw = payload.get("autopick")
+        autopick = autopick_raw if autopick_raw in ("on", "off", "unknown") else None
         with self._lock:
             # VALIDATE against the first-room-wins binding — NEVER establish
             # it. The binding is claimed only by the pick feed (/api/sync),
@@ -380,6 +387,7 @@ class WebCockpit:
                 "reason": reason,
                 "reported_overall": overall if type(overall) is int else None,
                 "session_overall": self.session.overall_pick,
+                "autopick": autopick,
             }
             return {
                 "ok": True,
@@ -691,6 +699,7 @@ class WebCockpit:
 def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
     ui_html = _UI_PATH.read_text(encoding="utf-8")
     userscript_tpl = _USERSCRIPT_PATH.read_text(encoding="utf-8")
+    queue_userscript_tpl = _QUEUE_USERSCRIPT_PATH.read_text(encoding="utf-8")
 
     class Handler(BaseHTTPRequestHandler):
         # A local single-operator cockpit: keep the terminal quiet during bursts.
@@ -730,6 +739,15 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
                 # on disk (single-operator machine).
                 script = (
                     userscript_tpl
+                    .replace("{{TOKEN}}", cockpit.sync_token)
+                    .replace("{{PORT}}", str(self.server.server_address[1]))
+                )
+                self._send(200, script.encode("utf-8"), "text/javascript; charset=utf-8")
+            elif url.path == "/queue.user.js":
+                # The queue-writer userscript (auto-entry spec §6), same token
+                # + port substitution and the same trust boundary as sync.
+                script = (
+                    queue_userscript_tpl
                     .replace("{{TOKEN}}", cockpit.sync_token)
                     .replace("{{PORT}}", str(self.server.server_address[1]))
                 )
@@ -918,6 +936,7 @@ def launch(
     host, bound_port = server.server_address[:2]
     print(f"Draft cockpit: http://{host}:{bound_port}/  (Ctrl-C to quit; journal: {session.journal_path})")
     print(f"ESPN sync userscript (install once in Tampermonkey): http://{host}:{bound_port}/sync.user.js")
+    print(f"ESPN queue writer (install once in Tampermonkey): http://{host}:{bound_port}/queue.user.js")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

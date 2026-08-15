@@ -685,7 +685,7 @@ def test_queue_status_records_reports_and_tracks_the_bad_streak(cockpit):
     )
     assert out["ok"] is True and out["bad_streak"] == 0
     out = _queue_status_post(base, session, {"overall": 1, "achieved": ["QB0"],
-                                             "ok": False,
+                                             "ok": False, "autopick": "on",
                                              "reason": "hover-gated Remove never appeared"})
     # Audit (mutation-verified): the FIRST failure must read 1, not just the
     # second read 2 — a `0 if ok else 2` mutant survived the old assertions.
@@ -693,10 +693,14 @@ def test_queue_status_records_reports_and_tracks_the_bad_streak(cockpit):
     rep = _get(base, "/api/state")["queue"]["last_report"]
     assert rep["ok"] is False and rep["reported_overall"] == 1
     assert rep["reason"] == "hover-gated Remove never appeared"
+    # The P2 observation rides every report; junk never masquerades as a state.
+    assert rep["autopick"] == "on"
     out = _queue_status_post(base, session, {"achieved": [], "ok": False,
-                                             "overall": "not-an-int"})
+                                             "overall": "not-an-int",
+                                             "autopick": "definitely-junk"})
     assert out["bad_streak"] == 2
-    assert _get(base, "/api/state")["queue"]["last_report"]["reported_overall"] is None
+    rep = _get(base, "/api/state")["queue"]["last_report"]
+    assert rep["reported_overall"] is None and rep["autopick"] is None
     out = _queue_status_post(base, session, {"achieved": ["QB0", "RB0", "WR0"], "ok": True})
     assert out["bad_streak"] == 0  # a good verify resets the streak
 
@@ -820,3 +824,19 @@ def test_queue_rows_carry_espn_display_names_when_provided(tmp_path, make_draft_
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_queue_userscript_served_with_token_and_port_baked_in(cockpit):
+    base, session = cockpit
+    with urllib.request.urlopen(base + "/queue.user.js", timeout=10) as r:
+        assert r.status == 200
+        script = r.read().decode()
+    real = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    assert real in script and str(base.rsplit(":", 1)[1]) in script
+    assert "{{TOKEN}}" not in script and "{{PORT}}" not in script
+    # The writer's structural safety rails must be present in what is served:
+    # removal via Button--dequeue only. The capitalized selector form (what a
+    # querySelector-then-click needs) must never appear for Draft — the writer
+    # only reads lowercase /button--draft/ in a scoring regex, never clicks it.
+    assert "Button--dequeue" in script
+    assert "Button--draft" not in script
