@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat draft-control probe
 // @namespace    ziggurat
-// @version      1.3
+// @version      1.4
 // @description  DIAGNOSTIC ONLY. Can page-side code drive ESPN's draft-room controls (Queue, Draft) — and can it EDIT the queue? Nothing runs on load; every test is operator-triggered from the badge.
 // @match        https://fantasy.espn.com/football/draft*
 // @match        https://fantasy.espn.com/football/mockdraft*
@@ -333,14 +333,24 @@
     // (own roster, watch list) that carries no action button. Prefer a row
     // that actually offers a control; fall back to the first text match so
     // the caller can still report what it found.
-    let fallback = null;
+    let best = null;
+    let bestScore = 99;
     for (const r of document.querySelectorAll('[class*="fixedDataTableRowLayout_main"]')) {
       if (r.closest(".pick-history") || r.closest(".pick-queue")) continue;
       if (!(r.textContent || "").toLowerCase().includes(frag)) continue;
-      if (r.querySelector("button, [role=button]")) return r;
-      if (!fallback) fallback = r;
+      const cls = [...r.querySelectorAll("button,[role=button]")].map(clsOf).join(" ").toLowerCase();
+      // Rank by what the row OFFERS. An undo button means the player is
+      // ALREADY DRAFTED, and "prefer any row that has a button" put exactly
+      // those rows first on 2026-08-14.
+      let score = 3;
+      if (/button--queue/.test(cls)) score = 0;       // available, off-turn
+      else if (/button--draft/.test(cls)) score = 1;  // available, on the clock
+      else if (/button--undo/.test(cls)) score = 4;   // already drafted
+      else if (cls) score = 2;
+      if (score < bestScore) { best = r; bestScore = score; }
+      if (bestScore === 0) break;
     }
-    return fallback;
+    return best;
   }
 
   // ---- badge UI --------------------------------------------------------
@@ -355,7 +365,7 @@
     "padding:8px;max-width:460px;opacity:.96";
 
   const title = document.createElement("div");
-  title.textContent = "ZIG PROBE v1.3 — diagnostic, nothing auto-runs";
+  title.textContent = "ZIG PROBE v1.4 — diagnostic, nothing auto-runs";
   title.style.cssText = "color:#45c98b;margin-bottom:6px;font-weight:bold";
   box.appendChild(title);
 
@@ -673,17 +683,29 @@
 
   // Which node is the remove control is not knowable in advance, so rank
   // every plausible candidate and let the test try them in order.
-  const REMOVE_HINT = /(remove|delete|dequeue|trash|cancel|close|minus)/i;
+  const REMOVE_HINT = /(dequeue|remove|delete|trash|minus)/i;
+
+  // HARD SAFETY RULE: a REMOVE test must never be able to spend a pick.
+  // Measured 2026-08-14: on the operator's turn the queue row's action
+  // button is DRAFT, the score-3 catch-all matched it, L1 clicked it, and
+  // the probe reported "REMOVE WORKS" — because drafting a queued player
+  // also takes him out of the queue. It cost a real practice pick and a
+  // false Q1 confirmation. The real control is Button--dequeue / "Remove".
+  const NEVER_CLICK_CLS = /(button--draft|button--undo|button--queue)/i;
+  const NEVER_CLICK_TXT = /^(draft|draft player|undo|queue)$/i;
+
   function removeCandidatesIn(row) {
     const hits = [];
     for (const el of row.querySelectorAll("*")) {
       const cls = clsOf(el);
+      const txt = (el.textContent || "").trim();
+      if (NEVER_CLICK_CLS.test(cls) || NEVER_CLICK_TXT.test(txt)) continue;
+      if (isDisabled(el)) continue; // e.g. the ":02" countdown button
       const label = [
         el.getAttribute("aria-label"),
         el.getAttribute("title"),
         el.getAttribute("data-testid"),
       ].filter(Boolean).join(" ");
-      const txt = (el.textContent || "").trim();
       const clickable = el.tagName === "BUTTON" || el.getAttribute("role") === "button";
       let score = null;
       if (REMOVE_HINT.test(cls) || REMOVE_HINT.test(label)) score = clickable ? 0 : 1;
@@ -694,6 +716,49 @@
     }
     hits.sort((a, b) => a.score - b.score);
     return hits;
+  }
+
+  // Remove one named entry from the queue. Used to UNDO a wrong-player add,
+  // which is a side effect the probe must clean up rather than leave behind.
+  async function removeQueueEntry(displayName) {
+    const key = String(displayName || "").toLowerCase();
+    const idx = queueNames().findIndex((n) => n.toLowerCase() === key);
+    if (idx < 0) return false;
+    const row = queueEntries().rows[idx];
+    if (!row) return false;
+    hoverRow(row);
+    await sleep(150);
+    const ctl = pickRemoveControl(row);
+    if (!ctl) return false;
+    try { ctl.el.click(); } catch (e) { return false; }
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      await sleep(100);
+      if (!queueNames().some((n) => n.toLowerCase() === key)) return true;
+    }
+    return false;
+  }
+
+  // Independent of the pick-history panel (which is virtualized and may not
+  // hold the newest row): ask the grid itself what this player's row now
+  // OFFERS. An undo button means he is already drafted.
+  async function playerAvailability(name) {
+    const box = searchInputs()[0];
+    if (!box) return "unknown (no search box)";
+    setNativeValue(box, name);
+    await sleep(1300);
+    const row = findPlayerRow(name);
+    let verdict = "unknown (no row rendered)";
+    if (row) {
+      const btns = [...row.querySelectorAll("button,[role=button]")];
+      const cls = btns.map(clsOf).join(" ").toLowerCase();
+      if (/button--undo/.test(cls)) verdict = "DRAFTED (his row offers undo)";
+      else if (/button--queue|button--draft/.test(cls)) verdict = "still available";
+      else verdict = `unclear (buttons: ${btns.map((b) => (b.textContent || "").trim()).join("|")})`;
+    }
+    setNativeValue(box, "");
+    await sleep(300);
+    return verdict;
   }
 
   // Set by test C when a candidate is PROVEN to remove. Test E then reuses
@@ -800,6 +865,18 @@
     // mouseover — and "no button" would then read as "ESPN refuses adds".
     hoverRow(row);
     await sleep(200);
+
+    // The grid RECYCLES row nodes. Between resolving a row and clicking it,
+    // that same node can be re-bound to a different player: measured
+    // 2026-08-14, a lookup for "mullens" ended up holding a row that by then
+    // read "Amon-Ra St. Brown". Re-resolve and re-verify at the last moment.
+    row = findPlayerRow(name);
+    if (!row || !(row.textContent || "").toLowerCase().includes(key)) {
+      emit(`  "${name}" SKIP — that row was recycled to another player before the click`);
+      await clearSearch();
+      return null;
+    }
+
     const btns = [...row.querySelectorAll("button, [role=button]")];
     const label = (b) => (b.textContent || "").trim().toLowerCase();
     const qb =
@@ -814,9 +891,14 @@
         emit("     => that row offers DRAFT, so you are ON THE CLOCK. Queueing is");
         emit("        impossible until your turn passes. Wait for it, then re-run.");
       }
+      if (btns.some((b) => label(b) === "undo" || /button--undo/i.test(clsOf(b)))) {
+        emit("     => that row offers UNDO, so this player is ALREADY DRAFTED.");
+      }
       await clearSearch();
       return null;
     }
+
+    const beforeNames = queueNames();
     qb.click(); // L1 is the proven level (2026-08-12)
 
     // The landing signal is the panel's TEXT, not our row count. Text is what
@@ -833,7 +915,22 @@
     // every LATER test of rows and reads as a failure of whatever that test
     // was measuring.
     await clearSearch();
-    if (!landed) { emit(`  "${name}" — did not appear in the queue within 3s`); return null; }
+    if (!landed) {
+      // "Our player did not arrive" and "somebody else did" are different
+      // facts, and the second one is a side effect the probe must clean up
+      // rather than leave sitting in the queue.
+      const extra = queueNames().filter((n) => !beforeNames.includes(n));
+      if (extra.length) {
+        emit(`  !!! WRONG PLAYER QUEUED: ${JSON.stringify(extra)} instead of "${name}"`);
+        for (const e of extra) {
+          const undone = await removeQueueEntry(e);
+          emit(`      cleanup: removed "${e}" -> ${undone}`);
+        }
+      } else {
+        emit(`  "${name}" — did not appear in the queue within 3s`);
+      }
+      return null;
+    }
 
     const after = queueNames();
     const index = after.findIndex((x) => x.toLowerCase().includes(key));
@@ -1002,6 +1099,20 @@
         `remove cand[${j}] ${sig.tag}.${sig.cls.slice(0, 30)}`, getEl, verify, 2000
       );
       if (res.level) {
+        // "Left the queue" has a second cause: he was DRAFTED. The pre-click
+        // check only ruled that out as a starting condition — the click
+        // itself can produce it. Measured 2026-08-14: a Draft button in the
+        // row passed the whole conjunction and reported REMOVE WORKS.
+        const hp1 = historyProbe();
+        const inHistory = hp1.available && hp1.txt.includes(target.toLowerCase());
+        const avail = await playerAvailability(target);
+        emit(`  post-click: in pick history = ${inHistory} | grid says: ${avail}`);
+        if (inHistory || /DRAFTED/.test(avail)) {
+          emit(`!!! CONTAMINATED — "${target}" was DRAFTED, not dequeued.`);
+          emit("    That click spent a pick. Not a Q1 result; discard it.");
+          emit("    candidate was:", sig);
+          return;
+        }
         confirmedRemoveSig = sig;
         emit(`*** VERDICT Q1: REMOVE WORKS — "${target}" left the queue via ${res.level}, cand[${j}].`);
         emit("    selector hint:", sig);
