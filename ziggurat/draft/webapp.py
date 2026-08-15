@@ -64,6 +64,14 @@ _MAX_CONFLICTS_SHOWN = 12
 _SUGGEST_LIMIT_DEFAULT = 8
 _SUGGEST_LIMIT_MAX = 25
 
+# Desired-queue depth served to the ESPN queue writer (auto-entry spec §6:
+# K ≈ 5-8). The floor is the writer's own escalation threshold (spec §7
+# K_min = 3): serving fewer valid targets than the depth the writer is required
+# to maintain would manufacture escalations, so a smaller ?k= is clamped UP.
+_QUEUE_K_DEFAULT = 8
+_QUEUE_K_MIN = 3
+_QUEUE_K_MAX = 10
+
 
 class CockpitError(ValueError):
     """A user-correctable request error (rendered as a 400 with a message)."""
@@ -154,6 +162,28 @@ class WebCockpit:
     # left open in another tab) are rejected (audit finding 18).
     _sync_league: str | None = field(default=None, init=False)
     sync_token: str = field(default="", init=False)
+    # player_id -> the display name ESPN's own draft-room DOM uses ("Texans
+    # D/ST", "Hollywood Brown") — the vocabulary the queue writer must search
+    # and verify with (spec §5c: an identifier the other side actually uses).
+    # Built at the load_board DB seam (simulator.espn_display_names); empty
+    # when the caller has no DB (tests), in which case rows serve null.
+    espn_names: dict[str, str] = field(default_factory=dict)
+    # Desired-queue cache (GET /api/queue): keyed on the EXACT pick sequence,
+    # so an edit (same length, different player) can never serve stale — the
+    # length-keyed shortcut is precisely the bug this key shape forbids. Always
+    # computed at the K_MAX depth and sliced per request (`top` only slices the
+    # engine's scored list), so a varying ?k= cannot bust the cache and force
+    # rollouts under the lock (audit: cross-origin GETs are unauthenticated).
+    # One rollout batch (~250 ms) per state change; polls between picks are free.
+    _queue_cache: tuple[tuple[str, ...], tuple[Any, ...]] | None = field(
+        default=None, init=False
+    )
+    # Queue-writer status reports (POST /api/queue/status): the LAST report plus
+    # a consecutive-failure streak. Step 2 records and displays; the push
+    # decision (spec §9 step 4) reads the streak — it is never made here.
+    _queue_last_report: dict[str, Any] | None = field(default=None, init=False)
+    _queue_bad_streak: int = field(default=0, init=False)
+    _queue_reports_received: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.resolver = NameResolver(self.session.board)
@@ -228,6 +258,134 @@ class WebCockpit:
                 "posture": self._advice.message if self._advice is not None else None,
                 "contingencies": [b.message for b in branches],
                 "sync": self._sync_state(),
+                "queue": {
+                    "last_report": self._queue_last_report,
+                    "bad_streak": self._queue_bad_streak,
+                    "received": self._queue_reports_received,
+                },
+            }
+
+    def queue_json(self, k: int) -> dict[str, Any]:
+        """The desired ESPN Pick Queue (auto-entry spec §6): top-``k`` engine
+        recommendations for the operator's NEXT pick, computable at any point
+        in the draft.
+
+        Writer-safety contract (the queue writer depends on this, spec §7):
+
+        * ``desired`` is empty ONLY when ``queue_for_overall`` is null (the
+          draft is complete, or every remaining pick is a rival's). An engine
+          failure RAISES — the handler turns it into a 500 — so the writer can
+          treat ``desired: []`` as "the queue no longer matters", never as
+          "clear the queue" on a lie.
+        * Ordering is deterministic per state (``session_seed ^ overall`` rng):
+          the response only changes when a pick lands, so the writer's
+          diff-then-rebuild loop cannot oscillate between polls.
+        * On the operator's turn ``desired`` extends the exact list shown in
+          the cockpit's recommendation panel — the committed pick equalling
+          ``desired[0]`` at expiry is acceptance test §8.5.
+        * ``k`` is a CAP, not a promise: depth is bounded by the engine's own
+          candidate window (D1, ``candidate_width``), so ``desired`` may run
+          shorter than ``k``. Deliberate — widening the window only for the
+          queue could re-rank the head, and then ESPN's autopick would diverge
+          from the on-clock panel. The queue uses the same engine or none.
+        """
+        k = max(_QUEUE_K_MIN, min(int(k), _QUEUE_K_MAX))
+        with self._lock:
+            s = self.session
+            target = s.next_operator_overall()
+            base = {
+                "epoch": self.sync_epoch,
+                "overall_pick": s.overall_pick,
+                "complete": s.complete,
+                "is_operator_turn": s.is_operator_turn,
+                "queue_for_overall": target,
+                "k": k,
+            }
+            if target is None:
+                return {**base, "picks_until_operator": None,
+                        "caveats": [], "desired": []}
+            key = tuple(p.player_id for p in s.picks)
+            if self._queue_cache is not None and self._queue_cache[0] == key:
+                recs = self._queue_cache[1]
+            else:
+                recs = tuple(s.recommend_upcoming(top=_QUEUE_K_MAX))
+                self._queue_cache = (key, recs)
+            until = target - s.overall_pick
+            # Rule 6 honesty: off-turn, each row's survival figure (and its
+            # verbatim reason string) is the ON-CLOCK vantage at `target` — it
+            # prices lasting BEYOND that pick, not lasting TO it. At a wheel
+            # target it reads "100% — no rush" while a whole round of rival
+            # picks intervenes; a response-level caveat corrects the reading
+            # without rewriting the engine's verbatim reasons (audit finding).
+            caveats = []
+            if until > 0:
+                caveats.append(
+                    f"off-turn basis: rows are priced as if on the clock at pick "
+                    f"{target}; each survival figure looks past that pick, not to "
+                    f"it — {until} pick(s) intervene first and may take these players"
+                )
+            return {
+                **base,
+                "picks_until_operator": until,
+                "caveats": caveats,
+                "desired": [
+                    {**_rec_json(r),
+                     "espn_name": self.espn_names.get(r.player_id)}
+                    for r in recs[:k]
+                ],
+            }
+
+    def queue_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record the queue the writer ACTUALLY achieved (spec §6's report-back
+        half). Step 2 logs and displays; the push decision on a bad streak is
+        step 4's and is deliberately not made here.
+
+        Bounded storage: the report is display/telemetry, not state — a
+        pathological payload must not grow RAM (same discipline as
+        ``_MAX_CONFLICTS_SHOWN``).
+        """
+        league = str(payload.get("league") or "").strip()
+        achieved_raw = payload.get("achieved")
+        if not isinstance(achieved_raw, list):
+            raise CockpitError("body must carry an 'achieved' list")
+        ok = payload.get("ok")
+        # Strict bool (the `type(exp) is int` idiom): a JSON string "false" is
+        # truthy, and a coerced True here silently RESETS the failure streak
+        # step 4's push trigger reads — the one counter that must not lie.
+        if type(ok) is not bool:
+            raise CockpitError("'ok' must be a JSON boolean")
+        overall = payload.get("overall")
+        reason = str(payload.get("reason") or "")[:300]
+        achieved = [str(a)[:80] for a in achieved_raw[:_QUEUE_K_MAX * 2]]
+        with self._lock:
+            # VALIDATE against the first-room-wins binding — NEVER establish
+            # it. The binding is claimed only by the pick feed (/api/sync),
+            # which rides the load-bearing data: a picks-free telemetry POST
+            # that claimed it could bind a fresh cockpit to "" before the
+            # harvester's first batch and brick /api/sync for the whole
+            # unattended remainder of the draft (audit, demonstrated live).
+            # A pre-binding report is recorded unbound — log-only, harmless —
+            # and the mismatch check engages the moment sync claims the room.
+            if self._sync_league is not None and league != self._sync_league:
+                raise CockpitError(
+                    "this cockpit session is already synced to a different "
+                    "ESPN draft room — close the other room's tab (or "
+                    "restart the cockpit to re-bind)"
+                )
+            self._queue_reports_received += 1
+            self._queue_bad_streak = 0 if ok else self._queue_bad_streak + 1
+            self._queue_last_report = {
+                "ok": ok,
+                "achieved": achieved,
+                "reason": reason,
+                "reported_overall": overall if type(overall) is int else None,
+                "session_overall": self.session.overall_pick,
+            }
+            return {
+                "ok": True,
+                "epoch": self.sync_epoch,
+                "session_overall": self.session.overall_pick,
+                "bad_streak": self._queue_bad_streak,
             }
 
     # -- mutations (each recomputes synchronously, like the REPL) ------------
@@ -578,6 +736,14 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
                 self._send(200, script.encode("utf-8"), "text/javascript; charset=utf-8")
             elif url.path == "/api/state":
                 self._run(cockpit.state_json)
+            elif url.path == "/api/queue":
+                qs = parse_qs(url.query)
+                raw_k = (qs.get("k") or [str(_QUEUE_K_DEFAULT)])[0]
+                try:
+                    k = int(raw_k)
+                except ValueError:
+                    k = _QUEUE_K_DEFAULT
+                self._run(lambda: cockpit.queue_json(k))
             elif url.path == "/api/board":
                 self._run(cockpit.board_json)
             elif url.path == "/api/suggest":
@@ -643,6 +809,13 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
                     self._json({"error": "bad sync token"}, code=403)
                     return
                 self._run(lambda: cockpit.sync_apply(payload))
+            elif url.path == "/api/queue/status":
+                # Same trust boundary as /api/sync: this arrives from the
+                # userscript, and the token is what authenticates it.
+                if not has_valid_token:
+                    self._json({"error": "bad sync token"}, code=403)
+                    return
+                self._run(lambda: cockpit.queue_status(payload))
             elif url.path == "/api/pick":
                 exp = payload.get("expected_overall")
                 self._run(lambda: cockpit.pick(
@@ -675,13 +848,20 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(session: DraftSession, *, port: int = 8811) -> ThreadingHTTPServer:
+def serve(
+    session: DraftSession,
+    *,
+    port: int = 8811,
+    espn_names: dict[str, str] | None = None,
+) -> ThreadingHTTPServer:
     """Build the cockpit server on 127.0.0.1:``port`` (not started).
 
     The caller (CLI) calls ``serve_forever()``; tests start it on port 0 in a
     thread and shut it down. Loopback-only by construction (league-private data
-    never listens on an external interface — Rule 5)."""
-    cockpit = WebCockpit(session=session)
+    never listens on an external interface — Rule 5). ``espn_names`` is the
+    ``simulator.espn_display_names`` mapping for the queue writer; None (tests,
+    no DB) serves null per row."""
+    cockpit = WebCockpit(session=session, espn_names=dict(espn_names or {}))
     return ThreadingHTTPServer(("127.0.0.1", port), _make_handler(cockpit))
 
 
@@ -698,6 +878,7 @@ def launch(
     seed: int = 42,
     roster: Any = None,
     port: int = 8811,
+    espn_names: dict[str, str] | None = None,
 ) -> None:
     """Build the session (start or resume — the exact ``app.launch`` semantics,
     including the O_EXCL no-clobber guard) and serve until Ctrl-C. The thin
@@ -733,7 +914,7 @@ def launch(
     for line in getattr(session, "resume_warnings", ()) or ():
         print(line)
 
-    server = serve(session, port=port)
+    server = serve(session, port=port, espn_names=espn_names)
     host, bound_port = server.server_address[:2]
     print(f"Draft cockpit: http://{host}:{bound_port}/  (Ctrl-C to quit; journal: {session.journal_path})")
     print(f"ESPN sync userscript (install once in Tampermonkey): http://{host}:{bound_port}/sync.user.js")

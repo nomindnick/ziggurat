@@ -612,6 +612,47 @@ class DraftSession:
         )
         return self._engine().recommend(ctx, top=top)
 
+    def next_operator_overall(self) -> int | None:
+        """1-based overall of the operator's NEXT pick, or None when none remain.
+
+        On the operator's turn this is :attr:`overall_pick` itself. None means
+        either the draft is complete or every remaining pick belongs to rivals
+        (the operator's roster is already fully drafted) — there is nothing left
+        to queue for.
+        """
+        for o in range(self.overall_pick, self.max_pick + 1):
+            if self._sequence[o - 1] == self.operator_slot:
+                return o
+        return None
+
+    def recommend_upcoming(self, top: int = 8) -> Sequence[PickRec]:
+        """Engine recommendations for the operator's NEXT pick, valid off-turn.
+
+        The queue-writer seam (auto-entry spec §6): ESPN's Pick Queue must be
+        populated BETWEEN operator turns, so this builds the ctx at
+        :meth:`next_operator_overall` with today's roster and taken set — the
+        same future-overall pattern :meth:`contingencies` uses for the wheel.
+        On the operator's own turn the ctx (and its ``session_seed ^ overall``
+        rng) is identical to :meth:`recommend`'s, so the two agree bit-for-bit
+        — the queue head IS the on-clock recommendation. Off-turn the board is
+        slightly richer than it will be by that pick (the intervening picks
+        haven't happened yet); each refresh after an observed pick converges
+        the estimate, and depth-K absorbs the snipes in between.
+
+        Raises when no operator pick remains — the caller must distinguish
+        "nothing to queue" (an explicit state) from an empty recommendation
+        list, never conflate them.
+        """
+        target = self.next_operator_overall()
+        if target is None:
+            raise RuntimeError(
+                "no operator picks remain in this draft; there is nothing to queue"
+            )
+        ctx = self._operator_context(
+            overall=target, own_roster=self.own_roster, taken=self._taken
+        )
+        return self._engine().recommend(ctx, top=top)
+
     def contingencies(self) -> Sequence[Contingency]:
         """Snake-turn "if X now -> then Y on the wheel" branches (top-3, 2-ply).
 

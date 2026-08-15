@@ -534,3 +534,289 @@ def test_verify_accepts_a_diminutive_variant_without_phantom_conflict(tmp_path, 
         {"league": "1", "picks": [{"overall": 1, "player": "Totally OtherPHIRB"}]}
     )
     assert out["conflicts"] == 1
+
+
+# ------------------------------------- desired-queue endpoint (auto-entry spec §6)
+
+
+def _get_err(base, path):
+    """GET expecting a non-2xx; returns (status, body)."""
+    try:
+        _get(base, path)
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
+    raise AssertionError("expected an HTTP error")
+
+
+def _queue_status_post(base, session, payload, token=None):
+    if token is None:
+        token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    req = urllib.request.Request(
+        base + "/api/queue/status", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def test_queue_serves_desired_on_turn_and_agrees_with_the_rec_panel(cockpit):
+    base, _session = cockpit
+    q = _get(base, "/api/queue")
+    assert q["queue_for_overall"] == 1 and q["picks_until_operator"] == 0
+    assert q["is_operator_turn"] is True and q["complete"] is False
+    # k caps depth; the engine's candidate window (D1) bounds it from below the
+    # cap — on this board that is 6, comfortably above the writer's K_min=3.
+    assert q["k"] == 8 and 3 <= len(q["desired"]) <= 8
+    # Rule 6: every queue row still carries its verbatim reasons.
+    assert all(d["reasons"] for d in q["desired"])
+    assert q["caveats"] == []  # on the clock, the vantage caveat does not apply
+    # §8.5 server half: the queue extends EXACTLY the panel the operator sees —
+    # two independent computations, same seed, must agree on the shared prefix.
+    state = _get(base, "/api/state")
+    panel = [r["player_id"] for r in state["recs"]]
+    assert [d["player_id"] for d in q["desired"]][: len(panel)] == panel
+    # epoch is the SESSION epoch — the same one the sync protocol carries —
+    # and stable across polls (audit: a per-request mint passed truthiness).
+    assert q["epoch"] == state["sync"]["epoch"]
+    assert _get(base, "/api/queue")["epoch"] == q["epoch"]
+
+
+def test_queue_k_slices_one_scored_list_and_the_tail_is_sane(cockpit):
+    # Audit: nothing pinned rows past the 5-row panel prefix or k > window.
+    # The k views must be PREFIXES of one another (one scored list, sliced),
+    # the tail must be unique/available/scored-descending, and a k beyond the
+    # candidate window must serve the window, not error.
+    base, session = cockpit
+    q3 = [d["player_id"] for d in _get(base, "/api/queue?k=3")["desired"]]
+    q8 = _get(base, "/api/queue?k=8")["desired"]
+    q10 = [d["player_id"] for d in _get(base, "/api/queue?k=10")["desired"]]
+    ids8 = [d["player_id"] for d in q8]
+    assert q3 == ids8[:3]
+    assert ids8 == q10[: len(ids8)] and len(q10) <= 10
+    assert len(set(ids8)) == len(ids8)                      # no duplicate rows
+    assert all(pid not in session.taken for pid in ids8)    # all available
+    scores = [d["pick_score"] for d in q8]
+    assert scores == sorted(scores, reverse=True)           # engine order kept
+
+
+def test_queue_off_turn_targets_the_next_operator_pick(cockpit):
+    base, _session = cockpit
+    head = _get(base, "/api/queue")["desired"][0]["player_id"]
+    _post(base, "/api/pick", {"player_id": head})  # operator takes their own rec
+    q = _get(base, "/api/queue")
+    assert q["is_operator_turn"] is False and q["overall_pick"] == 2
+    # identity order, slot 0: the operator's next pick is the round-2 wheel at 20
+    assert q["queue_for_overall"] == 20 and q["picks_until_operator"] == 18
+    assert q["desired"]
+    assert head not in [d["player_id"] for d in q["desired"]]
+    # Rule 6 (audit): off-turn, each row's survival figure is the ON-CLOCK
+    # vantage at pick 20 (it prices lasting BEYOND it, not TO it — at this
+    # wheel it reads "100%"); the response must say so out loud.
+    assert q["caveats"] and "18 pick(s) intervene" in q["caveats"][0]
+
+
+def test_queue_k_is_clamped_and_junk_defaults(cockpit):
+    base, _session = cockpit
+    # Below the writer's K_min=3 escalation floor (spec §7): clamped UP, so the
+    # server can never manufacture a depth escalation by under-serving.
+    assert _get(base, "/api/queue?k=1")["k"] == 3
+    assert len(_get(base, "/api/queue?k=1")["desired"]) == 3
+    assert _get(base, "/api/queue?k=99")["k"] == 10
+    assert _get(base, "/api/queue?k=junk")["k"] == 8
+
+
+def test_queue_recomputes_after_an_edit_never_serves_a_stale_cache(cockpit):
+    base, _session = cockpit
+    # A length-keyed cache passes every append test and still serves a queue
+    # containing a player an EDIT just handed to a rival — this pins the exact-
+    # sequence key. The edit targets the MIDDLE pick of three (audit, mutation-
+    # verified: editing the LAST pick also passes under a (length, last-pick)
+    # key). Operator takes a deep player so the queue head stays free.
+    _post(base, "/api/pick", {"player_id": "RB-70"})
+    stolen = _get(base, "/api/queue")["desired"][0]["player_id"]
+    _post(base, "/api/pick", {"player_id": "RB-71"})          # rival, overall 2
+    _post(base, "/api/pick", {"player_id": "RB-72"})          # rival, overall 3
+    assert stolen in [d["player_id"] for d in _get(base, "/api/queue")["desired"]]
+    _post(base, "/api/edit", {"overall": 2, "player_id": stolen})  # same length,
+    q = _get(base, "/api/queue")                                   # same LAST pick
+    assert stolen not in [d["player_id"] for d in q["desired"]]
+
+
+def test_queue_is_empty_only_when_the_draft_is_over(cockpit):
+    base, session = cockpit
+    while len(session.picks) < 159:
+        session.append_pick(session.suggest_autodraft(session.current_seat))
+    q = _get(base, "/api/queue")
+    # slot 0 (dp0) owns the FINAL overall of a snake — still one pick to queue for
+    assert q["queue_for_overall"] == 160 and q["desired"]
+    session.append_pick(session.suggest_autodraft(session.current_seat))
+    q = _get(base, "/api/queue")
+    assert q["complete"] is True
+    assert q["queue_for_overall"] is None and q["desired"] == []
+
+
+def test_queue_engine_failure_is_a_500_never_an_empty_list(cockpit):
+    # THE writer-safety contract: an engine error must never reach the writer
+    # as "desired: []" — an empty list is reserved for "nothing left to queue
+    # for", and a lie here would let a transient bug clear a live ESPN queue.
+    base, session = cockpit
+
+    def boom(top=8):
+        raise RuntimeError("engine exploded")
+
+    session.recommend_upcoming = boom  # instance attr shadows the method
+    code, body = _get_err(base, "/api/queue")
+    assert code == 500 and "internal error" in body["error"]
+
+
+def test_queue_status_requires_the_token(cockpit):
+    base, session = cockpit
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _queue_status_post(base, session, {"achieved": [], "ok": True}, token="wrong")
+    assert ei.value.code == 403
+
+
+def test_queue_status_records_reports_and_tracks_the_bad_streak(cockpit):
+    base, session = cockpit
+    out = _queue_status_post(
+        base, session,
+        {"league": "", "overall": 1, "achieved": ["QB0", "RB0", "WR0"], "ok": True},
+    )
+    assert out["ok"] is True and out["bad_streak"] == 0
+    out = _queue_status_post(base, session, {"overall": 1, "achieved": ["QB0"],
+                                             "ok": False,
+                                             "reason": "hover-gated Remove never appeared"})
+    # Audit (mutation-verified): the FIRST failure must read 1, not just the
+    # second read 2 — a `0 if ok else 2` mutant survived the old assertions.
+    assert out["bad_streak"] == 1
+    rep = _get(base, "/api/state")["queue"]["last_report"]
+    assert rep["ok"] is False and rep["reported_overall"] == 1
+    assert rep["reason"] == "hover-gated Remove never appeared"
+    out = _queue_status_post(base, session, {"achieved": [], "ok": False,
+                                             "overall": "not-an-int"})
+    assert out["bad_streak"] == 2
+    assert _get(base, "/api/state")["queue"]["last_report"]["reported_overall"] is None
+    out = _queue_status_post(base, session, {"achieved": ["QB0", "RB0", "WR0"], "ok": True})
+    assert out["bad_streak"] == 0  # a good verify resets the streak
+
+    q = _get(base, "/api/state")["queue"]
+    assert q["received"] == 4 and q["bad_streak"] == 0
+    assert q["last_report"]["ok"] is True
+    assert q["last_report"]["achieved"] == ["QB0", "RB0", "WR0"]
+    assert q["last_report"]["session_overall"] == 1
+
+
+def test_queue_status_requires_an_achieved_list_and_bounds_it(cockpit):
+    base, session = cockpit
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _queue_status_post(base, session, {"ok": True})
+    assert ei.value.code == 400
+    # token-authed, but still bounded: a runaway page must not grow cockpit RAM
+    _queue_status_post(
+        base, session,
+        {"achieved": ["x" * 500] * 100, "ok": True},
+    )
+    rep = _get(base, "/api/state")["queue"]["last_report"]
+    assert len(rep["achieved"]) == 20
+    assert all(len(a) == 80 for a in rep["achieved"])
+
+
+def test_queue_status_never_claims_the_binding_but_validates_once_bound(cockpit):
+    # Audit (major, demonstrated live): a picks-free telemetry POST that CLAIMED
+    # the first-room binding could bind a fresh cockpit to "" before the
+    # harvester's first batch and brick /api/sync for the rest of the draft.
+    # The binding belongs to the pick feed alone; status only VALIDATES.
+    base, session = cockpit
+    token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+
+    def sync(league, picks):
+        req = urllib.request.Request(
+            base + "/api/sync",
+            data=json.dumps({"league": league, "picks": picks}).encode(),
+            headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    # A pre-binding status report — even from the WRONG room — must not claim:
+    _queue_status_post(base, session, {"league": "999", "achieved": [], "ok": True})
+    # ...so the real room's first sync batch still binds and applies.
+    out = sync("111", [{"overall": 1, "player": "RB0"}])
+    assert out["applied"] == 1
+    # Once bound, a mismatched status report is rejected; the right room passes.
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _queue_status_post(base, session, {"league": "222", "achieved": [], "ok": True})
+    assert ei.value.code == 400
+    assert "different" in json.loads(ei.value.read())["error"]
+    out = _queue_status_post(base, session, {"league": "111", "achieved": [], "ok": True})
+    assert out["ok"] is True
+
+
+def test_queue_status_rejects_a_non_boolean_ok(cockpit):
+    # Audit (demonstrated live): bool("false") is True — a stringly-typed writer
+    # bug would silently RESET the failure streak step 4's push trigger reads.
+    base, session = cockpit
+    for bad in ("false", "0", 1, None):
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _queue_status_post(base, session, {"achieved": [], "ok": bad})
+        assert ei.value.code == 400
+        assert "boolean" in json.loads(ei.value.read())["error"]
+    q = _get(base, "/api/state")["queue"]
+    assert q["received"] == 0 and q["last_report"] is None  # nothing recorded
+
+
+def test_queue_null_target_reaches_the_http_surface_before_the_draft_ends(tmp_path, make_draft_board):
+    # Audit: the shared fixture's slot-0 operator owns the FINAL overall, so
+    # queue_for_overall:null always coincided with complete:true — the
+    # "operator done, draft still running" branch (the one a writer must read
+    # as INERT, spec §6a) was never observed over HTTP. Slot 1 exposes it:
+    # dp1's last pick is overall 159, so at 160 the draft runs without them.
+    board = make_draft_board()
+    session = DraftSession.start(
+        board, operator_slot=1, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "late.jsonl", rollouts=8,
+    )
+    while len(session.picks) < 159:
+        session.append_pick(session.suggest_autodraft(session.current_seat))
+    server = serve(session, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        q = _get(f"http://{host}:{port}", "/api/queue")
+        assert q["complete"] is False and q["overall_pick"] == 160
+        assert q["queue_for_overall"] is None
+        assert q["picks_until_operator"] is None and q["desired"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_queue_rows_carry_espn_display_names_when_provided(tmp_path, make_draft_board):
+    # Audit (major): the writer searches and verifies by ESPN's OWN vocabulary
+    # ("Texans D/ST", "Hollywood Brown"), not the house board's — the row must
+    # carry it (spec §5c: an identifier the other side actually uses), nullable
+    # when the ESPN board has no entry (writer falls back to `name`).
+    board = make_draft_board()
+    session = DraftSession.start(
+        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "names.jsonl", rollouts=8,
+    )
+    espn_names = {e.player_id: f"ESPN {e.name}" for e in board[:3]}
+    server = serve(session, port=0, espn_names=espn_names)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        rows = _get(f"http://{host}:{port}", "/api/queue")["desired"]
+        assert all("espn_name" in d for d in rows)
+        for d in rows:
+            expect = espn_names.get(d["player_id"])
+            assert d["espn_name"] == expect  # mapped -> ESPN's text; else null
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

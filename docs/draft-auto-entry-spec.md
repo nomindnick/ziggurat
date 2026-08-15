@@ -241,12 +241,66 @@ expire at any moment.
 
 - `ziggurat/draft/espn_queue.user.js` — the queue writer. Extends (or ships
   alongside) `espn_sync.user.js`. Same `{{PORT}}`/`{{TOKEN}}` templating.
-- Cockpit endpoint `GET /api/queue` — returns the desired queue (top K
-  available recs) so ordering policy lives server-side and is unit-testable.
-- Cockpit endpoint `POST /api/queue/status` — the script reports the queue it
-  actually achieved; the cockpit logs it and decides whether to push.
+- ~~Cockpit endpoint `GET /api/queue`~~ — **BUILT 2026-08-15** (§6a below).
+- ~~Cockpit endpoint `POST /api/queue/status`~~ — **BUILT 2026-08-15**,
+  log-only: records the report + a consecutive-failure streak; the
+  push-on-streak decision is step 4's, deliberately not made yet.
 - Push on refusal via the **existing** `ziggurat/push/` egress choke point
   (Rule 5 outbound scrub applies; `draft/` → `push/` is a legal direction).
+
+### 6a. The served contract (step 2, built 2026-08-15)
+
+`GET /api/queue?k=N` (loopback, unauthenticated read, like `/api/state`):
+
+```json
+{ "epoch": "…", "overall_pick": 12, "complete": false,
+  "is_operator_turn": false, "queue_for_overall": 17,
+  "picks_until_operator": 5, "k": 8, "caveats": ["…"],
+  "desired": [ { "player_id": …, "name": …, "espn_name": …, "position": …,
+                 "team": …, "pick_score": …, "reasons": […], … } ] }
+```
+
+Rules the writer may rely on, each pinned by a test:
+
+- **`desired: []` means exactly "no operator pick remains"** (`queue_for_overall`
+  null: draft complete, or every remaining pick is a rival's). An engine failure
+  is a **500**, never an empty list — so the writer must treat `[]` as *inert*
+  and a non-200 as a no-op; neither is ever "clear ESPN's queue".
+- **Deterministic per state**: the response changes only when a pick lands
+  (exact pick-sequence cache; an *edit* of a past pick recomputes). The writer's
+  diff-then-rebuild loop cannot oscillate between polls.
+- **On the operator's turn `desired` extends the cockpit's recommendation panel
+  exactly** — same ctx, same seeded rng, bit-identical (the server half of
+  acceptance test §8.5).
+- **`k` is clamped to [3, 10] and is a CAP, not a promise**: depth is bounded by
+  the engine's own candidate window (`candidate_width`, default 5 ⇒ typical
+  depth 6–9). Deliberate — widening the window only for the queue could re-rank
+  the head and make ESPN's autopick diverge from the on-clock panel.
+- Off-turn, `desired` prices the operator's **next** pick (`queue_for_overall`)
+  with today's taken set — the board is slightly richer than it will be by then;
+  each refresh after an observed pick converges it, and depth-K absorbs snipes.
+- **`espn_name` is the writer's search/verify vocabulary** — ESPN's OWN display
+  text ("Texans D/ST", "Hollywood Brown"), joined from the stored ESPN board at
+  the `load_board` seam (`simulator.espn_display_names`; skill by espn_id, DST
+  by team). Nullable → fall back to `name`. This is §5c applied to the payload:
+  match with an identifier the other side actually uses, or the DST divergence
+  play silently never executes under green telemetry (audit, demonstrated).
+- **`caveats` corrects the off-turn survival reading**: each row's survival
+  figure (and its verbatim reason) is the ON-CLOCK vantage at
+  `queue_for_overall` — it prices lasting *beyond* that pick, not *to* it, and
+  at a wheel target it reads "100% — no rush" while a whole round intervenes.
+  The reasons stay verbatim (Rule 6); the response says so at the top level.
+
+`POST /api/queue/status` (token-authed like `/api/sync`): body
+`{league, overall, achieved: [names…], ok, reason?}` — **`ok` must be a JSON
+boolean** (a stringly `"false"` is rejected 400; a coerced True would silently
+reset the failure streak step 4 pushes on). The endpoint **validates the
+first-room league binding but never claims it** — the binding belongs to the
+pick feed (`/api/sync`) alone; a picks-free telemetry POST that claimed it
+could bind a fresh cockpit to `""` before the harvester's first batch and brick
+sync for the whole unattended remainder (audit, demonstrated live). Bounded
+storage; response carries `bad_streak` (consecutive `ok: false` reports).
+Surfaced in `/api/state` under `"queue"`.
 
 ---
 
@@ -292,7 +346,9 @@ Nothing ships without these, on **live practice drafts**:
 ## 9. Build order, and kill criteria
 
 1. ~~**P0 probe** (remove/reorder)~~ — **DONE 2026-08-15, passed** (§4).
-2. `GET /api/queue` + ordering policy, server-side, unit-tested.
+2. ~~`GET /api/queue` + ordering policy, server-side, unit-tested~~ — **DONE
+   2026-08-15** (§6a; 20-agent adversarial audit: 11 confirmed findings — 3
+   major — all fixed same day; suite 1457).
 3. Queue writer userscript: read → diff → rebuild → verify.
 4. Refusal + push path.
 5. Rehearsals (§8.2, §8.3).

@@ -669,3 +669,86 @@ def test_resume_rejects_a_board_whose_ranks_drifted(tmp_path, make_draft_board):
     )
     with pytest.raises(ValueError, match="does not match"):
         DraftSession.resume(sess.journal_path, drifted)
+
+
+# ------------------------------------------- queue-writer seam (auto-entry spec §6)
+
+
+def test_next_operator_overall_on_and_off_turn(tmp_path, make_draft_board):
+    board = make_draft_board()
+    sess = _start(tmp_path, board, operator_slot=0)
+    # On the clock: the next operator pick IS the current one.
+    assert sess.next_operator_overall() == 1
+    sess.append_pick(sess.recommend(top=1)[0].player_id)
+    # Off-turn, identity order, slot 0: round 2 runs reversed, so dp0 picks
+    # last of it — overall 20.
+    assert not sess.is_operator_turn
+    assert sess.next_operator_overall() == 20
+
+    late = _start(tmp_path, board, operator_slot=4, name="late")
+    assert late.next_operator_overall() == 5  # dp4's opener, computed off-turn
+
+
+def test_next_operator_overall_follows_a_non_identity_pick_order(tmp_path, make_draft_board):
+    # pick_order maps draft position -> seat; the scan must follow the REAL
+    # sequence, not assume identity. Seat 0 drafts 4th here (dp 3), and round 2
+    # reversed puts dp3 at overall 17 — both from snake geometry, not _sequence.
+    board = make_draft_board()
+    order = [5, 3, 8, 0, 9, 1, 7, 2, 6, 4]
+    sess = _start(tmp_path, board, operator_slot=0, pick_order=order, name="perm")
+    assert sess.operator_dp == 3
+    assert sess.next_operator_overall() == 4
+    _drive(sess, until=4)  # through the operator's opener
+    assert sess.next_operator_overall() == 17
+
+
+def test_next_operator_overall_none_when_operator_is_done(tmp_path, make_draft_board):
+    # Identity order, slot 1: dp1's LAST pick is overall 159 (round 16 reversed),
+    # so at overall 160 the draft is NOT complete but no operator pick remains —
+    # the one state where "nothing to queue" must be explicit, never an empty
+    # list a writer could mistake for "clear the queue".
+    board = make_draft_board()
+    sess = _start(tmp_path, board, operator_slot=1, name="done")
+    while len(sess.picks) < 159:
+        sess.append_pick(sess.suggest_autodraft(sess.current_seat))
+    assert not sess.complete and sess.overall_pick == 160
+    assert sess.next_operator_overall() is None
+    with pytest.raises(RuntimeError, match="nothing to queue"):
+        sess.recommend_upcoming()
+    sess.append_pick(sess.suggest_autodraft(sess.current_seat))
+    assert sess.complete
+    assert sess.next_operator_overall() is None
+
+
+def test_recommend_upcoming_equals_recommend_on_the_operator_turn(tmp_path, make_draft_board):
+    # The §8.5 determinism guarantee: on the clock, the queue head IS the
+    # on-clock recommendation — same ctx, same session_seed ^ overall rng,
+    # bit-identical output INCLUDING survival-derived reason strings. Placed at
+    # a non-wheel turn where survival runs real rollouts (a wheel short-circuit
+    # would make the comparison vacuous — see the bit-identical test above).
+    board = make_draft_board()
+    sess = _start(tmp_path, board, operator_slot=4)
+    while not sess.is_operator_turn:
+        sess.append_pick(sess.suggest_autodraft(sess.current_seat))
+    assert not sess._is_snake_turn()
+
+    a = tuple(sess.recommend(top=5))
+    b = tuple(sess.recommend_upcoming(top=5))
+    assert not all(r.survival_next == 1.0 for r in a)  # rollouts genuinely ran
+    assert a == b
+
+
+def test_recommend_upcoming_works_off_turn_and_excludes_taken(tmp_path, make_draft_board):
+    board = make_draft_board()
+    sess = _start(tmp_path, board, operator_slot=0)
+    sess.append_pick(sess.recommend(top=1)[0].player_id)
+    for _ in range(3):  # rivals draft; their picks must vanish from the queue
+        sess.append_pick(sess.suggest_autodraft(sess.current_seat))
+    assert not sess.is_operator_turn
+    with pytest.raises(RuntimeError, match="operator's turn"):
+        sess.recommend()  # the on-clock surface still refuses off-turn
+
+    recs = sess.recommend_upcoming(top=8)
+    assert 0 < len(recs) <= 8
+    assert all(r.player_id not in sess.taken for r in recs)
+    assert all(r.reasons for r in recs)  # Rule 6: never an unexplained row

@@ -14,6 +14,7 @@ from ziggurat.data.nfl import projections
 from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks, ingest_espn_ranks
 from ziggurat.data.store import apply_schema, connect
 from ziggurat.draft.bots import (
+    BoardEntry,
     FollowEspnRank,
     FollowVor,
     PickContext,
@@ -317,3 +318,30 @@ def test_load_board_unions_the_full_espn_universe(tmp_path):
     for e in extras:
         assert e.position in ("QB", "RB", "WR", "TE", "DST", "K")
         assert e.espn_overall_rank >= 1
+
+
+def test_espn_display_names_serves_the_other_sides_vocabulary(tmp_path):
+    # Auto-entry audit (major): the queue writer searches ESPN's DOM by ESPN's
+    # OWN display text — "Josh Allen" may be the house name while ESPN renders
+    # a variant, and DST is nflverse "HOU D/ST" vs ESPN "Texans D/ST". The map
+    # must serve ESPN's text keyed by the BOARD's player_id (skill by espn_id,
+    # DST by team), same joins and as-of threading as load_board itself.
+    from ziggurat.draft.simulator import espn_display_names
+
+    conn = _build_board_db(tmp_path / "names.sqlite")
+    board = load_board(conn, as_of="2026-08-01", season=2026)
+    names = espn_display_names(conn, board, as_of="2026-08-01", season=2026)
+
+    # Skill join by espn_id: the players-table name is "Test QB", but the map
+    # serves what ESPN's board says for espn id 3918298.
+    assert names["3918298"] == "Josh Allen"
+    # DST join by team: hand the function a board entry for a team the ESPN
+    # fixture carries (HOU) and it must serve ESPN's nickname form.
+    dst_entry = BoardEntry("DST:HOU", "HOU D/ST", "DST", 236, 0.0, 0.0, "HOU")
+    dst_names = espn_display_names(
+        conn, [dst_entry], as_of="2026-08-01", season=2026
+    )
+    assert dst_names["DST:HOU"] == "Texans D/ST"
+    # Rule 1: the map is as-of-gated exactly like the board.
+    assert espn_display_names(conn, board, as_of="2026-07-31", season=2026) == {}
+    conn.close()

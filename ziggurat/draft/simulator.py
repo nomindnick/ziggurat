@@ -466,3 +466,43 @@ def load_board(
         )
         used_ids.add(str(eid))
     return tuple(board)
+
+
+def espn_display_names(conn, board, *, as_of, season) -> dict[str, str]:
+    """``player_id -> the display name ESPN's own draft room uses``, for the
+    queue writer (auto-entry spec §6a).
+
+    The house board's names are nflverse vocabulary ("HOU D/ST", "Marquise
+    Brown"); ESPN's DOM says "Texans D/ST" / "Hollywood Brown" — and the queue
+    writer searches and verifies by exactly that text, so it must be served the
+    other side's identifier (spec §5c), not ours. Same joins as
+    :func:`load_board` (skill by espn_id, DST by team), same DB seam, same
+    Rule-1 ``as_of`` threading. Entries ESPN's board doesn't carry are simply
+    absent — the consumer treats a missing name as "fall back to ``name``".
+    """
+    from ziggurat.data.nfl import base
+    from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks
+
+    espn_rows = get_espn_draft_ranks(conn, as_of=as_of, season=season)
+    by_espn_id: dict[str, str] = {}
+    by_dst_team: dict[str, str] = {}
+    for r in espn_rows:
+        name = r["player"]
+        if not name:
+            continue
+        if str(r["position"]).upper() in ("DST", "D/ST", "DEF"):
+            team = r["team"]
+            if team is not None:
+                by_dst_team[base.TEAM_ALIASES.get(str(team).upper(), str(team).upper())] = str(name)
+        elif r["espn_id"] is not None:
+            by_espn_id[str(r["espn_id"])] = str(name)
+
+    out: dict[str, str] = {}
+    for e in board:
+        if e.position == "DST":
+            got = by_dst_team.get(e.team) if e.team else None
+        else:
+            got = by_espn_id.get(e.player_id)
+        if got is not None:
+            out[e.player_id] = got
+    return out

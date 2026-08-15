@@ -578,9 +578,11 @@ def _resolve_draft_launch(
     """Shared parse-level resolution for the two draft front-ends (Rule 3: this
     resolves WHICH journal/board to use — discovery and header parsing live in
     session.py; board loading in simulator.py). Returns
-    ``(board, resolved_season, resolved_as_of, resolved_journal, order)``."""
+    ``(board, resolved_season, resolved_as_of, resolved_journal, order,
+    espn_names)`` — the last is the ESPN-display-name map the web cockpit's
+    queue endpoint serves (auto-entry spec §6a); the TUI ignores it."""
     from ziggurat.draft.session import find_latest_journal, read_journal_header
-    from ziggurat.draft.simulator import load_board
+    from ziggurat.draft.simulator import espn_display_names, load_board
 
     draft_dir = REPO_ROOT / "data" / "draft"
 
@@ -623,6 +625,9 @@ def _resolve_draft_launch(
         conn, as_of=resolved_as_of, season=resolved_season, source=source,
         weeks=_parse_weeks(weeks),
     )
+    espn_names = espn_display_names(
+        conn, board, as_of=resolved_as_of, season=resolved_season
+    )
     conn.close()
     if not board:
         typer.echo(
@@ -632,7 +637,7 @@ def _resolve_draft_launch(
             err=True,
         )
         raise typer.Exit(code=1)
-    return board, resolved_season, resolved_as_of, resolved_journal, order
+    return board, resolved_season, resolved_as_of, resolved_journal, order, espn_names
 
 
 @app.command("draft-board")
@@ -673,7 +678,7 @@ def draft_board(
     if not 1 <= slot <= DEFAULT_ROSTER.teams:
         raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
 
-    board, resolved_season, resolved_as_of, resolved_journal, order = (
+    board, resolved_season, resolved_as_of, resolved_journal, order, _names = (
         _resolve_draft_launch(
             season=season, as_of=as_of, journal=journal, resume=resume,
             pick_order=pick_order, path=path, source=source, weeks=weeks,
@@ -731,7 +736,7 @@ def draft_web(
     if not 1 <= slot <= DEFAULT_ROSTER.teams:
         raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
 
-    board, resolved_season, resolved_as_of, resolved_journal, order = (
+    board, resolved_season, resolved_as_of, resolved_journal, order, espn_names = (
         _resolve_draft_launch(
             season=season, as_of=as_of, journal=journal, resume=resume,
             pick_order=pick_order, path=path, source=source, weeks=weeks,
@@ -750,6 +755,7 @@ def draft_web(
         seed=seed,
         roster=DEFAULT_ROSTER,
         port=port,
+        espn_names=espn_names,
     )
 
 
