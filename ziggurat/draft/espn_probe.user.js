@@ -566,18 +566,38 @@
     '[class*="Table__TR"]',
     "tr",
   ];
+  // Measured 2026-08-13: the queue panel is a plain ESPN `Table__TR` table,
+  // NOT a FixedDataTable — and an EMPTY queue still yields two rows, the
+  // column header ("RankPLAYER") and the empty-state row ("No players in
+  // queue"). Counting those as entries makes the remove test hunt for a
+  // control on a row that holds no player.
+  function isNoiseRow(r) {
+    if (/header/i.test(clsOf(r))) return true;
+    if (r.closest('[class*="headerLayout"], thead, [class*="THEAD"]')) return true;
+    if (r.querySelector("th")) return true;
+    const t = (r.textContent || "").replace(/\s+/g, " ").trim();
+    if (t.length <= 3) return true;
+    if (/^no players? in queue/i.test(t)) return true;
+    if (/^rank\s*player$/i.test(t)) return true;
+    return false;
+  }
+
   function queueEntries() {
     const p = queuePanel();
-    if (!p) return { mode: "NO_PANEL", rows: [] };
+    if (!p) return { mode: "NO_PANEL", rows: [], empty: false, phantom: 0 };
+    // ESPN's own `empty` class on the panel is the authoritative signal.
+    // Trust it over our row filter: if the two ever disagree, the tests
+    // ABORT ("queue is empty") instead of clicking a control that is not
+    // there — and `phantom` carries the disagreement into the log.
+    const flaggedEmpty = /(^|\s)empty(\s|$)/.test(clsOf(p));
     for (const sel of QUEUE_ROW_SELECTORS) {
-      const rows = [...p.querySelectorAll(sel)].filter((r) => {
-        if (/header/i.test(clsOf(r))) return false;
-        if (r.closest('[class*="headerLayout"]')) return false;
-        return (r.textContent || "").trim().length > 3;
-      });
-      if (rows.length) return { mode: sel, rows };
+      const all = [...p.querySelectorAll(sel)];
+      if (!all.length) continue;
+      const rows = all.filter((r) => !isNoiseRow(r));
+      if (flaggedEmpty) return { mode: sel, rows: [], empty: true, phantom: rows.length };
+      if (rows.length) return { mode: sel, rows, empty: false, phantom: 0 };
     }
-    return { mode: "NO_ROWS", rows: [] };
+    return { mode: "NO_ROWS", rows: [], empty: flaggedEmpty, phantom: 0 };
   }
 
   // The anchor carries a CLEAN player name; the row's full text carries
@@ -735,7 +755,13 @@
 
   // ---- shared add step (L1 only; L1 is the proven level) ---------------
   async function addOne(name) {
-    const before = queueNames();
+    const key = name.trim().toLowerCase();
+    const panelText = () => {
+      const p = queuePanel();
+      return p ? (p.textContent || "").toLowerCase() : "";
+    };
+    if (panelText().includes(key)) { emit(`  "${name}" SKIP — already in the queue`); return null; }
+
     const row = findPlayerRow(name);
     if (!row) {
       emit(`  "${name}" SKIP — no rendered available-player row (P1: the grid is virtualized)`);
@@ -750,16 +776,29 @@
       emit(`  "${name}" SKIP — no Queue button in that row (on the clock? it becomes Draft)`);
       return null;
     }
-    qb.click();
-    let after = before;
+    qb.click(); // L1 is the proven level (2026-08-12)
+
+    // The landing signal is the panel's TEXT, not our row count. Text is what
+    // the proven 2026-08-12 queue test used, and it stays true even if the
+    // row filter or ESPN's `empty` flag is wrong — otherwise a heuristic of
+    // OURS reads as "ESPN refused the add".
     const deadline = Date.now() + 3000;
+    let landed = false;
     while (Date.now() < deadline) {
       await sleep(100);
-      after = queueNames();
-      if (after.length > before.length) break;
+      if (panelText().includes(key)) { landed = true; break; }
     }
-    if (after.length <= before.length) { emit(`  "${name}" — queue did not grow in 3s`); return null; }
-    const index = after.findIndex((x) => x.toLowerCase().includes(name.toLowerCase()));
+    if (!landed) { emit(`  "${name}" — did not appear in the queue within 3s`); return null; }
+
+    const after = queueNames();
+    const index = after.findIndex((x) => x.toLowerCase().includes(key));
+    if (index < 0) {
+      const q = queueEntries();
+      emit(`  "${name}" IS queued (panel text) but our row reader cannot see it:`);
+      emit(`     mode=${q.mode} entries=${after.length} empty-flag=${q.empty} phantom=${q.phantom}`);
+      emit(`     => ordering is unreadable; send this log, the row markup changed.`);
+      return { name, index: -1, of: after.length };
+    }
     emit(`  "${name}" landed at index ${index} of ${after.length}`, after);
     return { name, index, of: after.length };
   }
@@ -769,9 +808,17 @@
     emit("--- INSPECT QUEUE PANEL (read-only) ---");
     const p = queuePanel();
     if (!p) { emit("no .pick-queue in the DOM — open the Pick Queue tab in the draft room"); return; }
-    emit("panel class:", clsOf(p).slice(0, 90), "| empty-flag:", clsOf(p).includes("empty"));
-    const { mode, rows } = queueEntries();
-    emit("row selector that matched:", mode, "| rows:", String(rows.length));
+    emit("panel class:", clsOf(p).slice(0, 90));
+    const { mode, rows, empty, phantom } = queueEntries();
+    emit("row selector that matched:", mode, "| entries:", String(rows.length),
+         "| ESPN empty-flag:", String(empty));
+    if (empty) {
+      emit("QUEUE IS EMPTY — this inspection cannot show you the remove control,");
+      emit("  which is the whole point of P0. Run 'B: add ordered' first, then");
+      emit("  inspect again.");
+      if (phantom) emit(`  (note: ${phantom} row(s) survived the noise filter despite the empty flag)`);
+      return;
+    }
     emit("queue order:", queueNames());
     emit("elements with draggable=true:", String(p.querySelectorAll('[draggable="true"]').length));
     for (const [i, r] of rows.slice(0, 3).entries()) {
@@ -795,7 +842,12 @@
   // ---- test B: Q2, append or rank-insert? ------------------------------
   async function queueAddOrdered(csv) {
     const names = String(csv || "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (names.length < 2) { emit('P0-B: type at least two surnames, comma-separated'); return; }
+    if (names.length < 2) {
+      emit(`P0-B needs at least TWO surnames to see ordering. The input box`);
+      emit(`  (top row, yellow border) currently reads: "${String(csv || "")}"`);
+      emit(`  Example: higgins, price, tonges`);
+      return;
+    }
     emit(`--- P0-B QUEUE ADD, ORDERED: ${names.join(" -> ")} ---`);
     emit("Q2: does add APPEND, or does ESPN insert by its own rank?");
     if (!queuePanel()) { emit("ABORT — no .pick-queue panel"); return; }
@@ -805,8 +857,14 @@
       if (r) landed.push(r);
     }
     if (!landed.length) { emit("VERDICT Q2: INCONCLUSIVE — nothing was added."); return; }
-    const appended = landed.every((l) => l.index === l.of - 1);
+    const usable = landed.filter((l) => l.index >= 0);
     emit("landings:", landed.map((l) => `${l.name}@${l.index}/${l.of}`));
+    if (!usable.length) {
+      emit("VERDICT Q2: INCONCLUSIVE — entries were added but their positions are unreadable.");
+      emit("final queue panel text:", ((queuePanel() || {}).textContent || "").trim().slice(0, 200));
+      return;
+    }
+    const appended = usable.every((l) => l.index === l.of - 1);
     emit(
       appended
         ? "VERDICT Q2: APPEND — add order IS queue order, so clear-and-refill controls ordering."
@@ -983,7 +1041,11 @@
   // ---- test E: the actual production operation -------------------------
   async function queueRebuild(csv) {
     const want = String(csv || "").split(",").map((s) => s.trim()).filter(Boolean);
-    if (!want.length) { emit("P0-E: type the desired queue, comma-separated"); return; }
+    if (!want.length) {
+      emit("P0-E: type the desired queue into the input box (top row, yellow border),");
+      emit(`  comma-separated. It currently reads: "${String(csv || "")}"`);
+      return;
+    }
     emit(`--- P0-E QUEUE REBUILD (the production operation): ${want.join(" -> ")} ---`);
     const t0 = Date.now();
     let clicks = 0;
@@ -1049,7 +1111,7 @@
 
   async function searchProbe(name) {
     const q = String(name || "").split(",")[0].trim();
-    if (!q) { emit("P1: type a surname first"); return; }
+    if (!q) { emit("P1: type a surname into the input box (top row, yellow border) first"); return; }
     emit(`--- P1 SEARCH: drive the player filter to "${q}" ---`);
     const ins = searchInputs();
     emit(`visible text inputs: ${ins.length}`);
@@ -1084,15 +1146,21 @@
     };
   }
 
+  // ONE input for every test on the badge. v1.1 shipped two side by side and
+  // the operator typed into the wrong one, so four P0 runs died on "type at
+  // least two surnames" with a full box in view (measured 2026-08-13).
+  // Tests that want a single player take the first comma-separated token.
   const nameInput = document.createElement("input");
-  nameInput.placeholder = "player surname";
+  nameInput.placeholder = "surnames, comma-sep — ALL tests read this";
   nameInput.style.cssText =
-    "font:11px monospace;padding:3px 5px;border-radius:4px;width:120px;" +
-    "background:#0d1116;color:#d8dee9;border:1px solid #3a4553";
+    "font:11px monospace;padding:3px 5px;border-radius:4px;width:250px;" +
+    "background:#0d1116;color:#e0c46c;border:1px solid #6a5a30";
   row.appendChild(nameInput);
 
+  const firstName = (v) => String(v || "").split(",")[0].trim();
+
   // No arming: queueing is reversible and costs nothing.
-  addBtn("QUEUE chain (named)", "#45c98b", () => queueChain(nameInput.value));
+  addBtn("QUEUE chain (named)", "#45c98b", () => queueChain(firstName(nameInput.value)));
 
   // Two-click arm. This COMMITS A PICK, so it must be impossible to fire by
   // accident on 2026-08-31. Practice drafts only (operator authorization);
@@ -1101,7 +1169,7 @@
   let armTimer = null;
   const draftBtn = addBtn("arm CHAIN test", "#e06c6c", () => {
     if (!armed) {
-      const frag = nameInput.value.trim();
+      const frag = firstName(nameInput.value);
       if (!frag) { emit("type a player surname first — nothing armed"); return; }
       armed = true;
       draftBtn.textContent = `CONFIRM — drafts "${frag}" (10s)`;
@@ -1120,13 +1188,13 @@
     armed = false;
     draftBtn.textContent = "arm CHAIN test";
     draftBtn.style.background = "#1c222b";
-    fullChain(nameInput.value);
+    fullChain(firstName(nameInput.value));
   });
 
   // ---- P0 row: queue editing. Its own row, deliberately away from the
   // pick-COMMITTING button above — nothing here can spend a pick.
   const p0label = document.createElement("div");
-  p0label.textContent = "P0 queue-edit — run OFF-TURN, hands off the mouse:";
+  p0label.textContent = "P0 queue-edit — uses the input ABOVE. Run off-turn, hands off:";
   p0label.style.cssText = "color:#e0c46c;margin:8px 0 4px;border-top:1px solid #2a323d;padding-top:6px";
   box.insertBefore(p0label, out);
 
@@ -1134,19 +1202,12 @@
   row2.style.cssText = "display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px";
   box.insertBefore(row2, out);
 
-  const listInput = document.createElement("input");
-  listInput.placeholder = "surnames, comma-sep";
-  listInput.style.cssText =
-    "font:11px monospace;padding:3px 5px;border-radius:4px;width:170px;" +
-    "background:#0d1116;color:#d8dee9;border:1px solid #3a4553";
-  row2.appendChild(listInput);
-
   addBtn("inspect QUEUE", "#7aa2f7", guarded(() => inspectQueue()), row2);
-  addBtn("B: add ordered", "#45c98b", guarded(() => queueAddOrdered(listInput.value)), row2);
-  addBtn("C: REMOVE", "#e0c46c", guarded(() => queueRemove(listInput.value)), row2);
+  addBtn("B: add ordered", "#45c98b", guarded(() => queueAddOrdered(nameInput.value)), row2);
+  addBtn("C: REMOVE", "#e0c46c", guarded(() => queueRemove(nameInput.value)), row2);
   addBtn("D: reorder", "#e0c46c", guarded(() => queueReorder()), row2);
-  addBtn("E: rebuild", "#45c98b", guarded(() => queueRebuild(listInput.value)), row2);
-  addBtn("P1: search", "#7aa2f7", guarded(() => searchProbe(listInput.value)), row2);
+  addBtn("E: rebuild", "#45c98b", guarded(() => queueRebuild(nameInput.value)), row2);
+  addBtn("P1: search", "#7aa2f7", guarded(() => searchProbe(nameInput.value)), row2);
 
   addBtn("copy log", "#9aa7b8", () => {
     navigator.clipboard.writeText(log.join("\n")).then(
