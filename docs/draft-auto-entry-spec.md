@@ -1,6 +1,6 @@
 # Draft-day auto-entry — build spec
 
-**Status:** approved to build, 2026-08-13. Not started.
+**Status:** P0 gate PASSED 2026-08-15 (§4) — building. Approved 2026-08-13.
 **Deadline:** draft is **Mon 2026-08-31 19:00 PT** (room opens 18:00). Draft
 order is drawn 2026-08-24 12:00. 16 rounds, SNAKE, **90 s per pick**.
 **Machine:** the desktop (`framework-desktop`) — see `runbook-strix-halo.md` §4.1.
@@ -79,40 +79,60 @@ rehearsing flawlessly well before 08-31.
 | draft (row) | row action button reads `Draft` **on-turn** | third commit path, no modal |
 | draft (card) | `button.Button--draft.PlayerCard__action-btn` | player-bound; the safe commit |
 | draft (header) | `button.Button--alt.Button--draft` | **NEVER USE** — see §5 |
-| queue panel | `.pick-queue` | `empty` class + `Pick Queue (N)` text |
-| player rows | `[class*="fixedDataTableRowLayout_main"]` | virtualized; also used by history/queue panels |
-| pick history | `.pick-history` | existing sync script harvests this |
+| queue panel | `.pick-queue` | `empty` class when no entries; `with-footer` when full |
+| **queue rows** | `.pick-queue [class*="Table__TR"]` | **NOT** FixedDataTable; header + empty-state rows must be filtered |
+| **queue remove** | `button.Button--dequeue` (text `Remove`) | **hover-gated** — retry the hover, see §4a |
+| **undo (drafted)** | `button.Button--undo` | marks an ALREADY-DRAFTED player's row |
+| player search | `input.form__control[placeholder="Player Name"]` | drive via the native value setter + `input` event |
+| player rows | `[class*="fixedDataTableRowLayout_main"]` | virtualized; **nodes are recycled**, see §4a |
+| pick history | `.pick-history` | existing sync script harvests this; readable *simultaneously* with the queue panel |
 
 ---
 
-## 4. What is NOT proven — build blockers
+## 4. P0 — PASSED, 2026-08-15 (live practice drafts)
 
-**P0 — queue EDIT is completely untested, and the whole design rests on it.**
-We proved *append*. We did not prove *remove* or *reorder*. A queue that can
-only be appended to is useless by round 3, because the board re-ranks as other
-teams draft. Flagged by the operator, and correctly.
+The gate is cleared. All three questions answered on real rooms.
 
-Probe this **first**, before writing any feature code:
+- **Q1 — REMOVE WORKS.** `button.Button--dequeue` (text `Remove`), driven by a
+  bare `element.click()` (L1). The named entry leaves; every other entry
+  survives. Confirmed on two independent runs plus three more removals inside
+  the rebuild test, which **cleared a 3-entry queue in 802 ms**.
+- **Q2 — ADD APPENDS.** Five names entered in order landed `0/1, 1/2, 2/3,
+  3/4, 4/5`. Add order *is* queue order, so **clear-and-refill sets any
+  order**.
+- **Q3 — REORDER WORKS**, via **HTML5 drag-and-drop**. Rows carry
+  `draggable=true` and `onDragStart/onDragOver/onDragEnd` at depth 0; a
+  synthesized `dragstart → dragenter → dragover → drop → dragend` with a real
+  `DataTransfer` swapped the top two entries exactly as requested. Q2 makes
+  this optional, but it is available if incremental edits beat full rebuilds.
+- **P1 — SEARCH WORKS.** ESPN's own filter (`input.form__control`,
+  placeholder `Player Name`) is drivable via the prototype's native value
+  setter plus a bubbling `input` event, and an off-screen target renders
+  within ~1.4 s. **The queue writer must clear the box afterwards** — a live
+  filter starves every later lookup.
 
-1. Does a synthetic click on the queue panel's **`Remove`** control work?
-2. Does queue add always **append to the end**, or does ESPN insert by rank?
-3. Is reordering possible at all — is it drag-only (HTML5 DnD or mouse-move
-   based), or is there an ordering control?
+### 4a. Three hazards the probe measured, which the writer must handle
 
-**If Remove works, ordering is solved regardless**: reconciliation becomes
-clear-and-refill in the desired order (~N clicks, cheap at 90 s/pick). Drag
-reordering would be a nice-to-have, not a requirement. **If Remove does NOT
-work, this entire design is dead** and we fall back to active Draft-clicking
-(§9 kill criteria).
+1. **Row nodes are recycled.** A lookup for `mullens` ended up holding a row
+   that by then read *Amon-Ra St. Brown*. **Re-resolve and re-verify the row
+   immediately before clicking**, and treat "queue grew, but not with our
+   target" as a wrong-player event to be undone — never as a no-op.
+2. **The Remove button is hover-gated and the synthetic hover is flaky.** One
+   inspection found it on exactly one of three rows — the one under the
+   operator's real cursor. Retry the hover (3 attempts, increasing settle)
+   before concluding the control is absent.
+3. **On your turn, the queue row's action button is `Draft`.** Anything that
+   clicks in a queue row must blacklist `Button--draft`/`Button--undo`/
+   `Button--queue` and skip disabled nodes. This is not hypothetical: it cost
+   a real practice pick — see §5c.
 
-**P1 — virtualized-grid search.** `findPlayerRow` only sees *rendered* rows.
-A recommended player outside the viewport has no DOM node. Need to drive
-ESPN's own player-search filter to bring a target into the grid, then resolve.
+### Still open (neither blocks the build)
 
 **P2 — autopick semantics.** Confirm that clock expiry takes the **top queued
-available** player, and characterise when ESPN flips the seat into persistent
-"You're on Autopick" mode (observed to engage after repeated expiry). Confirm
-a populated queue still governs once that mode is on.
+available** player. The queue panel carries an **`Autopick` toggle**; whether
+expiry draws from the queue may depend on it. **This is the load-bearing
+assumption of §2 and it is still an assumption** — witness it before the
+hands-off rehearsal (§8.2), and treat §8.5 as the test that settles it.
 
 ---
 
@@ -151,6 +171,33 @@ Two principles, both of which must survive into the build's tests:
 The tell that was missed for three rounds: the "working" ladder level wandered
 L1/L2/L3 across runs. **A real mechanism does not move.** Treat inconsistent
 success levels as evidence of contamination, not flakiness.
+
+## 5c. It happened again, and the lesson generalised (2026-08-14)
+
+The P0 probe reported `REMOVE WORKS` for a click that had actually **drafted**
+the player. On the operator's turn the queue row's action button is `Draft`;
+the candidate ranker's "any small button" fallback matched it; and the
+verdict's conjunction — *target left the queue AND the others survived* —
+passed, because drafting a queued player also removes him from the queue. It
+cost a practice pick.
+
+The pre-click check for "was he already drafted?" ran, and passed. The
+confounder that fired was **our own click, afterwards**.
+
+> **The rule:** a confounder check must run *after* the action, not only
+> before it. Checking the starting state proves the world was clean when you
+> began; it says nothing about what you just did.
+
+Two corollaries now in the probe, and both belong in the writer:
+
+- **Verify with an identifier the other side actually uses.** Both post-click
+  checks searched for the queue's abbreviated display name (`B. Sauls`), which
+  can never match pick history or the grid (`Ben Sauls`) — so both returned
+  clean *by construction*. They now match on surname; over-matching is the
+  safe direction, since it can only make a check fire more often.
+- **A destructive test must be structurally incapable of the destructive
+  act.** The remove path now refuses to click a draft/undo/queue button at
+  all, rather than relying on ranking to prefer the right one.
 
 ---
 
@@ -244,8 +291,7 @@ Nothing ships without these, on **live practice drafts**:
 
 ## 9. Build order, and kill criteria
 
-1. **P0 probe** (remove/reorder). ~1 session. **If Remove fails, stop** and
-   re-plan around active Draft-clicking with verify-after-commit.
+1. ~~**P0 probe** (remove/reorder)~~ — **DONE 2026-08-15, passed** (§4).
 2. `GET /api/queue` + ordering policy, server-side, unit-tested.
 3. Queue writer userscript: read → diff → rebuild → verify.
 4. Refusal + push path.

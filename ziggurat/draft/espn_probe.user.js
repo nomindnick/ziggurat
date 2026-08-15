@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat draft-control probe
 // @namespace    ziggurat
-// @version      1.4
+// @version      1.5
 // @description  DIAGNOSTIC ONLY. Can page-side code drive ESPN's draft-room controls (Queue, Draft) — and can it EDIT the queue? Nothing runs on load; every test is operator-triggered from the badge.
 // @match        https://fantasy.espn.com/football/draft*
 // @match        https://fantasy.espn.com/football/mockdraft*
@@ -365,7 +365,7 @@
     "padding:8px;max-width:460px;opacity:.96";
 
   const title = document.createElement("div");
-  title.textContent = "ZIG PROBE v1.4 — diagnostic, nothing auto-runs";
+  title.textContent = "ZIG PROBE v1.5 — diagnostic, nothing auto-runs";
   title.style.cssText = "color:#45c98b;margin-bottom:6px;font-weight:bold";
   box.appendChild(title);
 
@@ -628,6 +628,18 @@
   }
   function queueNames() { return queueEntries().rows.map(entryName); }
 
+  // The queue abbreviates ("B. Sauls"); pick history and the player grid do
+  // not ("Ben Sauls"). Measured 2026-08-15: BOTH post-click contamination
+  // checks were searching for the abbreviated form, so both came back
+  // clean/unknown by construction — the verdict was right, but not for the
+  // reason it claimed. Match on the surname instead. Over-matching is the
+  // safe direction here: it can only make a check flag MORE often.
+  function surnameOf(display) {
+    const parts = String(display || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+    const last = parts.length ? parts[parts.length - 1] : "";
+    return last.replace(/[^A-Za-z'-]/g, "");
+  }
+
   // THE CONFOUNDER for every test below: ESPN drops a queued player from
   // YOUR queue the moment ANY team drafts him. Same observable, different
   // cause — precisely the class of mistake that cost three false CONFIRMEDs
@@ -718,17 +730,29 @@
     return hits;
   }
 
+  // The Remove button is hover-gated, and our synthetic hover does not always
+  // take: measured 2026-08-15, one inspection found the control on exactly ONE
+  // of three rows — the one under the operator's real cursor. Retry with a
+  // longer settle rather than concluding the control is absent.
+  async function resolveRemoveControl(getRow, tries) {
+    for (let i = 0; i < (tries || 3); i++) {
+      const row = getRow();
+      if (!row) return null;
+      hoverRow(row);
+      await sleep(150 + i * 200);
+      const ctl = pickRemoveControl(row);
+      if (ctl) return ctl;
+    }
+    return null;
+  }
+
   // Remove one named entry from the queue. Used to UNDO a wrong-player add,
   // which is a side effect the probe must clean up rather than leave behind.
   async function removeQueueEntry(displayName) {
     const key = String(displayName || "").toLowerCase();
     const idx = queueNames().findIndex((n) => n.toLowerCase() === key);
     if (idx < 0) return false;
-    const row = queueEntries().rows[idx];
-    if (!row) return false;
-    hoverRow(row);
-    await sleep(150);
-    const ctl = pickRemoveControl(row);
+    const ctl = await resolveRemoveControl(() => queueEntries().rows[idx] || null);
     if (!ctl) return false;
     try { ctl.el.click(); } catch (e) { return false; }
     const deadline = Date.now() + 2000;
@@ -832,7 +856,7 @@
       const p = queuePanel();
       return p ? (p.textContent || "").toLowerCase() : "";
     };
-    if (panelText().includes(key)) { emit(`  "${name}" SKIP — already in the queue`); return null; }
+    if (panelText().includes(key)) { emit(`  "${name}" SKIP — already in the queue`); return { ok: false, name, reason: "already_queued" }; }
 
     // The grid renders only what is on screen, so a target that is simply
     // scrolled away is indistinguishable from one that does not exist. Drive
@@ -858,7 +882,7 @@
     if (!row) {
       emit(`  "${name}" SKIP — no available-player row, even after searching`);
       await clearSearch();
-      return null;
+      return { ok: false, name, reason: "not_in_pool" };
     }
 
     // A control that only renders on hover has no node until React sees a
@@ -874,7 +898,7 @@
     if (!row || !(row.textContent || "").toLowerCase().includes(key)) {
       emit(`  "${name}" SKIP — that row was recycled to another player before the click`);
       await clearSearch();
-      return null;
+      return { ok: false, name, reason: "recycled" };
     }
 
     const btns = [...row.querySelectorAll("button, [role=button]")];
@@ -891,11 +915,14 @@
         emit("     => that row offers DRAFT, so you are ON THE CLOCK. Queueing is");
         emit("        impossible until your turn passes. Wait for it, then re-run.");
       }
-      if (btns.some((b) => label(b) === "undo" || /button--undo/i.test(clsOf(b)))) {
-        emit("     => that row offers UNDO, so this player is ALREADY DRAFTED.");
-      }
+      const drafted = btns.some((b) => label(b) === "undo" || /button--undo/i.test(clsOf(b)));
+      if (drafted) emit("     => that row offers UNDO, so this player is ALREADY DRAFTED.");
       await clearSearch();
-      return null;
+      return {
+        ok: false,
+        name,
+        reason: drafted ? "drafted" : btns.some((b) => label(b) === "draft") ? "on_clock" : "no_control",
+      };
     }
 
     const beforeNames = queueNames();
@@ -926,10 +953,10 @@
           const undone = await removeQueueEntry(e);
           emit(`      cleanup: removed "${e}" -> ${undone}`);
         }
-      } else {
-        emit(`  "${name}" — did not appear in the queue within 3s`);
+        return { ok: false, name, reason: "wrong_player" };
       }
-      return null;
+      emit(`  "${name}" — did not appear in the queue within 3s`);
+      return { ok: false, name, reason: "no_effect" };
     }
 
     const after = queueNames();
@@ -939,10 +966,10 @@
       emit(`  "${name}" IS queued (panel text) but our row reader cannot see it:`);
       emit(`     mode=${q.mode} entries=${after.length} empty-flag=${q.empty} phantom=${q.phantom}`);
       emit(`     => ordering is unreadable; send this log, the row markup changed.`);
-      return { name, index: -1, of: after.length };
+      return { ok: true, name, index: -1, of: after.length };
     }
     emit(`  "${name}" landed at index ${index} of ${after.length}`, after);
-    return { name, index, of: after.length };
+    return { ok: true, name, index, of: after.length };
   }
 
   // Commas only — splitting on "." would break T.J./A.J. names. But a token
@@ -1008,10 +1035,12 @@
     emit("Q2: does add APPEND, or does ESPN insert by its own rank?");
     if (!queuePanel()) { emit("ABORT — no .pick-queue panel"); return; }
     const landed = [];
+    const skipped = [];
     for (const n of names) {
       const r = await addOne(n);
-      if (r) landed.push(r);
+      if (r.ok) landed.push(r); else skipped.push(r);
     }
+    if (skipped.length) emit("skipped:", skipped.map((x) => `${x.name}:${x.reason}`));
     if (!landed.length) { emit("VERDICT Q2: INCONCLUSIVE — nothing was added."); return; }
     const usable = landed.filter((l) => l.index >= 0);
     emit("landings:", landed.map((l) => `${l.name}@${l.index}/${l.of}`));
@@ -1048,8 +1077,10 @@
     emit("queue before:", names);
     emit(`target: index ${idx} "${target}" — these must SURVIVE:`, others);
 
+    const surname = surnameOf(target).toLowerCase();
+    emit(`  (contamination checks will match on surname "${surname}", not "${target}")`);
     const hp0 = historyProbe();
-    if (hp0.available && hp0.txt.includes(target.toLowerCase())) {
+    if (hp0.available && surname && hp0.txt.includes(surname)) {
       emit("ABORT — target already appears in pick history; he was drafted, not removable.");
       return;
     }
@@ -1104,8 +1135,8 @@
         // itself can produce it. Measured 2026-08-14: a Draft button in the
         // row passed the whole conjunction and reported REMOVE WORKS.
         const hp1 = historyProbe();
-        const inHistory = hp1.available && hp1.txt.includes(target.toLowerCase());
-        const avail = await playerAvailability(target);
+        const inHistory = hp1.available && !!surname && hp1.txt.includes(surname);
+        const avail = await playerAvailability(surnameOf(target));
         emit(`  post-click: in pick history = ${inHistory} | grid says: ${avail}`);
         if (inHistory || /DRAFTED/.test(avail)) {
           emit(`!!! CONTAMINATED — "${target}" was DRAFTED, not dequeued.`);
@@ -1224,10 +1255,8 @@
       const rows = queueEntries().rows;
       if (!rows.length) break;
       const n = rows.length;
-      hoverRow(rows[0]);
-      await sleep(150);
-      const ctl = pickRemoveControl(queueEntries().rows[0] || rows[0]);
-      if (!ctl) { emit("STOP — no remove control on row 0"); break; }
+      const ctl = await resolveRemoveControl(() => queueEntries().rows[0] || null);
+      if (!ctl) { emit("STOP — no remove control on row 0 after 3 hover attempts"); break; }
       if (guard === 0) emit("  removing via:", { tag: ctl.tag, cls: ctl.cls, txt: ctl.txt, proven: !!confirmedRemoveSig });
       try { ctl.el.click(); } catch (e) { emit("STOP — remove click threw:", String(e)); break; }
       clicks++;
@@ -1237,17 +1266,30 @@
     }
     emit(`after clear: ${JSON.stringify(queueNames())} (${clicks} clicks, ${Date.now() - t0}ms)`);
 
-    for (const n of want) { if (await addOne(n)) clicks++; }
+    const skipped = [];
+    for (const n of want) {
+      const r = await addOne(n);
+      if (r.ok) clicks++; else skipped.push(r);
+    }
 
+    // A name the ROOM has already taken is not a rebuild failure — it is a
+    // data condition, and conflating the two turned a working rebuild into
+    // "MISMATCH" twice on 2026-08-15. Grade against what was ATTAINABLE.
+    const UNATTAINABLE = new Set(["drafted", "not_in_pool", "on_clock"]);
+    const blocked = skipped.filter((s2) => UNATTAINABLE.has(s2.reason));
+    const attainable = want.filter((w) => !blocked.some((s2) => s2.name === w));
     const got = queueNames();
     const ok =
-      got.length === want.length &&
-      want.every((w, i) => (got[i] || "").toLowerCase().includes(w.toLowerCase()));
+      got.length === attainable.length &&
+      attainable.every((w, i) => (got[i] || "").toLowerCase().includes(w.toLowerCase()));
     emit("final queue:", got);
+    if (blocked.length) {
+      emit("unattainable (not a rebuild failure):", blocked.map((s2) => `${s2.name}:${s2.reason}`));
+    }
     emit(
       ok
-        ? `*** REBUILD OK — desired order achieved: ${clicks} clicks, ${Date.now() - t0}ms (budget: 90s/pick)`
-        : `*** REBUILD MISMATCH — wanted ${JSON.stringify(want)}, got ${JSON.stringify(got)}`
+        ? `*** REBUILD OK — attainable order achieved: ${clicks} clicks, ${Date.now() - t0}ms (budget: 90s/pick)`
+        : `*** REBUILD MISMATCH — attainable ${JSON.stringify(attainable)}, got ${JSON.stringify(got)}`
     );
   }
 
