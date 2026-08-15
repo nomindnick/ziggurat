@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat draft-control probe
 // @namespace    ziggurat
-// @version      1.1
+// @version      1.3
 // @description  DIAGNOSTIC ONLY. Can page-side code drive ESPN's draft-room controls (Queue, Draft) — and can it EDIT the queue? Nothing runs on load; every test is operator-triggered from the badge.
 // @match        https://fantasy.espn.com/football/draft*
 // @match        https://fantasy.espn.com/football/mockdraft*
@@ -329,11 +329,18 @@
   function findPlayerRow(fragment) {
     const frag = fragment.trim().toLowerCase();
     if (!frag) return null;
+    // A surname is a substring, so it can match a row in some OTHER table
+    // (own roster, watch list) that carries no action button. Prefer a row
+    // that actually offers a control; fall back to the first text match so
+    // the caller can still report what it found.
+    let fallback = null;
     for (const r of document.querySelectorAll('[class*="fixedDataTableRowLayout_main"]')) {
       if (r.closest(".pick-history") || r.closest(".pick-queue")) continue;
-      if ((r.textContent || "").toLowerCase().includes(frag)) return r;
+      if (!(r.textContent || "").toLowerCase().includes(frag)) continue;
+      if (r.querySelector("button, [role=button]")) return r;
+      if (!fallback) fallback = r;
     }
-    return null;
+    return fallback;
   }
 
   // ---- badge UI --------------------------------------------------------
@@ -348,7 +355,7 @@
     "padding:8px;max-width:460px;opacity:.96";
 
   const title = document.createElement("div");
-  title.textContent = "ZIG PROBE — diagnostic, nothing auto-runs";
+  title.textContent = "ZIG PROBE v1.3 — diagnostic, nothing auto-runs";
   title.style.cssText = "color:#45c98b;margin-bottom:6px;font-weight:bold";
   box.appendChild(title);
 
@@ -762,18 +769,52 @@
     };
     if (panelText().includes(key)) { emit(`  "${name}" SKIP — already in the queue`); return null; }
 
-    const row = findPlayerRow(name);
+    // The grid renders only what is on screen, so a target that is simply
+    // scrolled away is indistinguishable from one that does not exist. Drive
+    // ESPN's own filter to bring it in — which is the P1 path, and the same
+    // thing the real queue writer will have to do.
+    let row = findPlayerRow(name);
+    let searchBox = null;
     if (!row) {
-      emit(`  "${name}" SKIP — no rendered available-player row (P1: the grid is virtualized)`);
+      searchBox = searchInputs()[0] || null;
+      if (searchBox) {
+        emit(`  "${name}" not on screen — driving ESPN's search box`,
+             { ph: searchBox.placeholder || null, cls: clsOf(searchBox).slice(0, 40) });
+        setNativeValue(searchBox, name);
+        await sleep(1400);
+        row = findPlayerRow(name);
+      }
+    }
+    const clearSearch = async () => {
+      if (!searchBox) return;
+      setNativeValue(searchBox, "");
+      await sleep(400);
+    };
+    if (!row) {
+      emit(`  "${name}" SKIP — no available-player row, even after searching`);
+      await clearSearch();
       return null;
     }
+
+    // A control that only renders on hover has no node until React sees a
+    // mouseover — and "no button" would then read as "ESPN refuses adds".
+    hoverRow(row);
+    await sleep(200);
+    const btns = [...row.querySelectorAll("button, [role=button]")];
+    const label = (b) => (b.textContent || "").trim().toLowerCase();
     const qb =
-      row.querySelector("button.Button--queue") ||
-      [...row.querySelectorAll("button")].find(
-        (b) => (b.textContent || "").trim().toLowerCase() === "queue"
-      );
+      row.querySelector("button.Button--queue") || btns.find((b) => label(b) === "queue");
     if (!qb) {
-      emit(`  "${name}" SKIP — no Queue button in that row (on the clock? it becomes Draft)`);
+      // Report what IS there. "no Queue button" as a bare statement is a
+      // guess wearing a finding's clothes.
+      emit(`  "${name}" SKIP — no Queue button. Buttons actually in that row:`,
+           btns.map((b) => `${b.tagName}.${clsOf(b).slice(0, 26)}"${label(b).slice(0, 12)}"`));
+      emit(`     row text: ${(row.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80)}`);
+      if (btns.some((b) => label(b) === "draft")) {
+        emit("     => that row offers DRAFT, so you are ON THE CLOCK. Queueing is");
+        emit("        impossible until your turn passes. Wait for it, then re-run.");
+      }
+      await clearSearch();
       return null;
     }
     qb.click(); // L1 is the proven level (2026-08-12)
@@ -788,6 +829,10 @@
       await sleep(100);
       if (panelText().includes(key)) { landed = true; break; }
     }
+    // Clear before reading positions: a live filter left in the box starves
+    // every LATER test of rows and reads as a failure of whatever that test
+    // was measuring.
+    await clearSearch();
     if (!landed) { emit(`  "${name}" — did not appear in the queue within 3s`); return null; }
 
     const after = queueNames();
@@ -801,6 +846,20 @@
     }
     emit(`  "${name}" landed at index ${index} of ${after.length}`, after);
     return { name, index, of: after.length };
+  }
+
+  // Commas only — splitting on "." would break T.J./A.J. names. But a token
+  // holding a space is almost always a missed comma ("stoll. ricard" arrived
+  // as ONE name on 2026-08-13), so say so instead of failing to match later.
+  function parseNames(csv) {
+    const names = String(csv || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    for (const n of names) {
+      if (/\s/.test(n)) {
+        emit(`  NOTE: "${n}" contains a space and will be matched as ONE name.`);
+        emit("        If that was meant to be two players, separate them with a comma.");
+      }
+    }
+    return names;
   }
 
   // ---- test A: read the panel, click nothing ---------------------------
@@ -841,7 +900,7 @@
 
   // ---- test B: Q2, append or rank-insert? ------------------------------
   async function queueAddOrdered(csv) {
-    const names = String(csv || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const names = parseNames(csv);
     if (names.length < 2) {
       emit(`P0-B needs at least TWO surnames to see ordering. The input box`);
       emit(`  (top row, yellow border) currently reads: "${String(csv || "")}"`);
@@ -1040,7 +1099,7 @@
 
   // ---- test E: the actual production operation -------------------------
   async function queueRebuild(csv) {
-    const want = String(csv || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const want = parseNames(csv);
     if (!want.length) {
       emit("P0-E: type the desired queue into the input box (top row, yellow border),");
       emit(`  comma-separated. It currently reads: "${String(csv || "")}"`);
