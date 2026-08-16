@@ -840,3 +840,18 @@ def test_queue_userscript_served_with_token_and_port_baked_in(cockpit):
     # only reads lowercase /button--draft/ in a scoring regex, never clicks it.
     assert "Button--dequeue" in script
     assert "Button--draft" not in script
+
+
+def test_queue_reports_history_is_kept_and_bounded(cockpit):
+    # First live test (2026-08-16): the whole arc was lost to Chrome's console
+    # retention — only the final report survived. The cockpit now keeps a
+    # bounded history so post-run analysis never depends on the browser.
+    base, session = cockpit
+    for i in range(5):
+        _queue_status_post(base, session,
+                           {"overall": 1, "achieved": [f"P{i}"], "ok": i % 2 == 0})
+    hist = _get(base, "/api/queue/reports")
+    assert hist["received"] == 5 and hist["kept"] == 5
+    assert [r["achieved"] for r in hist["reports"]] == [[f"P{i}"] for i in range(5)]
+    assert [r["ok"] for r in hist["reports"]] == [True, False, True, False, True]
+    assert [r["n"] for r in hist["reports"]] == [1, 2, 3, 4, 5]  # receipt order kept

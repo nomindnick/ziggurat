@@ -126,13 +126,19 @@ The gate is cleared. All three questions answered on real rooms.
    `Button--queue` and skip disabled nodes. This is not hypothetical: it cost
    a real practice pick — see §5c.
 
-### Still open (neither blocks the build)
+### P2 — CONFIRMED 2026-08-16 (first live mock, room 1506119378)
 
-**P2 — autopick semantics.** Confirm that clock expiry takes the **top queued
-available** player. The queue panel carries an **`Autopick` toggle**; whether
-expiry draws from the queue may depend on it. **This is the load-bearing
-assumption of §2 and it is still an assumption** — witness it before the
-hands-off rehearsal (§8.2), and treat §8.5 as the test that settles it.
+**Clock expiry drafts from the queue.** The proof is statistical, from the
+journal replay: the operator's expiry picks included players at **#12, #18,
+#21, #25, #29 and #35 on ESPN's own best-available board** — depths ESPN's
+native autopick never reaches — while every pick appears in the engine's
+top-8 at its moment. The room's `Autopick` toggle was **ON** (verified in the
+live DOM: `.autoPick-container input.form__control--toggle`, `checked: true`).
+Corollary also witnessed: with an **empty/thin queue, expiry falls back to
+ESPN best-available** (pick 13: ESPN's #1, engine's desired[4] — round 2,
+before the queue had built), the benign degradation §2's failure table
+assumed. Whether expiry-from-queue survives the toggle being OFF is
+unmeasured — the writer treats an `off` reading as an alarm (badge warning).
 
 ---
 
@@ -353,6 +359,35 @@ Other audit-paid rules now in the writer:
 rows actually render team codes next to the abbreviated name (the namesake
 disambiguation depends on it); (2) what a D/ST row looks like in the queue.
 Also watch the badge's `autopick ON/OFF` readout — that observation is P2.
+
+### 6c. First live test — 2026-08-16, full 160-pick mock (writer v1.2)
+
+The mock ran END TO END unattended-style: 36 status reports, sync bound and
+conflict-free, correct inert shutdown after the operator's last pick, a legal
+16-round roster. P2 confirmed (§4). Three defects found, fixed in v1.3:
+
+1. **DST adds failed all game** (`not_in_pool`): ESPN's player search returns
+   nothing for the full display text ("Chargers D/ST"), so the engine's
+   **D/ST-early play was silently defeated for six straight turns** (88–133 —
+   expiry took the first addable player each time; ESPN itself filled PHI
+   D/ST at R16). v1.3 searches the nickname alone ("Chargers") and still
+   verifies the full text on the row — **works-on-live is unverified until
+   the next mock; if nickname search also fails, the fallback is driving the
+   grid's D/ST position tab.**
+2. **The Autopick reader always said `unknown`**: the comma-selector matched
+   the wrapper div (class contains "toggle") before the input inside it.
+   Fixed with the live-verified selector.
+3. **The console trail did not survive the session** (Chrome retention kept
+   ~12 lines); only the LAST report survived server-side. The cockpit now
+   keeps a bounded report history at `GET /api/queue/reports`, so post-run
+   analysis never depends on the browser again.
+
+**Open observation, not yet a defect:** expiry picks tracked desired[1]–[3]
+more often than desired[0] mid-draft. Confounded three ways: the DST hole
+(desired[0] literally unaddable for six turns), mock CPU pace (~2–4 s/pick vs
+~2 s per add — the real draft's 90 s human pace is far kinder), and possible
+transient add failures demoting the head for a cycle. Re-measure on the next
+mock with the report history; §8.5's five-pick fidelity test is the gate.
 
 ---
 

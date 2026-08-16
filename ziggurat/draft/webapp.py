@@ -72,6 +72,9 @@ _SUGGEST_LIMIT_MAX = 25
 _QUEUE_K_DEFAULT = 8
 _QUEUE_K_MIN = 3
 _QUEUE_K_MAX = 10
+# Writer status reports kept for post-run analysis (~16 rounds of a fast mock
+# produced 36 reports; 200 covers a slow human draft with margin, bounded RAM).
+_QUEUE_REPORT_HISTORY = 200
 
 
 class CockpitError(ValueError):
@@ -185,6 +188,11 @@ class WebCockpit:
     _queue_last_report: dict[str, Any] | None = field(default=None, init=False)
     _queue_bad_streak: int = field(default=0, init=False)
     _queue_reports_received: int = field(default=0, init=False)
+    # Bounded history of writer reports (newest last). The first live test
+    # lost its whole arc to Chrome's console retention — only the final report
+    # survived server-side. GET /api/queue/reports serves this so a post-run
+    # analysis never depends on the browser again.
+    _queue_reports: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self.resolver = NameResolver(self.session.board)
@@ -389,11 +397,23 @@ class WebCockpit:
                 "session_overall": self.session.overall_pick,
                 "autopick": autopick,
             }
+            self._queue_reports.append(dict(self._queue_last_report,
+                                            n=self._queue_reports_received))
+            del self._queue_reports[:-_QUEUE_REPORT_HISTORY]
             return {
                 "ok": True,
                 "epoch": self.sync_epoch,
                 "session_overall": self.session.overall_pick,
                 "bad_streak": self._queue_bad_streak,
+            }
+
+    def queue_reports_json(self) -> dict[str, Any]:
+        """The bounded writer-report history (GET /api/queue/reports)."""
+        with self._lock:
+            return {
+                "received": self._queue_reports_received,
+                "kept": len(self._queue_reports),
+                "reports": list(self._queue_reports),
             }
 
     # -- mutations (each recomputes synchronously, like the REPL) ------------
@@ -762,6 +782,8 @@ def _make_handler(cockpit: WebCockpit) -> type[BaseHTTPRequestHandler]:
                 except ValueError:
                     k = _QUEUE_K_DEFAULT
                 self._run(lambda: cockpit.queue_json(k))
+            elif url.path == "/api/queue/reports":
+                self._run(cockpit.queue_reports_json)
             elif url.path == "/api/board":
                 self._run(cockpit.board_json)
             elif url.path == "/api/suggest":

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.2
+// @version      1.3
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -27,7 +27,7 @@
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.2";
+  const VERSION = "1.3";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -449,9 +449,14 @@
     let searchBox = null;
     if (!row) {
       // The grid renders only what is on screen — drive ESPN's own filter.
+      // Measured 2026-08-16 (first live mock): searching the FULL DST display
+      // text ("Chargers D/ST") returns nothing — not_in_pool for six straight
+      // turns, defeating the engine's D/ST play. Search the nickname alone;
+      // verification below still requires the full text on the row.
+      const searchText = isDstText(displayName) ? dstNickname(displayName) : displayName;
       searchBox = searchInputs()[0] || null;
       if (searchBox) {
-        setNativeValue(searchBox, displayName);
+        setNativeValue(searchBox, searchText);
         await sleep(1400);
         row = findPlayerRow(displayName);
       }
@@ -538,22 +543,29 @@
   function autopickState() {
     const p = queuePanel();
     if (!p) return null;
-    const holder = [...p.querySelectorAll("*")].find(
-      (el) => /autopick/i.test(el.textContent || "") && el.children.length <= 4
-    );
-    const scope = holder || p;
-    const toggle = scope.querySelector(
-      'input[type="checkbox"], [role="switch"], [class*="toggle" i]'
-    );
-    if (!toggle) return "unknown";
-    if (toggle.checked === true) return "on";
-    if (toggle.checked === false) return "off";
-    const aria = toggle.getAttribute("aria-checked");
-    if (aria === "true") return "on";
-    if (aria === "false") return "off";
-    const cls = clsOf(toggle).toLowerCase();
-    if (/(^|[ -])(on|active|checked)([ -]|$)/.test(cls)) return "on";
-    if (/(^|[ -])(off|inactive)([ -]|$)/.test(cls)) return "off";
+    // Verified live 2026-08-16 (mock 1506119378):
+    //   <div class="autoPick-container">… <div class="… autoPick-toggle …">
+    //     <label class="control …"><input type="checkbox"
+    //       class="form__control form__control--toggle"> …
+    // The v1.2 bug: a comma-selector matched the WRAPPER div (class contains
+    // "toggle") before the input inside it, and a div has no .checked —
+    // every read came back "unknown". Read state candidates in preference
+    // order and take the first that actually carries a state.
+    const read = (t) => {
+      if (!t) return null;
+      if (t.checked === true) return "on";
+      if (t.checked === false) return "off";
+      const aria = t.getAttribute("aria-checked");
+      if (aria === "true") return "on";
+      if (aria === "false") return "off";
+      return null;
+    };
+    const known = read(p.querySelector('.autoPick-container input[type="checkbox"]'));
+    if (known) return known;
+    for (const t of p.querySelectorAll('input[type="checkbox"], [role="switch"]')) {
+      const v = read(t);
+      if (v) return v;
+    }
     return "unknown";
   }
 
