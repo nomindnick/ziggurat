@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.1
+// @version      1.2
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -27,7 +27,7 @@
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.1";
+  const VERSION = "1.2";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -47,6 +47,14 @@
 
   // ---- tiny utils ------------------------------------------------------
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // v1.2: the paste-back trail. The badge is one line; a live test needs the
+  // decisions on record — filter the DevTools console on [zig-queue] and copy.
+  function qlog() {
+    try {
+      console.log.apply(console, ["[zig-queue]"].concat([].slice.call(arguments)));
+    } catch (e) { /* console withheld is not a failure */ }
+  }
 
   // `el.className` is an SVGAnimatedString on SVG nodes — read the attribute.
   function clsOf(el) {
@@ -263,6 +271,27 @@
     return "unsure";
   }
 
+  // One line per queue row: its raw text and how the pairing judged it.
+  // Deduped by signature so a stable queue does not spam the console. This is
+  // ALSO the §6b DOM-assumption evidence (team codes? DST row shape?) — the
+  // whole point of the paste-back trail.
+  let lastPairLogSig = "";
+  function logPairing(desired, pairing) {
+    const lines = pairing.names.map((n, i) => {
+      const v = pairing.rowPair[i];
+      const verdict =
+        v === "stale" ? "STALE (removable)"
+        : v === "protected" ? "PROTECTED (ambiguous — never removed)"
+        : "= desired[" + v + "] " + espnKey(desired[v]);
+      return `  row[${i}] "${pairing.texts[i].slice(0, 48)}" -> ${verdict}`;
+    });
+    const sig = lines.join("|") + "#" + desired.map((d) => d.player_id).join(",");
+    if (sig === lastPairLogSig) return;
+    lastPairLogSig = sig;
+    qlog(`queue pairing (${pairing.names.length} row(s) vs ${desired.length} desired):`);
+    for (const l of lines) qlog(l);
+  }
+
   // Pair queue rows to desired entries. Refuse-not-guess (§7): a row is
   //   paired     — exactly one desired entry says "yes"/"unsure" and no other
   //                candidate survives
@@ -401,6 +430,7 @@
         if (!historyBefore.has(h) && weakNameMatch(rowName, h)) {
           mode = "HALTED";
           haltReason = `a pick naming "${h}" landed right after our remove of "${rowName}" — possible mis-click`;
+          qlog("!!! HALT: " + haltReason);
           return "stuck";
         }
       }
@@ -665,6 +695,7 @@
       q = queueEntries();
       if (q.mode === "NO_PANEL") { problems.push("queue panel disappeared mid-cycle"); break; }
       const pairing = pairRows(working, q.rows);
+      logPairing(working, pairing);
 
       // longest correct prefix: row i is pairing to working[i]
       let ptr = 0;
@@ -691,6 +722,7 @@
           }
           ops++;
           const res = await addOne(needed);
+          qlog(`add-first "${espnKey(needed)}" (belongs at ${ptr}) -> ${res.ok ? "landed" : res.reason}`);
           addResults.push({ pid: needed.player_id, ok: res.ok, reason: res.reason });
           if (!res.ok) {
             problems.push(`add "${espnKey(needed)}": ${res.reason}`);
@@ -701,6 +733,7 @@
         }
         ops++;
         const r = await removeQueueEntryByName(pairing.names[ptr]);
+        qlog(`remove "${pairing.names[ptr]}" (blocking position ${ptr}) -> ${r}`);
         if (mode === "HALTED") { problems.push(haltReason); break; }
         if (r === "refused") { problems.push(`no Remove control for "${pairing.names[ptr]}"`); break; }
         if (r === "stuck") { problems.push(`"${pairing.names[ptr]}" would not leave the queue`); break; }
@@ -716,6 +749,7 @@
       }
       ops++;
       const res = await addOne(d);
+      qlog(`append "${espnKey(d)}" at ${ptr} -> ${res.ok ? "landed" : res.reason}`);
       addResults.push({ pid: d.player_id, ok: res.ok, reason: res.reason });
       if (!res.ok) {
         problems.push(`add "${espnKey(d)}": ${res.reason}`);
@@ -767,6 +801,7 @@
         break;
       }
       const r = await removeQueueEntryByName(pairing.names[0]);
+      qlog(`on-turn head fix: remove "${pairing.names[0]}" -> ${r}`);
       if (mode === "HALTED") { problems.push(haltReason); break; }
       if (r !== "gone") { problems.push(`could not clear "${pairing.names[0]}" above the head`); break; }
     }
@@ -786,6 +821,7 @@
   let busy = false;
   let lastFetchAt = 0;
   let lastHistorySig = "";
+  let lastCycleLogSig = "";
 
   async function cycle(force) {
     if (busy) return;
@@ -803,6 +839,18 @@
         return;
       }
       let payload = got.json;
+      const cycleSig = payload.overall_pick + "#" +
+        (payload.desired || []).map((d) => d.player_id).join(",");
+      if (cycleSig !== lastCycleLogSig) {
+        lastCycleLogSig = cycleSig;
+        qlog(
+          `overall ${payload.overall_pick}, queue for ${payload.queue_for_overall}` +
+          ` (${payload.picks_until_operator} away)` +
+          (payload.is_operator_turn ? " — YOUR PICK" : "") +
+          ` · autopick ${autopickState()} · desired: ` +
+          (payload.desired || []).map((d) => espnKey(d)).join(", ")
+        );
+      }
       if (payload.complete) {
         status("draft complete");
         return;
@@ -837,6 +885,10 @@
       let reason = result.reason;
       if (document.hidden) {
         reason = (reason ? reason + "; " : "") + "(note: tab hidden — timers throttled)";
+      }
+      if (!result.ok || reason) {
+        qlog(`verify ${result.ok ? "ok" : "NOT ok"} · queue [${result.achieved.join(", ")}]` +
+          (reason ? ` · ${reason}` : ""));
       }
       await reportStatus(payload.overall_pick, result.achieved, result.ok, reason);
       const ap = autopickState();
