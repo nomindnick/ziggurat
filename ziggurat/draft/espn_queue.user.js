@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.4
+// @version      1.5
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -29,12 +29,17 @@
 // structurally safe (Button--queue or nothing; on_clock refusals break the
 // loop before any removal could strip an unfillable queue). DST searches use
 // the nickname alone; the add wait polls instead of sleeping fixed.
+//
+// v1.5 — run 2 (which executed v1.3; spec §6c). The not_in_pool epidemic was
+// the grid's POSITION FILTER: search results are scoped by it and ESPN
+// drifts it with its own need suggestions. The writer now sets the filter to
+// the target's position before every search and restores All Pos. after.
 
 (() => {
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.4";
+  const VERSION = "1.5";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -126,6 +131,32 @@
       ) ? 0 : 1;
     hits.sort((a, b) => hint(a) - hint(b));
     return hits;
+  }
+
+  // ---- the position filter (v1.5 — run 2's decisive finding) -------------
+  // The grid's search results are SCOPED BY THE POSITION FILTER dropdown, and
+  // the filter drifts with ESPN's own need suggestions: run 2 (2026-08-16)
+  // watched DST adds fail not_in_pool for six straight rounds and then land
+  // the moment the filter reached D/ST — while QBs simultaneously STARTED
+  // failing. The writer must own the filter, deterministically, per add.
+  // Verified live: <select class="dropdown__select"> with options
+  // All Pos.=-1, QB=0, RB=2, WR=4, TE=6, FLEX=23, D/ST=16, K=17.
+  const POSITION_FILTER_VALUES = { QB: "0", RB: "2", WR: "4", TE: "6", DST: "16", K: "17" };
+  function positionFilterSelect() {
+    for (const s of document.querySelectorAll("select")) {
+      const texts = [...s.options].map((o) => (o.textContent || "").trim());
+      if (texts.includes("QB") && (texts.includes("D/ST") || texts.includes("DST"))) return s;
+    }
+    return null;
+  }
+  async function setPositionFilter(pos) {
+    const sel = positionFilterSelect();
+    if (!sel) return false;
+    const want = POSITION_FILTER_VALUES[String(pos || "").toUpperCase()] || "-1";
+    if (sel.value === want) return true;
+    setNativeValue(sel, want); // native setter + change event, like the search box
+    await sleep(300);
+    return true;
   }
 
   // ---- queue panel readers (proven 2026-08-13..15) ---------------------
@@ -454,20 +485,20 @@
 
     let row = findPlayerRow(displayName);
     let searchBox = null;
+    let filterTouched = false;
     if (!row) {
       // The grid renders only what is on screen — drive ESPN's own filter.
-      // Measured 2026-08-16 (first live mock): searching the FULL DST display
-      // text ("Chargers D/ST") returns nothing — not_in_pool for six straight
-      // turns, defeating the engine's D/ST play. Search the nickname alone;
-      // verification below still requires the full text on the row.
+      // The position dropdown FIRST (v1.5: search is scoped by it and ESPN
+      // drifts it with its own suggestions), then the name search. DSTs
+      // search by nickname alone ("Chargers" — the full display text returns
+      // nothing); verification still requires the full text on the row.
+      filterTouched = await setPositionFilter(d.position);
       const searchText = isDstText(displayName) ? dstNickname(displayName) : displayName;
       searchBox = searchInputs()[0] || null;
       if (searchBox) {
         setNativeValue(searchBox, searchText);
-        // Poll instead of a fixed 1.4 s wait (v1.4): at the mock's 30 s pick
-        // pace the fill rate was losing to the drain rate and the queue was
-        // observed EMPTY at the operator's turn. The row usually renders well
-        // before the old fixed wait elapsed.
+        // Poll instead of a fixed wait (v1.4): at the mock's 30 s pick pace
+        // the fill rate was losing to the drain rate.
         const deadline = Date.now() + 1600;
         while (Date.now() < deadline && !row) {
           await sleep(150);
@@ -476,9 +507,10 @@
       }
     }
     const clearSearch = async () => {
-      if (!searchBox) return;
-      setNativeValue(searchBox, "");
-      await sleep(250);
+      // A live filter (text OR position) starves every later lookup.
+      if (searchBox) setNativeValue(searchBox, "");
+      if (filterTouched) await setPositionFilter("ALL");
+      if (searchBox || filterTouched) await sleep(250);
     };
     if (!row) {
       await clearSearch();

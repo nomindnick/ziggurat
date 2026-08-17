@@ -136,12 +136,14 @@ top-8 at its moment. The room's `Autopick` toggle was **ON** (verified in the
 live DOM: `.autoPick-container input.form__control--toggle`, `checked: true`).
 Per the operator's debrief, **all 16 picks were queue-fed: the queue was
 sometimes empty when his turn STARTED but always refilled within seconds and
-was never empty at expiry.** Two consequences: (1) the **empty-queue fallback
-(ESPN best-available) remains ASSUMED, never observed** — pick 13 (ESPN's #1
-but the engine's desired[4]) was initially misread as that fallback and was
-actually a **stale queue head** drafted from the queue, i.e. head-staleness
-under a fast room is a real, measured fidelity drag, not explainable noise;
-(2) whether expiry-from-queue survives the toggle being OFF is also
+was never empty at expiry.** Pick 13 (ESPN's #1 but the engine's desired[4])
+was initially misread as the empty-queue fallback and was actually a **stale
+queue head** drafted from the queue — head-staleness under a fast room is a
+real, measured fidelity drag. **Run 2 (2026-08-16, room 1908085605) then
+witnessed the fallback itself**: with the queue starved empty by the
+position-filter gate (§6d), expiry at picks 113/133/148 took ESPN's own
+need-shaped best-available — the benign degradation §2 assumed, now
+observed. Whether expiry-from-queue survives the toggle being OFF is still
 unmeasured — the writer treats an `off` reading as an alarm (badge warning).
 
 ---
@@ -421,6 +423,42 @@ him** (previously assumed). Team codes in queue rows remain UNCONFIRMED
 degrades namesakes to protected rows, safe but noisy).
 
 ---
+
+### 6d. Second live test — 2026-08-16, room 1908085605 (executed v1.3)
+
+An install lag made this a clean second v1.3 measurement (the v1.4 fixes
+landed on disk mid-draft; the Tampermonkey copy was older — **protocol rule:
+restart the cockpit, reinstall the script, VERIFY the badge version before
+the room opens**; the cockpit reads the userscript file at startup). Full
+160-pick run, 46 reports (33 not-ok — the history endpoint earned its keep on
+its first outing).
+
+**The decisive finding: the grid's search is SCOPED BY THE POSITION FILTER
+dropdown, and ESPN drifts that filter with its own need suggestions.** The
+`not_in_pool` epidemic was positional, not lexical: DST adds failed for six
+straight rounds then LANDED the moment the filter reached D/ST — while QBs
+simultaneously began failing; Jared Goff went `not_in_pool → no_control →
+landed` in 20 s as the filter moved. Verified live post-draft:
+`<select class="dropdown__select">` with `All Pos.=-1, QB=0, RB=2, WR=4,
+TE=6, FLEX=23, D/ST=16, K=17`. **v1.5 owns the filter**: set to the target's
+position (native setter + change) before every search, restore All Pos.
+after.
+
+Also settled by this run:
+
+- **Team codes in queue rows: CONFIRMED** ("53L. Burden IIICHIWRRemove") —
+  §6b's open DOM assumption #1 closes. DST queue rows matched by nickname
+  (adds verified landed) — assumption #2 effectively closes too.
+- **The identity layer ran flawlessly live**: every pairing correct including
+  suffixed names ("L. Burden III"), zero protected-row refusals, zero
+  wrong-player adds, zero halts.
+- **Queue-head-equals-drafted traced directly for picks 68, 73, 88, 93, 108,
+  128 and 153**; ESPN fallback (starved queue) at 113, 133, 148. One
+  anomaly on file: at 33, reports showed 2 queued rows shortly before a
+  non-queued player was drafted — both rows were likely sniped mid-turn (one
+  demonstrably was); watch for recurrence.
+- The hover-gated Remove flaked once ("T. Henderson" → refused) and
+  recovered on the next cycle — the retry design absorbing §4a hazard 2.
 
 ## 7. Refusal + push contract
 
