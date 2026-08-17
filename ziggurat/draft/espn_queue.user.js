@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.5
+// @version      1.6
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -34,12 +34,20 @@
 // the grid's POSITION FILTER: search results are scoped by it and ESPN
 // drifts it with its own need suggestions. The writer now sets the filter to
 // the target's position before every search and restores All Pos. after.
+//
+// v1.6 — run 3 (the first run that EXECUTED v1.5; spec §6e). The writer was
+// removing its own correct DST adds: the queue row's concatenated text
+// ("169Texans D/STHOUD/STRemove") failed a word-boundary-anchored is-DST
+// test, fell out of the DST matching branch, and paired as STALE — landed,
+// removed, re-added, for two minutes. isDstText/dstNickname are now
+// slash-mandatory with no boundary. Plus an All-Pos. retry for players ESPN
+// files under a different position slot than the house board (FB vs RB).
 
 (() => {
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.5";
+  const VERSION = "1.6";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -241,11 +249,17 @@
     const toks = nameTokens(display);
     return ((toks[0] || "").slice(0, 1) || "").toLowerCase();
   }
-  function isDstText(s) { return /d\/?st\b/i.test(String(s || "")); }
+  // Slash-mandatory, NO word boundary (v1.6, run 3's root cause): the queue
+  // row's text concatenates with no separators — "169Texans D/STHOUD/STRemove"
+  // — so a \b after "ST" never holds and the row FAILED the is-DST test,
+  // fell out of the DST branch, matched nothing, and the writer removed its
+  // own correct DST add every cycle. The literal slash form cannot appear in
+  // a person's name ("Goldstein" stays safe), so no boundary is needed.
+  function isDstText(s) { return /d\/st/i.test(String(s || "")); }
   function dstNickname(display) {
     // Letters only: a queue row's leading rank digit must not become a
     // phantom nickname ("9D/ST" is unreadable, not the "9" defense).
-    return String(display || "").replace(/d\/?st\b.*/i, "")
+    return String(display || "").replace(/d\/st.*/i, "")
       .replace(/[^A-Za-z' -]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
   }
   // The name this writer searches and verifies with: ESPN's own display text.
@@ -503,6 +517,18 @@
         while (Date.now() < deadline && !row) {
           await sleep(150);
           row = findPlayerRow(displayName);
+        }
+        // v1.6: ESPN may file a player under a different position than the
+        // house board does (run 3: Kyle Juszczyk is an RB to us, a FB slot to
+        // ESPN — invisible under the RB filter all game). One retry with the
+        // filter wide open before concluding not_in_pool.
+        if (!row && filterTouched) {
+          await setPositionFilter("ALL");
+          const retry = Date.now() + 1200;
+          while (Date.now() < retry && !row) {
+            await sleep(150);
+            row = findPlayerRow(displayName);
+          }
         }
       }
     }

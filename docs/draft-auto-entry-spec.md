@@ -467,6 +467,48 @@ Also settled by this run:
   draft night**, and the sync badge's "open the Pick History tab" guidance is
   stale for this room shape.
 
+### 6e. Third live test — 2026-08-16, room 1639896930 (v1.5, badge-verified)
+
+160 picks in under six minutes (~2.2 s/pick — 40x draft-night pace), run per
+the hands-off protocol. Fidelity: 6/16 exact desired[0], 11/16 within the
+top-2, at a pace the real draft will never approach. Two discoveries and one
+root-caused defect:
+
+**Autopilot is the real commit model.** The room's Autopick toggle starts
+OFF; the operator's first expiry (pick 8 burned its full 30 s clock) flips
+the seat to autopilot, and every later operator turn committed INSTANTLY at
+turn arrival (state-watcher timing: no pause at any later operator pick).
+Consequences: (1) after the first expiry there is NO on-turn window — the
+between-picks queue maintenance is the entire game, which is exactly what
+the writer does; (2) **draft-night runbook item: flip Autopick ON in the
+queue panel at ~18:45** for full autonomy from pick 1 (otherwise round 1
+burns the full 90 s and flips it anyway). The v1.3 reader-bug fix proved
+itself: reports recorded the off→on transition cleanly.
+
+**On-turn adds are REFUTED, definitively.** v1.5's unified loop attempted
+them; ESPN returned `on_clock` five consecutive cycles (Button--queue is
+genuinely absent on the operator's turn — §3 stands). Run 1's mid-turn
+refills were sync-lag off-turn cycles. The unified loop stays (it is the
+correct posture under autopilot's instant commits, and the attempts cost
+nothing).
+
+**The divergence play EXECUTED**: Cameron Dicker (K) drafted at overall 88 —
+ESPN-available **#95**, a depth no fallback logic reaches — plus deep-board
+queue commits at 68 (#20), 73 (#33), 113 (#25), 148 (#51). v1.5's position
+filter held mid-game depth at 5–8 (run 2 starved to 1–2).
+
+**The defect (fixed in v1.6, node-verified on the real row text): the writer
+removed its own correct DST adds.** `landed → STALE → removed → re-added`
+oscillating for two minutes: the queue row's concatenated text
+("169Texans D/STHOUD/STRemove") failed the word-boundary-anchored is-DST
+test ("D/ST" is always followed by a letter there), fell out of the DST
+matching branch, and paired as stale — precisely the audit's predicted
+failure shape, resurfacing through a regex. `isDstText`/`dstNickname` are
+now slash-mandatory with no boundary ("d/st" cannot occur in a person's
+name; "Goldstein" stays safe). v1.6 also retries not_in_pool once under
+All Pos. — ESPN files Kyle Juszczyk under FB, invisible under the RB filter
+the house position implies.
+
 ## 7. Refusal + push contract
 
 **Refuse rather than guess** — never queue a player we are not confident maps
