@@ -134,10 +134,14 @@ journal replay: the operator's expiry picks included players at **#12, #18,
 native autopick never reaches — while every pick appears in the engine's
 top-8 at its moment. The room's `Autopick` toggle was **ON** (verified in the
 live DOM: `.autoPick-container input.form__control--toggle`, `checked: true`).
-Corollary also witnessed: with an **empty/thin queue, expiry falls back to
-ESPN best-available** (pick 13: ESPN's #1, engine's desired[4] — round 2,
-before the queue had built), the benign degradation §2's failure table
-assumed. Whether expiry-from-queue survives the toggle being OFF is
+Per the operator's debrief, **all 16 picks were queue-fed: the queue was
+sometimes empty when his turn STARTED but always refilled within seconds and
+was never empty at expiry.** Two consequences: (1) the **empty-queue fallback
+(ESPN best-available) remains ASSUMED, never observed** — pick 13 (ESPN's #1
+but the engine's desired[4]) was initially misread as that fallback and was
+actually a **stale queue head** drafted from the queue, i.e. head-staleness
+under a fast room is a real, measured fidelity drag, not explainable noise;
+(2) whether expiry-from-queue survives the toggle being OFF is also
 unmeasured — the writer treats an `off` reading as an alarm (badge warning).
 
 ---
@@ -362,9 +366,12 @@ Also watch the badge's `autopick ON/OFF` readout — that observation is P2.
 
 ### 6c. First live test — 2026-08-16, full 160-pick mock (writer v1.2)
 
-The mock ran END TO END unattended-style: 36 status reports, sync bound and
-conflict-free, correct inert shutdown after the operator's last pick, a legal
-16-round roster. P2 confirmed (§4). Three defects found, fixed in v1.3:
+The mock ran END TO END fully hands-off (operator confirmed: no interaction
+at all): 36 status reports, sync bound and conflict-free, correct inert
+shutdown after the operator's last pick, a legal 16-round roster, and **every
+one of the 16 picks committed from the queue at expiry** — the queue was
+sometimes empty at a turn's start but never at its end. P2 confirmed (§4).
+Three defects found, fixed in v1.3:
 
 1. **DST adds failed all game** (`not_in_pool`): ESPN's player search returns
    nothing for the full display text ("Chargers D/ST"), so the engine's
@@ -382,30 +389,36 @@ conflict-free, correct inert shutdown after the operator's last pick, a legal
    keeps a bounded report history at `GET /api/queue/reports`, so post-run
    analysis never depends on the browser again.
 
-**Open observation, not yet a defect:** expiry picks tracked desired[1]–[3]
-more often than desired[0] mid-draft. Confounded three ways: the DST hole
-(desired[0] literally unaddable for six turns), mock CPU pace (~2–4 s/pick vs
-~2 s per add — the real draft's 90 s human pace is far kinder), and possible
-transient add failures demoting the head for a cycle. Re-measure on the next
-mock with the report history; §8.5's five-pick fidelity test is the gate.
+**Open observation, not yet a defect — and sharpened by the debrief:** expiry
+picks tracked desired[1]–[3] more often than desired[0] mid-draft, and pick
+13 shows the mechanism at its worst: the queue head was the engine's
+desired[4] (a stale head — built from a lagged desired list and/or after
+transient add failures spliced past the top entries), and that stale head IS
+what got drafted. Confounders: the DST hole (desired[0] literally unaddable
+for six turns), mock CPU pace (~2–4 s/pick vs ~2 s per add — the real
+draft's 90 s human pace is far kinder), and sync lag feeding the writer a
+desired list a pick or two behind the room. Re-measure on the next mock with
+the report history; §8.5's five-pick fidelity test is the gate.
 
-**Operator debrief (2026-08-16) + the v1.4 changes it forced:** the run was
-FULLY hands-off — no manual queue/draft/interaction at all — making it a
-§8.2-shaped complete draft at the mock's 30 s clock (draft night is 90 s; the
-mock is the harsher timing environment). The operator watched the queue
-**drain to completely empty at some of his own turns**, refilling only after
-"a few seconds" — the worst state available (expiry falls back to ESPN's
-board), and one v1.3 policy made it unfixable: head-fix-only refused ALL adds
-on-turn, on the probe's belief that `Button--queue` exists only off-turn —
-a belief the refill-during-my-turn observation now disputes. v1.4 therefore
-runs the SAME loop on-turn (attempting adds is structurally safe: worst case
-is an `on_clock` refusal that finally measures the question), polls the
-search wait instead of sleeping a fixed 1.4 s, and trims settles — roughly
-halving refill latency. Also confirmed by the operator: **ESPN auto-removes
-a queued player the moment any team drafts him** (previously assumed).
-Team codes in queue rows remain UNCONFIRMED (low-confidence "not seen" —
-next run's pairing log settles it; absence degrades namesakes to protected
-rows, safe but noisy).
+**Operator debrief (2026-08-16, clarified) + the v1.4 changes it forced:**
+the run was FULLY hands-off — no manual queue/draft/interaction at all —
+making it a §8.2-shaped complete draft at the mock's 30 s clock (draft night
+is 90 s; the mock is the harsher timing environment). The queue was
+**sometimes empty when the operator's turn STARTED, refilled within a few
+seconds, and was never empty at expiry** — every pick was queue-fed. Two
+readings: the refills almost certainly ran while sync lag still had the
+cockpit believing it was off-turn, which means `Button--queue` was PRESENT
+during the operator's actual turn — disputing the probe's "off-turn only"
+finding — and v1.3's head-fix-only policy (which refused all on-turn adds)
+was both built on a doubtful premise and unable to fix the worst reachable
+state. v1.4 therefore runs the SAME loop on-turn (attempting adds is
+structurally safe: worst case is an `on_clock` refusal that finally measures
+the question), polls the search wait instead of sleeping a fixed 1.4 s, and
+trims settles — roughly halving refill latency. Also confirmed by the
+operator: **ESPN auto-removes a queued player the moment any team drafts
+him** (previously assumed). Team codes in queue rows remain UNCONFIRMED
+(low-confidence "not seen" — next run's pairing log settles it; absence
+degrades namesakes to protected rows, safe but noisy).
 
 ---
 
