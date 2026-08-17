@@ -459,6 +459,13 @@ Also settled by this run:
   demonstrably was); watch for recurrence.
 - The hover-gated Remove flaked once ("T. Henderson" → refused) and
   recovered on the next cycle — the retry design absorbing §4a hazard 2.
+- **Run 2 was also fully hands-off — and the operator never visited the Pick
+  History tab.** Sync still harvested all 160 picks and the writer's §5c
+  tripwire stayed armed (no "tripwire blind" notes in any report):
+  `.pick-history` is readable regardless of the active tab, resolving the
+  in-repo contradiction the audit flagged. **No tab discipline is needed on
+  draft night**, and the sync badge's "open the Pick History tab" guidance is
+  stale for this room shape.
 
 ## 7. Refusal + push contract
 
