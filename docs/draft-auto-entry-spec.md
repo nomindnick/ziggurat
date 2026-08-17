@@ -509,6 +509,30 @@ name; "Goldstein" stays safe). v1.6 also retries not_in_pool once under
 All Pos. — ESPN files Kyle Juszczyk under FB, invisible under the RB filter
 the house position implies.
 
+### 6f. Fourth live test — 2026-08-16, v1.6 — THE GRADUATION RUN
+
+Fully hands-off, ~2.2 s/pick again. **desired[0]: 11/16; top-2: 12/16** — at
+40x draft-night pace. The v1.6 DST fix held (no oscillation), and the
+system's thesis executed end-to-end for the first time:
+
+- **The operator's seat drafted HOU D/ST at overall 88 (ESPN-available #82)**
+  — the engine's R9 divergence play — while every other seat took its DST at
+  overalls 141–152: the edge the room can't see, captured 53 picks early,
+  committed by ESPN's own autopilot from the writer-maintained queue.
+- **Cameron Dicker (K) at 108 (#75 available), desired[0] exact** — the
+  kicker half of the same play.
+
+The five misses are stale-head artifacts of the CPU-speed room (desired[3]–
+[5], all engine-approved players); the residual `not_in_pool` names are
+deep-tail players ESPN's mock grid does not carry (harmless — §7 skips take
+the next rec).
+
+**Acceptance status (§8):** 8.1 ✓ (P0). **8.2 ✓** (four full hands-off
+drafts, legal sane rosters). **8.5 ✓** (11/16 committed = desired[0], far
+past the five-pick bar, at 40x pace). 8.6 ✓ (suite green). **Remaining: 8.3
+(mid-draft cockpit kill) and 8.4 (injected resolution failure + exactly one
+push) — 8.4 needs step 4, the last build item.**
+
 ## 7. Refusal + push contract
 
 **Refuse rather than guess** — never queue a player we are not confident maps
