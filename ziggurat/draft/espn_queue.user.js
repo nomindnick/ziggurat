@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.3
+// @version      1.4
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -19,15 +19,22 @@
 // detection); a HALTED writer went silent exactly when step 4 most needs the
 // failure streak (halted writers keep reporting); the head-changed rebuild
 // emptied the queue for the whole add phase (iterative fix loop, add-before-
-// remove when the needed player is absent); on the operator's own turn adds
-// are impossible so removals are now head-fix-only; and the Autopick toggle —
-// the P2 load-bearing unknown — is now observed and reported every cycle.
+// remove when the needed player is absent); and the Autopick toggle — the P2
+// load-bearing unknown, CONFIRMED 2026-08-16 — is observed and reported
+// every cycle.
+//
+// v1.4 — after the first live mock (spec §6c). The operator's turn now runs
+// the SAME reconcile loop as off-turn: v1.3's head-fix-only policy left the
+// observed empty-queue-at-expiry state unfixable, and attempting adds is
+// structurally safe (Button--queue or nothing; on_clock refusals break the
+// loop before any removal could strip an unfillable queue). DST searches use
+// the nickname alone; the add wait polls instead of sleeping fixed.
 
 (() => {
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.3";
+  const VERSION = "1.4";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -457,14 +464,21 @@
       searchBox = searchInputs()[0] || null;
       if (searchBox) {
         setNativeValue(searchBox, searchText);
-        await sleep(1400);
-        row = findPlayerRow(displayName);
+        // Poll instead of a fixed 1.4 s wait (v1.4): at the mock's 30 s pick
+        // pace the fill rate was losing to the drain rate and the queue was
+        // observed EMPTY at the operator's turn. The row usually renders well
+        // before the old fixed wait elapsed.
+        const deadline = Date.now() + 1600;
+        while (Date.now() < deadline && !row) {
+          await sleep(150);
+          row = findPlayerRow(displayName);
+        }
       }
     }
     const clearSearch = async () => {
       if (!searchBox) return;
       setNativeValue(searchBox, "");
-      await sleep(400);
+      await sleep(250);
     };
     if (!row) {
       await clearSearch();
@@ -687,13 +701,16 @@
       problems.push("(note: pick-history unreadable — removal tripwire blind)");
     }
 
-    // ON THE OPERATOR'S TURN adds are structurally impossible (Button--queue
-    // is off-turn only), so a rebuild could only STRIP the queue while the
-    // clock runs (audit). Head-fix-only policy: make row 0 the desired head
-    // if he is already queued below; otherwise touch nothing.
-    if (payload.is_operator_turn) {
-      return await reconcileOnTurn(desiredAll, problems);
-    }
+    // v1.4: the operator's turn runs the SAME loop as off-turn. v1.3's
+    // head-fix-only policy assumed adds are impossible on-turn (probe:
+    // Button--queue "present only off-turn") — but the first live mock was
+    // observed refilling DURING the operator's turn, and the empty-queue-at-
+    // expiry state it guarded against is the worst outcome available (ESPN's
+    // pick, not the engine's). Attempting adds is structurally safe: addOne
+    // clicks Button--queue or nothing, so if ESPN truly offers no Queue
+    // button on-turn every attempt returns on_clock (uncharged, logged —
+    // turning the open question into data) and the loop breaks BEFORE any
+    // removal can strip a queue it cannot refill (add-before-remove order).
 
     // The working list: desired minus players skipped after repeated
     // per-player failures — but a skipped player ALREADY QUEUED stays (the
@@ -790,43 +807,6 @@
     if (skipped) reason = (reason ? reason + "; " : "") + `${skipped} desired player(s) skipped/failed this cycle`;
     if (!okNow && !reason) reason = `queue is [${achieved.join(", ")}], wanted ${working.length} row(s)`;
     return { ok: okNow, reason: reason, achieved: achieved };
-  }
-
-  // On-turn: fix the HEAD only. desired[0] already queued below the top →
-  // remove the rows above him. Not queued at all → do nothing (removals
-  // could only thin a queue we cannot refill until the turn passes).
-  async function reconcileOnTurn(desiredAll, problems) {
-    const head = desiredAll[0];
-    let guard = 0;
-    while (guard++ < 10 && mode === "LIVE") {
-      const q = queueEntries();
-      if (q.mode === "NO_PANEL") { problems.push("queue panel not found"); break; }
-      const pairing = pairRows(desiredAll, q.rows);
-      if (!q.rows.length) { problems.push("on the clock with an empty queue and adds impossible"); break; }
-      if (pairing.rowPair[0] === 0) break; // desired head is on top
-      if (!pairing.usedDesired.has(0)) {
-        problems.push(`on the clock and "${espnKey(head)}" is not in the queue (adds impossible on-turn)`);
-        break;
-      }
-      if (pairing.rowPair[0] === "protected") {
-        problems.push(`ambiguous row "${pairing.names[0]}" above the desired head — refusing`);
-        break;
-      }
-      const r = await removeQueueEntryByName(pairing.names[0]);
-      qlog(`on-turn head fix: remove "${pairing.names[0]}" -> ${r}`);
-      if (mode === "HALTED") { problems.push(haltReason); break; }
-      if (r !== "gone") { problems.push(`could not clear "${pairing.names[0]}" above the head`); break; }
-    }
-    const achieved = queueNames();
-    const q = queueEntries();
-    const pairing = pairRows(desiredAll, q.rows);
-    const okNow = q.rows.length > 0 && pairing.rowPair[0] === 0 &&
-      problems.filter((p) => !p.startsWith("(note:")).length === 0;
-    return {
-      ok: okNow,
-      reason: problems.join("; ") || (okNow ? "on the clock; desired head on top" : ""),
-      achieved: achieved,
-    };
   }
 
   // ---- the outer loop ---------------------------------------------------

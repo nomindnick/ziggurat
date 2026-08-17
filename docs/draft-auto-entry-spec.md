@@ -389,6 +389,24 @@ more often than desired[0] mid-draft. Confounded three ways: the DST hole
 transient add failures demoting the head for a cycle. Re-measure on the next
 mock with the report history; §8.5's five-pick fidelity test is the gate.
 
+**Operator debrief (2026-08-16) + the v1.4 changes it forced:** the run was
+FULLY hands-off — no manual queue/draft/interaction at all — making it a
+§8.2-shaped complete draft at the mock's 30 s clock (draft night is 90 s; the
+mock is the harsher timing environment). The operator watched the queue
+**drain to completely empty at some of his own turns**, refilling only after
+"a few seconds" — the worst state available (expiry falls back to ESPN's
+board), and one v1.3 policy made it unfixable: head-fix-only refused ALL adds
+on-turn, on the probe's belief that `Button--queue` exists only off-turn —
+a belief the refill-during-my-turn observation now disputes. v1.4 therefore
+runs the SAME loop on-turn (attempting adds is structurally safe: worst case
+is an `on_clock` refusal that finally measures the question), polls the
+search wait instead of sleeping a fixed 1.4 s, and trims settles — roughly
+halving refill latency. Also confirmed by the operator: **ESPN auto-removes
+a queued player the moment any team drafts him** (previously assumed).
+Team codes in queue rows remain UNCONFIRMED (low-confidence "not seen" —
+next run's pairing log settles it; absence degrades namesakes to protected
+rows, safe but noisy).
+
 ---
 
 ## 7. Refusal + push contract
