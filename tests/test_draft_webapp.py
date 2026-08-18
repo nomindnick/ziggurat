@@ -855,3 +855,165 @@ def test_queue_reports_history_is_kept_and_bounded(cockpit):
     assert [r["achieved"] for r in hist["reports"]] == [[f"P{i}"] for i in range(5)]
     assert [r["ok"] for r in hist["reports"]] == [True, False, True, False, True]
     assert [r["n"] for r in hist["reports"]] == [1, 2, 3, 4, 5]  # receipt order kept
+
+
+# ---------------------------------- push escalation (spec §7 / step 4)
+
+
+class _FakePush:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
+
+    def __call__(self, title, body):
+        self.calls.append((title, body))
+        class R:  # duck-typed DraftPushResult
+            pass
+        r = R()
+        r.ok = self.ok
+        r.status = "200" if self.ok else "error: down"
+        return r
+
+
+def _push_cockpit(tmp_path, make_draft_board, pusher):
+    from ziggurat.draft.webapp import WebCockpit
+
+    board = make_draft_board()
+    session = DraftSession.start(
+        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "push.jsonl", rollouts=8,
+    )
+    cockpit = WebCockpit(session=session, pusher=pusher)
+    t = [1000.0]
+    cockpit._clock = lambda: t[0]
+    cockpit._last_head_change_at = t[0]
+    return cockpit, session, t
+
+
+def _thin(cockpit, **over):
+    body = {"league": "", "overall": 1, "achieved": [], "ok": False, "reason": "thin"}
+    body.update(over)
+    return cockpit.queue_status(body)
+
+
+def test_push_deficit_fires_exactly_once(tmp_path, make_draft_board):
+    # The §8.4-shaped assertion: a sustained thin queue near the operator's
+    # pick produces EXACTLY ONE push, not one per report.
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(2):
+        _thin(cockpit)
+    assert pusher.calls == []          # two thin reports: not yet (blips heal)
+    _thin(cockpit)
+    assert len(pusher.calls) == 1      # third consecutive: escalate
+    title, body = pusher.calls[0]
+    assert "queue" in body.lower() and "pick" in body.lower()  # action + deadline
+    for _ in range(5):
+        _thin(cockpit)
+    assert len(pusher.calls) == 1      # spacing + re-arm keep the phone quiet
+    q = cockpit.state_json()["queue"]["pushes"]
+    assert q["sent"] == 1 and q["log"][-1]["ok"] is True
+
+
+def test_push_rate_limit_and_per_run_budget(tmp_path, make_draft_board):
+    pusher = _FakePush()
+    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(3):
+        _thin(cockpit)
+    assert len(pusher.calls) == 1
+    t[0] += 301                        # past the spacing window
+    for _ in range(3):
+        _thin(cockpit)
+    assert len(pusher.calls) == 2
+    t[0] += 301
+    for _ in range(3):
+        _thin(cockpit)
+    assert len(pusher.calls) == 3
+    t[0] += 301
+    for _ in range(6):
+        _thin(cockpit)
+    assert len(pusher.calls) == 3      # per-run budget: after 3, silence
+
+
+def test_push_failed_send_consumes_nothing_but_backs_off(tmp_path, make_draft_board):
+    # Publish-then-record (the 3.6 standing lesson): a failed send must not
+    # consume the budget or the spacing — but must not hammer per-report.
+    pusher = _FakePush(ok=False)
+    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(3):
+        _thin(cockpit)
+    assert len(pusher.calls) == 1
+    q = cockpit.state_json()["queue"]["pushes"]
+    assert q["sent"] == 0 and q["log"][-1]["ok"] is False
+    _thin(cockpit)
+    assert len(pusher.calls) == 1      # inside the failure backoff: no retry
+    t[0] += 61
+    pusher.ok = True
+    _thin(cockpit)
+    assert len(pusher.calls) == 2      # retried after backoff...
+    assert cockpit.state_json()["queue"]["pushes"]["sent"] == 1  # ...and landed
+
+
+def test_push_halt_fires_immediately_and_once_per_episode(tmp_path, make_draft_board):
+    pusher = _FakePush()
+    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    _thin(cockpit, reason="writer HALTED: possible mis-click", achieved=["A", "B", "C"])
+    assert len(pusher.calls) == 1      # no streak needed — a halt never self-heals
+    assert "halted" in pusher.calls[0][1].lower()
+    _thin(cockpit, reason="writer HALTED: possible mis-click", achieved=["A", "B", "C"])
+    assert len(pusher.calls) == 1      # once per episode
+    _thin(cockpit, ok=True, reason="", achieved=["A", "B", "C"])  # episode ends
+    t[0] += 301
+    _thin(cockpit, reason="writer HALTED: again", achieved=["A", "B", "C"])
+    assert len(pusher.calls) == 2
+
+
+def test_push_stall_detects_a_frozen_head_mid_draft(tmp_path, make_draft_board):
+    pusher = _FakePush()
+    cockpit, session, t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    # pre-draft lobby (no picks): a frozen head is NOT a stall
+    t[0] += 400
+    _thin(cockpit, ok=True, achieved=["A", "B", "C"])
+    assert pusher.calls == []
+    session.append_pick("RB-0")        # the draft is underway
+    _thin(cockpit, ok=True, achieved=["A", "B", "C"], overall=2)  # head change noted
+    t[0] += 301
+    _thin(cockpit, ok=True, achieved=["A", "B", "C"], overall=2)
+    assert len(pusher.calls) == 1
+    assert "sync" in pusher.calls[0][1].lower()
+    _thin(cockpit, ok=True, achieved=["A", "B", "C"], overall=2)
+    assert len(pusher.calls) == 1      # once per stall episode
+
+
+def test_push_absent_channel_records_the_decision(tmp_path, make_draft_board):
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, None)
+    for _ in range(3):
+        _thin(cockpit)
+    q = cockpit.state_json()["queue"]["pushes"]
+    assert q["channel"] == "absent" and q["sent"] == 0
+    assert q["log"] and q["log"][-1]["status"] == "no_pusher"
+
+
+def test_push_fires_through_the_http_surface(tmp_path, make_draft_board):
+    # End-to-end: the handler path decides under the lock, publishes outside it.
+    pusher = _FakePush()
+    board = make_draft_board()
+    session = DraftSession.start(
+        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "hp.jsonl", rollouts=8,
+    )
+    server = serve(session, port=0, pusher=pusher)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    try:
+        for _ in range(3):
+            _queue_status_post(base, session, {"achieved": [], "ok": False,
+                                               "reason": "thin", "overall": 1})
+        assert len(pusher.calls) == 1
+        st = _get(base, "/api/state")["queue"]["pushes"]
+        assert st["channel"] == "wired" and st["sent"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

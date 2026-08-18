@@ -722,6 +722,9 @@ def draft_web(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
     source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
     weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+    no_push: Annotated[bool, typer.Option(
+        "--no-push", help="Disable the §7 phone escalation (queue thin / writer "
+        "halted / sync stalled). Decisions are still recorded in /api/state.")] = False,
 ) -> None:
     """Launch the live-search web draft cockpit (Checkpoint 2).
 
@@ -756,6 +759,8 @@ def draft_web(
         roster=DEFAULT_ROSTER,
         port=port,
         espn_names=espn_names,
+        db_path=path,
+        push=not no_push,
     )
 
 

@@ -533,7 +533,7 @@ past the five-pick bar, at 40x pace). 8.6 ✓ (suite green). **Remaining: 8.3
 (mid-draft cockpit kill) and 8.4 (injected resolution failure + exactly one
 push) — 8.4 needs step 4, the last build item.**
 
-## 7. Refusal + push contract
+## 7. Refusal + push contract — BUILT 2026-08-17 (step 4)
 
 **Refuse rather than guess** — never queue a player we are not confident maps
 to the right ESPN row. Refusal is per-player: skip and take the next
@@ -554,6 +554,23 @@ below that is the escalation trigger, not a single failed resolution.
   before the side effect means a preview silently consumes the event).
 
 ---
+
+**As built:** the decision lives in the cockpit (`webapp.py`), evaluated at
+report receipt; the channel is `draft/push_bridge.py` → `push.outbound.publish`
+(the Rule-5 choke point; `draft/` → `push/` is the legal direction), with
+`own_team_id` resolved loudly at launch. Triggers: **deficit** (achieved <
+min(3, |desired|) for 3 consecutive reports while the operator's pick is ≤ 10
+away — sized so the observed benign fill blips of runs 1–4 never fire),
+**halt** (immediate, once per episode — that state never self-heals), and
+**stall** (no pick reaching the cockpit for 5 min mid-draft). Rails: 5-min
+spacing, max 3 pushes per run, publish-then-record (a failed send consumes
+neither budget nor spacing, with a 60 s backoff — the 3.6 standing lesson),
+network I/O outside the cockpit lock. Messages are action-only and name-free
+by construction; the scrub is belt and braces. `--no-push` disables the
+channel; decisions are still evaluated and recorded in `/api/state` under
+`queue.pushes`. If BOTH userscripts die nothing fires — deliberate: that
+failure degrades benignly (§2) and a second liveness mechanism is a second
+thing to get wrong.
 
 ## 8. Acceptance tests
 
@@ -584,7 +601,9 @@ Nothing ships without these, on **live practice drafts**:
    repros; suite 1458). **Unrehearsed against live ESPN** — steps 5's
    rehearsals are the acceptance gate, and §6b names the two DOM assumptions
    they must verify first.
-4. Refusal + push path.
+4. ~~Refusal + push path~~ — **BUILT 2026-08-17** (§7 as-built; unit tests
+   cover §8.4's exactly-one-push, rate rails, publish-then-record; the live
+   half of §8.4 rides the final mock).
 5. Rehearsals (§8.2, §8.3).
 6. *Stretch, only if 1–5 are clean well before 08-31:* active card-path
    commit, replacing expiry with a deliberate click.

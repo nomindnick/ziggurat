@@ -40,6 +40,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -75,6 +76,18 @@ _QUEUE_K_MAX = 10
 # Writer status reports kept for post-run analysis (~16 rounds of a fast mock
 # produced 36 reports; 200 covers a slow human draft with margin, bounded RAM).
 _QUEUE_REPORT_HISTORY = 200
+
+# Push escalation policy (auto-entry spec §7; step 4). A push is best-effort
+# and NEVER load-bearing (§1) — the rails here exist to keep the phone quiet:
+# the operator has said they will ignore pushes once unavailable, and a noisy
+# channel trains them to ignore it while they are still present.
+_PUSH_DEFICIT_REPORTS = 3     # consecutive thin reports before escalating
+_PUSH_NEAR_PICKS = 10         # only escalate depth when the pick is this close
+_PUSH_MIN_INTERVAL_S = 300.0  # hard spacing between successful pushes
+_PUSH_MAX_PER_RUN = 3         # per cockpit run — after that, silence
+_PUSH_FAIL_BACKOFF_S = 60.0   # a failed send retries, but not per-report
+_PUSH_STALL_S = 300.0         # mid-draft with no pick reaching the cockpit
+_PUSH_LOG_KEPT = 10
 
 
 class CockpitError(ValueError):
@@ -193,11 +206,29 @@ class WebCockpit:
     # survived server-side. GET /api/queue/reports serves this so a post-run
     # analysis never depends on the browser again.
     _queue_reports: list[dict[str, Any]] = field(default_factory=list, init=False)
+    # Push escalation (spec §7 / step 4). `pusher(title, body)` is injected —
+    # push_bridge.make_draft_pusher in production, a fake in tests, None when
+    # the operator ran --no-push or the channel failed to build (the cockpit
+    # still evaluates and RECORDS decisions, so 'would have pushed' is visible).
+    pusher: Any = None
+    _clock: Any = field(default=time.monotonic, init=False)
+    _push_log: list[dict[str, Any]] = field(default_factory=list, init=False)
+    _pushes_sent: int = field(default=0, init=False)
+    _push_last_at: float | None = field(default=None, init=False)
+    _push_fail_until: float | None = field(default=None, init=False)
+    _push_inflight: bool = field(default=False, init=False)
+    _deficit_streak: int = field(default=0, init=False)
+    _halt_pushed: bool = field(default=False, init=False)
+    _stall_pushed: bool = field(default=False, init=False)
+    _last_head_seen: int = field(default=0, init=False)
+    _last_head_change_at: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
         self.resolver = NameResolver(self.session.board)
         self.sync_token = _load_or_create_sync_token(self.session.journal_path.parent)
         self.sync_epoch = secrets.token_hex(8)
+        self._last_head_seen = self.session.overall_pick
+        self._last_head_change_at = self._clock()
         with self._lock:
             self._recompute()
 
@@ -271,6 +302,11 @@ class WebCockpit:
                     "last_report": self._queue_last_report,
                     "bad_streak": self._queue_bad_streak,
                     "received": self._queue_reports_received,
+                    "pushes": {
+                        "channel": "wired" if self.pusher is not None else "absent",
+                        "sent": self._pushes_sent,
+                        "log": list(self._push_log),
+                    },
                 },
             }
 
@@ -400,12 +436,135 @@ class WebCockpit:
             self._queue_reports.append(dict(self._queue_last_report,
                                             n=self._queue_reports_received))
             del self._queue_reports[:-_QUEUE_REPORT_HISTORY]
-            return {
+            decision = self._push_decision(achieved=achieved, reason=reason)
+            resp = {
                 "ok": True,
                 "epoch": self.sync_epoch,
                 "session_overall": self.session.overall_pick,
                 "bad_streak": self._queue_bad_streak,
             }
+        # Publish OUTSIDE the lock (network I/O must not stall the cockpit),
+        # then record under it — publish-then-record, the 3.6 standing lesson:
+        # reserving before the side effect lets a failed send consume the event.
+        if decision is not None:
+            result = self._send_push(decision)
+            with self._lock:
+                self._record_push(decision, result)
+        return resp
+
+    # -- push escalation (spec §7 / step 4) ---------------------------------
+    #
+    # Evaluated at report receipt only: if BOTH userscripts die, nothing here
+    # fires — deliberately. That whole-browser failure degrades benignly (§2:
+    # the last good queue stands and ESPN autopilot keeps drafting from it),
+    # and a cockpit-side timer thread would buy that non-emergency at the cost
+    # of a second liveness mechanism to get wrong.
+
+    def _push_decision(self, *, achieved: list[str], reason: str) -> dict[str, Any] | None:
+        """Decide, under the cockpit lock, whether this report escalates.
+        Returns the composed push (kind/title/body) or None. Messages are
+        ACTION-ONLY and name-free (operator attention contract; the Rule-5
+        scrub in the bridge is belt and braces, not the guarantee)."""
+        now = self._clock()
+        head = self.session.overall_pick
+        if head != self._last_head_seen:
+            self._last_head_seen = head
+            self._last_head_change_at = now
+            self._stall_pushed = False
+
+        halted = reason.startswith("writer HALTED")
+        if not halted:
+            self._halt_pushed = False
+
+        # Depth deficit (§7 K_min): thin queue while the operator's pick nears.
+        target = None if self.session.complete else self.session.next_operator_overall()
+        want = _QUEUE_K_MIN
+        if self._queue_cache is not None:
+            want = min(_QUEUE_K_MIN, max(1, len(self._queue_cache[1])))
+        deficit = (
+            target is not None
+            and len(achieved) < want
+            and (target - head) <= _PUSH_NEAR_PICKS
+        )
+        self._deficit_streak = self._deficit_streak + 1 if deficit else 0
+
+        kind = None
+        if halted and not self._halt_pushed:
+            kind = "halt"
+        elif self._stall_should_fire(now):
+            kind = "stall"
+        elif self._deficit_streak >= _PUSH_DEFICIT_REPORTS:
+            kind = "deficit"
+        if kind is None:
+            return None
+
+        # Rails: in-flight, per-run cap, spacing, failure backoff.
+        if self._push_inflight or self._pushes_sent >= _PUSH_MAX_PER_RUN:
+            return None
+        if self._push_last_at is not None and now - self._push_last_at < _PUSH_MIN_INTERVAL_S:
+            return None
+        if self._push_fail_until is not None and now < self._push_fail_until:
+            return None
+
+        if kind == "halt":
+            body = ("The draft queue writer HALTED after a suspicious click. The "
+                    "queue is frozen but standing. Open the ESPN draft room, check "
+                    "the last pick, and manage the queue manually. Reloading the "
+                    "draft tab restarts the writer.")
+        elif kind == "stall":
+            body = ("No pick has reached the cockpit for 5+ minutes mid-draft — "
+                    "the sync feed may be dead. Open the ESPN draft tab and check "
+                    "both badges.")
+        else:
+            away = (target - head) if target is not None else 0
+            body = (f"Draft queue is thin: {len(achieved)} queued, want {want}. "
+                    f"Your pick is {away} pick(s) away. Open the ESPN draft room "
+                    "and queue players manually.")
+        self._push_inflight = True
+        return {"kind": kind, "title": "Ziggurat draft", "body": body}
+
+    def _stall_should_fire(self, now: float) -> bool:
+        if self._stall_pushed or self.session.complete:
+            return False
+        if not self.session.picks:  # pre-draft lobby is not a stall
+            return False
+        return now - self._last_head_change_at >= _PUSH_STALL_S
+
+    def _send_push(self, decision: dict[str, Any]) -> dict[str, Any]:
+        if self.pusher is None:
+            return {"ok": False, "status": "no_pusher"}
+        try:
+            res = self.pusher(decision["title"], decision["body"])
+            return {"ok": bool(getattr(res, "ok", False)),
+                    "status": str(getattr(res, "status", "?"))}
+        except Exception as exc:  # a push must never take the cockpit down
+            return {"ok": False, "status": f"error: {type(exc).__name__}"}
+
+    def _record_push(self, decision: dict[str, Any], result: dict[str, Any]) -> None:
+        self._push_inflight = False
+        now = self._clock()
+        self._push_log.append({
+            "kind": decision["kind"],
+            "body": decision["body"],
+            "ok": result["ok"],
+            "status": result["status"],
+        })
+        del self._push_log[:-_PUSH_LOG_KEPT]
+        if result["ok"]:
+            self._pushes_sent += 1
+            self._push_last_at = now
+            self._push_fail_until = None
+            if decision["kind"] == "halt":
+                self._halt_pushed = True
+            elif decision["kind"] == "stall":
+                self._stall_pushed = True
+            else:
+                self._deficit_streak = 0  # re-arm only after a fresh run of deficits
+        else:
+            # Publish-then-record: a failed (or absent) send consumes NOTHING —
+            # not the per-run budget, not the spacing — but backs off so a dead
+            # channel is not hammered once per report.
+            self._push_fail_until = now + _PUSH_FAIL_BACKOFF_S
 
     def queue_reports_json(self) -> dict[str, Any]:
         """The bounded writer-report history (GET /api/queue/reports)."""
@@ -893,6 +1052,7 @@ def serve(
     *,
     port: int = 8811,
     espn_names: dict[str, str] | None = None,
+    pusher: Any = None,
 ) -> ThreadingHTTPServer:
     """Build the cockpit server on 127.0.0.1:``port`` (not started).
 
@@ -900,8 +1060,11 @@ def serve(
     thread and shut it down. Loopback-only by construction (league-private data
     never listens on an external interface — Rule 5). ``espn_names`` is the
     ``simulator.espn_display_names`` mapping for the queue writer; None (tests,
-    no DB) serves null per row."""
-    cockpit = WebCockpit(session=session, espn_names=dict(espn_names or {}))
+    no DB) serves null per row. ``pusher`` is the §7 escalation channel
+    (``push_bridge.make_draft_pusher``); None disables sends but decisions are
+    still evaluated and recorded."""
+    cockpit = WebCockpit(session=session, espn_names=dict(espn_names or {}),
+                         pusher=pusher)
     return ThreadingHTTPServer(("127.0.0.1", port), _make_handler(cockpit))
 
 
@@ -919,6 +1082,8 @@ def launch(
     roster: Any = None,
     port: int = 8811,
     espn_names: dict[str, str] | None = None,
+    db_path: Path | None = None,
+    push: bool = True,
 ) -> None:
     """Build the session (start or resume — the exact ``app.launch`` semantics,
     including the O_EXCL no-clobber guard) and serve until Ctrl-C. The thin
@@ -954,7 +1119,26 @@ def launch(
     for line in getattr(session, "resume_warnings", ()) or ():
         print(line)
 
-    server = serve(session, port=port, espn_names=espn_names)
+    # The §7 push channel: built loudly at launch (a draft-night
+    # misconfiguration must surface at 18:00, not silently at 19:40) but a
+    # failure never blocks the cockpit — pushes are best-effort by design (§1).
+    pusher = None
+    if push and db_path is not None:
+        from ziggurat.draft.push_bridge import make_draft_pusher
+
+        try:
+            pusher = make_draft_pusher(
+                db_path=db_path, season=session.season, as_of=session.as_of
+            )
+            print("Push escalation: wired (ntfy).")
+        except Exception as exc:
+            print(f"Push escalation: DISABLED — {exc}")
+            print("(The cockpit runs fine without it; pushes are best-effort. "
+                  "Fix the ntfy topic in .env / league sync and relaunch to enable.)")
+    elif not push:
+        print("Push escalation: disabled (--no-push).")
+
+    server = serve(session, port=port, espn_names=espn_names, pusher=pusher)
     host, bound_port = server.server_address[:2]
     print(f"Draft cockpit: http://{host}:{bound_port}/  (Ctrl-C to quit; journal: {session.journal_path})")
     print(f"ESPN sync userscript (install once in Tampermonkey): http://{host}:{bound_port}/sync.user.js")
