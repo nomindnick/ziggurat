@@ -77,14 +77,21 @@ _QUEUE_K_MAX = 10
 # produced 36 reports; 200 covers a slow human draft with margin, bounded RAM).
 _QUEUE_REPORT_HISTORY = 200
 
-# Push escalation policy (auto-entry spec §7; step 4). A push is best-effort
-# and NEVER load-bearing (§1) — the rails here exist to keep the phone quiet:
-# the operator has said they will ignore pushes once unavailable, and a noisy
-# channel trains them to ignore it while they are still present.
-_PUSH_DEFICIT_REPORTS = 3     # consecutive thin reports before escalating
+# Push escalation policy (auto-entry spec §7; step 4, re-sized by the step-4
+# audit's replay of runs 1-4). A push is best-effort and NEVER load-bearing
+# (§1) — the rails exist to keep the phone quiet: the operator has said they
+# will ignore pushes once unavailable, and a noisy channel trains them to
+# ignore it while they are still present. Audit-paid shape: per-KIND budgets
+# (the v1 shared budget let benign late-round thinness spend all three pushes
+# and then a genuine writer HALT — the one state that never self-heals — was
+# permanently silent), and the halt lane bypasses the spacing rail entirely.
+_PUSH_DEFICIT_REPORTS = 6     # ~30 s at the writer's ~5 s cadence (was 3 —
+                              # sized at 40x mock pace, it fired on fill blips)
 _PUSH_NEAR_PICKS = 10         # only escalate depth when the pick is this close
-_PUSH_MIN_INTERVAL_S = 300.0  # hard spacing between successful pushes
-_PUSH_MAX_PER_RUN = 3         # per cockpit run — after that, silence
+_PUSH_DEFICIT_MAX = 1         # ONE thin-queue heads-up per draft, ever
+_PUSH_STALL_MAX = 2
+_PUSH_HALT_MAX = 2
+_PUSH_MIN_INTERVAL_S = 300.0  # spacing between deficit/stall pushes
 _PUSH_FAIL_BACKOFF_S = 60.0   # a failed send retries, but not per-report
 _PUSH_STALL_S = 300.0         # mid-draft with no pick reaching the cockpit
 _PUSH_LOG_KEPT = 10
@@ -214,10 +221,12 @@ class WebCockpit:
     _clock: Any = field(default=time.monotonic, init=False)
     _push_log: list[dict[str, Any]] = field(default_factory=list, init=False)
     _pushes_sent: int = field(default=0, init=False)
+    _push_counts: dict[str, int] = field(default_factory=dict, init=False)
     _push_last_at: float | None = field(default=None, init=False)
     _push_fail_until: float | None = field(default=None, init=False)
     _push_inflight: bool = field(default=False, init=False)
     _deficit_streak: int = field(default=0, init=False)
+    _halt_active: bool = field(default=False, init=False)
     _halt_pushed: bool = field(default=False, init=False)
     _stall_pushed: bool = field(default=False, init=False)
     _last_head_seen: int = field(default=0, init=False)
@@ -472,24 +481,31 @@ class WebCockpit:
             self._last_head_change_at = now
             self._stall_pushed = False
 
-        halted = reason.startswith("writer HALTED")
-        if not halted:
+        self._halt_active = reason.startswith("writer HALTED")
+        if not self._halt_active:
             self._halt_pushed = False
 
         # Depth deficit (§7 K_min): thin queue while the operator's pick nears.
+        # Audit-paid gates: OFF-turn only (on-turn the writer structurally
+        # cannot add — spec §6e — and nobody can snipe the queue during the
+        # operator's own clock, so on-turn thinness is both unfixable and
+        # harmless), and only once the draft has STARTED (pre-lobby the
+        # near-pick window is vacuously true for every seat for an hour, and
+        # the operator is at the keyboard then anyway).
         target = None if self.session.complete else self.session.next_operator_overall()
         want = _QUEUE_K_MIN
         if self._queue_cache is not None:
             want = min(_QUEUE_K_MIN, max(1, len(self._queue_cache[1])))
         deficit = (
             target is not None
+            and bool(self.session.picks)
             and len(achieved) < want
-            and (target - head) <= _PUSH_NEAR_PICKS
+            and 1 <= (target - head) <= _PUSH_NEAR_PICKS
         )
         self._deficit_streak = self._deficit_streak + 1 if deficit else 0
 
         kind = None
-        if halted and not self._halt_pushed:
+        if self._halt_active and not self._halt_pushed:
             kind = "halt"
         elif self._stall_should_fire(now):
             kind = "stall"
@@ -498,11 +514,15 @@ class WebCockpit:
         if kind is None:
             return None
 
-        # Rails: in-flight, per-run cap, spacing, failure backoff.
-        if self._push_inflight or self._pushes_sent >= _PUSH_MAX_PER_RUN:
+        # Rails. Per-KIND budgets (audit: a shared budget let benign thinness
+        # spend everything, silencing a later genuine halt), and the halt lane
+        # BYPASSES the spacing rail — a halt must never wait out noise.
+        caps = {"deficit": _PUSH_DEFICIT_MAX, "stall": _PUSH_STALL_MAX, "halt": _PUSH_HALT_MAX}
+        if self._push_inflight or self._push_counts.get(kind, 0) >= caps[kind]:
             return None
-        if self._push_last_at is not None and now - self._push_last_at < _PUSH_MIN_INTERVAL_S:
-            return None
+        if kind != "halt":
+            if self._push_last_at is not None and now - self._push_last_at < _PUSH_MIN_INTERVAL_S:
+                return None
         if self._push_fail_until is not None and now < self._push_fail_until:
             return None
 
@@ -512,16 +532,16 @@ class WebCockpit:
                     "the last pick, and manage the queue manually. Reloading the "
                     "draft tab restarts the writer.")
         elif kind == "stall":
-            body = ("No pick has reached the cockpit for 5+ minutes mid-draft — "
-                    "the sync feed may be dead. Open the ESPN draft tab and check "
-                    "both badges.")
+            body = ("No pick has reached the cockpit for 5+ minutes mid-draft. "
+                    "Either the room is paused or the sync feed is dead — open "
+                    "the ESPN draft tab and check both badges.")
         else:
             away = (target - head) if target is not None else 0
             body = (f"Draft queue is thin: {len(achieved)} queued, want {want}. "
                     f"Your pick is {away} pick(s) away. Open the ESPN draft room "
                     "and queue players manually.")
         self._push_inflight = True
-        return {"kind": kind, "title": "Ziggurat draft", "body": body}
+        return {"kind": kind, "title": "Ziggurat draft", "body": body, "head": head}
 
     def _stall_should_fire(self, now: float) -> bool:
         if self._stall_pushed or self.session.complete:
@@ -552,12 +572,19 @@ class WebCockpit:
         del self._push_log[:-_PUSH_LOG_KEPT]
         if result["ok"]:
             self._pushes_sent += 1
+            self._push_counts[decision["kind"]] = self._push_counts.get(decision["kind"], 0) + 1
             self._push_last_at = now
             self._push_fail_until = None
+            # Episode flags are set only if the episode is STILL the one the
+            # decision saw (audit: a mid-flight head change / halt clearance
+            # already re-armed the episode, and blindly setting the flag here
+            # would disarm the NEXT episode's push).
             if decision["kind"] == "halt":
-                self._halt_pushed = True
+                if self._halt_active:
+                    self._halt_pushed = True
             elif decision["kind"] == "stall":
-                self._stall_pushed = True
+                if self._last_head_seen == decision["head"]:
+                    self._stall_pushed = True
             else:
                 self._deficit_streak = 0  # re-arm only after a fresh run of deficits
         else:

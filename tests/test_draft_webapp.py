@@ -858,6 +858,10 @@ def test_queue_reports_history_is_kept_and_bounded(cockpit):
 
 
 # ---------------------------------- push escalation (spec §7 / step 4)
+# Policy re-sized by the step-4 audit (replayed against runs 1-4): deficit is
+# off-turn + draft-started + 6 consecutive reports + capped at ONE per run;
+# halt bypasses spacing and has its own budget; every rail here was a
+# mutation survivor before these tests existed.
 
 
 class _FakePush:
@@ -875,18 +879,24 @@ class _FakePush:
         return r
 
 
-def _push_cockpit(tmp_path, make_draft_board, pusher):
+def _push_cockpit(tmp_path, make_draft_board, pusher, *, slot=2, prime_picks=1,
+                  name="push"):
+    """Cockpit with a controllable clock. Default: slot 2 with one pick applied
+    — head 2 (seat 1, OFF-turn), operator's pick at 3 (1 away), draft started."""
     from ziggurat.draft.webapp import WebCockpit
 
     board = make_draft_board()
     session = DraftSession.start(
-        board, operator_slot=0, pick_order=list(range(10)), season=2026,
-        as_of="2026-07-24", journal_path=tmp_path / "push.jsonl", rollouts=8,
+        board, operator_slot=slot, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / f"{name}.jsonl", rollouts=8,
     )
+    for i in range(prime_picks):
+        session.append_pick(f"RB-{i}")
     cockpit = WebCockpit(session=session, pusher=pusher)
     t = [1000.0]
     cockpit._clock = lambda: t[0]
     cockpit._last_head_change_at = t[0]
+    cockpit._last_head_seen = session.overall_pick
     return cockpit, session, t
 
 
@@ -896,43 +906,112 @@ def _thin(cockpit, **over):
     return cockpit.queue_status(body)
 
 
-def test_push_deficit_fires_exactly_once(tmp_path, make_draft_board):
-    # The §8.4-shaped assertion: a sustained thin queue near the operator's
-    # pick produces EXACTLY ONE push, not one per report.
+def _healthy(cockpit, **over):
+    return _thin(cockpit, ok=True, reason="", achieved=["A", "B", "C"], **over)
+
+
+def test_push_deficit_fires_once_after_sustained_thinness(tmp_path, make_draft_board):
+    # The §8.4-shaped assertion: sustained off-turn thinness near the pick
+    # produces EXACTLY ONE push — and only one per DRAFT (audit: repeated
+    # thin-queue pushes about a benign tail state are the §1 worst case).
     pusher = _FakePush()
-    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher)
-    for _ in range(2):
-        _thin(cockpit)
-    assert pusher.calls == []          # two thin reports: not yet (blips heal)
-    _thin(cockpit)
-    assert len(pusher.calls) == 1      # third consecutive: escalate
-    title, body = pusher.calls[0]
-    assert "queue" in body.lower() and "pick" in body.lower()  # action + deadline
+    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
     for _ in range(5):
         _thin(cockpit)
-    assert len(pusher.calls) == 1      # spacing + re-arm keep the phone quiet
+    assert pusher.calls == []          # ~25 s of thinness: still healing time
+    _thin(cockpit)
+    assert len(pusher.calls) == 1      # 6th consecutive (~30 s): escalate
+    _title, body = pusher.calls[0]
+    assert "queue" in body.lower() and "pick" in body.lower()  # action + deadline
+    t[0] += 3600
+    cockpit._last_head_change_at = t[0]  # keep the (correct) stall path quiet
+    for _ in range(12):
+        _thin(cockpit)
+    assert len(pusher.calls) == 1      # deficit budget: one per run, ever
     q = cockpit.state_json()["queue"]["pushes"]
     assert q["sent"] == 1 and q["log"][-1]["ok"] is True
 
 
-def test_push_rate_limit_and_per_run_budget(tmp_path, make_draft_board):
+def test_push_deficit_streak_resets_on_a_healthy_report(tmp_path, make_draft_board):
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(5):
+        _thin(cockpit)
+    _healthy(cockpit)                  # one good verify heals the streak
+    for _ in range(5):
+        _thin(cockpit)
+    assert pusher.calls == []          # a never-resetting counter would fire here
+    _thin(cockpit)
+    assert len(pusher.calls) == 1
+
+
+def test_push_deficit_ignores_the_operators_own_turn(tmp_path, make_draft_board):
+    # Audit major (measured on run 4's real history): on-turn the writer
+    # structurally cannot add and nobody can snipe — on-turn thinness is
+    # unfixable AND harmless, so it must never page the operator.
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher,
+                                    slot=2, prime_picks=2)  # head 3 == slot 2's turn
+    for _ in range(8):
+        _thin(cockpit)
+    assert pusher.calls == []
+
+
+def test_push_deficit_ignores_the_lobby_and_far_picks(tmp_path, make_draft_board):
+    # Pre-draft the near-pick window is vacuously true for every seat for the
+    # whole lobby hour (audit) — and a pick 17 away is not an emergency.
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher, prime_picks=0)
+    for _ in range(8):
+        _thin(cockpit)
+    assert pusher.calls == []          # draft not started: never
+
+    pusher2 = _FakePush()
+    cockpit2, _s2, _t2 = _push_cockpit(tmp_path, make_draft_board, pusher2,
+                                       slot=0, prime_picks=2, name="far")  # head 3, target 20
+    for _ in range(8):
+        _thin(cockpit2)
+    assert pusher2.calls == []         # 17 picks away: outside the near gate
+
+
+def test_push_deficit_respects_the_cached_desired_size(tmp_path, make_draft_board):
+    # `want` is min(3, |desired|): a late-draft desired of 2 with both queued
+    # is HEALTHY, not thin (audit: the clamp was untested; so was the `<`
+    # boundary — a full queue must never read as a deficit).
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    cockpit._queue_cache = (("k",), ("rec1", "rec2"))  # |desired| == 2
+    for _ in range(8):
+        _thin(cockpit, achieved=["A", "B"])            # achieved == want == 2
+    assert pusher.calls == []
+    for _ in range(6):
+        _thin(cockpit, achieved=["A"])                 # 1 < want 2: genuine
+    assert len(pusher.calls) == 1
+    assert "want 2" in pusher.calls[0][1]
+
+
+def test_push_halt_bypasses_spacing_and_has_its_own_budget(tmp_path, make_draft_board):
+    # Audit major: with a shared budget + shared spacing, benign noise could
+    # starve the ONE push that matters. A halt never waits and never competes.
     pusher = _FakePush()
     cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
-    for _ in range(3):
-        _thin(cockpit)
-    assert len(pusher.calls) == 1
-    t[0] += 301                        # past the spacing window
-    for _ in range(3):
-        _thin(cockpit)
-    assert len(pusher.calls) == 2
-    t[0] += 301
-    for _ in range(3):
-        _thin(cockpit)
-    assert len(pusher.calls) == 3
-    t[0] += 301
     for _ in range(6):
         _thin(cockpit)
-    assert len(pusher.calls) == 3      # per-run budget: after 3, silence
+    assert len(pusher.calls) == 1      # deficit push just consumed the spacing
+    t[0] += 5                          # five SECONDS later
+    _thin(cockpit, reason="writer HALTED: possible mis-click", achieved=["A"])
+    assert len(pusher.calls) == 2      # halt fires immediately anyway
+    assert "halted" in pusher.calls[1][1].lower()
+    _thin(cockpit, reason="writer HALTED: possible mis-click", achieved=["A"])
+    assert len(pusher.calls) == 2      # once per episode
+    _healthy(cockpit)                  # episode ends
+    t[0] += 5
+    _thin(cockpit, reason="writer HALTED: again", achieved=["A"])
+    assert len(pusher.calls) == 3      # second halt episode: second push
+    _healthy(cockpit)
+    t[0] += 5
+    _thin(cockpit, reason="writer HALTED: third", achieved=["A"])
+    assert len(pusher.calls) == 3      # halt budget (2) exhausted: silence
 
 
 def test_push_failed_send_consumes_nothing_but_backs_off(tmp_path, make_draft_board):
@@ -940,7 +1019,7 @@ def test_push_failed_send_consumes_nothing_but_backs_off(tmp_path, make_draft_bo
     # consume the budget or the spacing — but must not hammer per-report.
     pusher = _FakePush(ok=False)
     cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
-    for _ in range(3):
+    for _ in range(6):
         _thin(cockpit)
     assert len(pusher.calls) == 1
     q = cockpit.state_json()["queue"]["pushes"]
@@ -954,44 +1033,139 @@ def test_push_failed_send_consumes_nothing_but_backs_off(tmp_path, make_draft_bo
     assert cockpit.state_json()["queue"]["pushes"]["sent"] == 1  # ...and landed
 
 
-def test_push_halt_fires_immediately_and_once_per_episode(tmp_path, make_draft_board):
-    pusher = _FakePush()
-    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
-    _thin(cockpit, reason="writer HALTED: possible mis-click", achieved=["A", "B", "C"])
-    assert len(pusher.calls) == 1      # no streak needed — a halt never self-heals
-    assert "halted" in pusher.calls[0][1].lower()
-    _thin(cockpit, reason="writer HALTED: possible mis-click", achieved=["A", "B", "C"])
-    assert len(pusher.calls) == 1      # once per episode
-    _thin(cockpit, ok=True, reason="", achieved=["A", "B", "C"])  # episode ends
-    t[0] += 301
-    _thin(cockpit, reason="writer HALTED: again", achieved=["A", "B", "C"])
-    assert len(pusher.calls) == 2
-
-
-def test_push_stall_detects_a_frozen_head_mid_draft(tmp_path, make_draft_board):
+def test_push_stall_fires_rearms_and_caps(tmp_path, make_draft_board):
     pusher = _FakePush()
     cockpit, session, t = _push_cockpit(tmp_path, make_draft_board, pusher)
-    # pre-draft lobby (no picks): a frozen head is NOT a stall
-    t[0] += 400
-    _thin(cockpit, ok=True, achieved=["A", "B", "C"])
-    assert pusher.calls == []
-    session.append_pick("RB-0")        # the draft is underway
-    _thin(cockpit, ok=True, achieved=["A", "B", "C"], overall=2)  # head change noted
     t[0] += 301
-    _thin(cockpit, ok=True, achieved=["A", "B", "C"], overall=2)
-    assert len(pusher.calls) == 1
-    assert "sync" in pusher.calls[0][1].lower()
-    _thin(cockpit, ok=True, achieved=["A", "B", "C"], overall=2)
-    assert len(pusher.calls) == 1      # once per stall episode
+    _healthy(cockpit, overall=2)
+    assert len(pusher.calls) == 1      # frozen head mid-draft: stall push
+    assert "paused" in pusher.calls[0][1] or "sync" in pusher.calls[0][1]
+    _healthy(cockpit, overall=2)
+    assert len(pusher.calls) == 1      # once per episode
+    session.append_pick("RB-1")        # the feed recovers, head moves
+    _healthy(cockpit, overall=3)       # head change re-arms the episode
+    t[0] += 301
+    _healthy(cockpit, overall=3)
+    assert len(pusher.calls) == 2      # audit: a one-per-run mutant survived
+    session.append_pick("RB-2")
+    _healthy(cockpit, overall=4)
+    t[0] += 301
+    _healthy(cockpit, overall=4)
+    assert len(pusher.calls) == 2      # stall budget (2) exhausted
 
 
 def test_push_absent_channel_records_the_decision(tmp_path, make_draft_board):
     cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, None)
-    for _ in range(3):
+    for _ in range(6):
         _thin(cockpit)
     q = cockpit.state_json()["queue"]["pushes"]
     assert q["channel"] == "absent" and q["sent"] == 0
     assert q["log"] and q["log"][-1]["status"] == "no_pusher"
+
+
+def test_push_publishes_outside_the_cockpit_lock(tmp_path, make_draft_board):
+    # Audit: a claimed, load-bearing property with no test. If the publish ran
+    # under the lock, a slow ntfy POST would freeze /api/state and the pick
+    # feed for its whole duration.
+    import time as _time
+
+    gate = threading.Event()
+    calls = []
+
+    def blocking_pusher(title, body):
+        calls.append(body)
+        assert gate.wait(timeout=10), "test gate never released"
+        class R:
+            ok = True
+            status = "200"
+        return R()
+
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, blocking_pusher)
+    worker = threading.Thread(target=lambda: [_thin(cockpit) for _ in range(6)])
+    worker.start()
+    deadline = _time.monotonic() + 10
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert calls, "push never started"
+    # The publish is now blocked mid-flight. The cockpit must still serve.
+    done = []
+    reader = threading.Thread(target=lambda: done.append(cockpit.state_json()))
+    reader.start()
+    reader.join(timeout=3)
+    held = reader.is_alive()
+    gate.set()
+    worker.join(timeout=10)
+    reader.join(timeout=10)
+    assert not held, "state_json blocked while a publish was in flight (lock held)"
+    assert done and cockpit.state_json()["queue"]["pushes"]["sent"] == 1
+
+
+def test_push_stall_flag_survives_a_mid_flight_head_change(tmp_path, make_draft_board):
+    # Audit (episode-flag race): if the head moves while a stall publish is in
+    # flight, recording the OLD episode's flag must not disarm the NEW one.
+    import time as _time
+
+    gate = threading.Event()
+    calls = []
+
+    def blocking_pusher(title, body):
+        calls.append(body)
+        assert gate.wait(timeout=10), "test gate never released"
+        class R:
+            ok = True
+            status = "200"
+        return R()
+
+    cockpit, session, t = _push_cockpit(tmp_path, make_draft_board, blocking_pusher)
+    t[0] += 301
+    worker = threading.Thread(target=lambda: _healthy(cockpit, overall=2))
+    worker.start()
+    deadline = _time.monotonic() + 10
+    while not calls and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert calls
+    session.append_pick("RB-1")        # head moves while the publish is stuck
+    _healthy(cockpit, overall=3)       # processed under the lock: new episode
+    gate.set()
+    worker.join(timeout=10)
+    assert cockpit._stall_pushed is False   # the stale record did not disarm it
+    t[0] += 301
+    _healthy(cockpit, overall=3)
+    assert len(calls) == 2             # the new episode can still escalate
+
+
+def test_push_bridge_wires_and_sends(tmp_path, monkeypatch):
+    # The step-4 audit's CRITICAL: the bridge imported load_espn_credentials
+    # from a module that does not export it, so the production channel could
+    # NEVER wire — and no test executed the import lines. This one does,
+    # end-to-end through make_draft_pusher with every external seam faked.
+    import ziggurat.data.nfl.espn_source as espn_source
+    import ziggurat.league.state as league_state
+    import ziggurat.push.outbound as outbound
+    from ziggurat.draft.push_bridge import make_draft_pusher
+
+    monkeypatch.setattr(outbound, "load_ntfy_config",
+                        lambda **k: outbound.NtfyConfig(server="https://x", topic="t", token=None))
+    monkeypatch.setattr(espn_source, "load_espn_credentials",
+                        lambda **k: {"swid": "{S}", "espn_s2": "x"})
+    monkeypatch.setattr(league_state, "resolve_own_team",
+                        lambda conn, **k: 10)
+    sent = []
+
+    def fake_publish(text, **kw):
+        sent.append((text, kw))
+        return outbound.PublishResult(ok=True, status="200", bytes_sent=len(text))
+
+    monkeypatch.setattr(outbound, "publish", fake_publish)
+
+    pusher = make_draft_pusher(db_path=tmp_path / "b.sqlite", season=2026,
+                               as_of="2026-08-17")
+    res = pusher("Ziggurat draft", "action body")
+    assert res.ok and res.status == "200"
+    text, kw = sent[0]
+    assert text == "action body"
+    assert kw["own_team_id"] == 10 and kw["title"] == "Ziggurat draft"
+    assert kw["priority"] == "high"
 
 
 def test_push_fires_through_the_http_surface(tmp_path, make_draft_board):
@@ -999,17 +1173,18 @@ def test_push_fires_through_the_http_surface(tmp_path, make_draft_board):
     pusher = _FakePush()
     board = make_draft_board()
     session = DraftSession.start(
-        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        board, operator_slot=2, pick_order=list(range(10)), season=2026,
         as_of="2026-07-24", journal_path=tmp_path / "hp.jsonl", rollouts=8,
     )
+    session.append_pick("RB-0")        # draft started; head 2, operator pick 1 away
     server = serve(session, port=0, pusher=pusher)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://{server.server_address[0]}:{server.server_address[1]}"
     try:
-        for _ in range(3):
+        for _ in range(6):
             _queue_status_post(base, session, {"achieved": [], "ok": False,
-                                               "reason": "thin", "overall": 1})
+                                               "reason": "thin", "overall": 2})
         assert len(pusher.calls) == 1
         st = _get(base, "/api/state")["queue"]["pushes"]
         assert st["channel"] == "wired" and st["sent"] == 1

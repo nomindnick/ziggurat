@@ -41,8 +41,8 @@ def make_draft_pusher(
     The returned callable itself never raises: a failed send is a
     ``DraftPushResult(ok=False, ...)`` the cockpit records and retries.
     """
+    from ziggurat.data.nfl.espn_source import load_espn_credentials
     from ziggurat.data.store import connect
-    from ziggurat.league.source import load_espn_credentials
     from ziggurat.league.state import resolve_own_team
     from ziggurat.push import outbound
 

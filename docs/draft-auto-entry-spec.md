@@ -555,22 +555,32 @@ below that is the escalation trigger, not a single failed resolution.
 
 ---
 
-**As built:** the decision lives in the cockpit (`webapp.py`), evaluated at
+**As built (re-sized by an 18-agent audit that replayed runs 1–4 through the
+real code):** the decision lives in the cockpit (`webapp.py`), evaluated at
 report receipt; the channel is `draft/push_bridge.py` → `push.outbound.publish`
 (the Rule-5 choke point; `draft/` → `push/` is the legal direction), with
-`own_team_id` resolved loudly at launch. Triggers: **deficit** (achieved <
-min(3, |desired|) for 3 consecutive reports while the operator's pick is ≤ 10
-away — sized so the observed benign fill blips of runs 1–4 never fire),
-**halt** (immediate, once per episode — that state never self-heals), and
-**stall** (no pick reaching the cockpit for 5 min mid-draft). Rails: 5-min
-spacing, max 3 pushes per run, publish-then-record (a failed send consumes
-neither budget nor spacing, with a 60 s backoff — the 3.6 standing lesson),
-network I/O outside the cockpit lock. Messages are action-only and name-free
-by construction; the scrub is belt and braces. `--no-push` disables the
-channel; decisions are still evaluated and recorded in `/api/state` under
-`queue.pushes`. If BOTH userscripts die nothing fires — deliberate: that
-failure degrades benignly (§2) and a second liveness mechanism is a second
-thing to get wrong.
+`own_team_id` resolved loudly at launch — where the audit's CRITICAL lived: a
+wrong import meant the channel could never wire, and no test executed the
+import lines (one does now). Triggers: **deficit** (achieved < min(3,
+|desired|) for **6** consecutive reports, **off-turn only** — on-turn the
+writer cannot add and nobody can snipe, so on-turn thinness is unfixable and
+harmless; the audit's replay showed the v1 policy paging the operator during
+run 4's flawless first pick — **draft-started only** (the lobby's near-pick
+window is vacuous), pick ≤ 10 away, **capped at ONE per draft**); **halt**
+(immediate, once per episode, **own budget of 2 and exempt from spacing** —
+the audit showed benign tail noise could spend a shared budget and silence
+the one push that matters); **stall** (5 min with no pick reaching the
+cockpit mid-draft; the message names both causes — paused room or dead feed
+— budget 2, re-armed by a head change). Rails: 5-min spacing on
+deficit/stall, publish-then-record (a failed send consumes neither budget
+nor spacing, 60 s backoff — the 3.6 standing lesson), network I/O outside
+the cockpit lock (tested with a blocking publisher), episode flags recorded
+only if the episode the decision saw still stands (mid-flight-head-change
+race, tested). Messages are action-only and name-free by construction; the
+scrub is belt and braces. `--no-push` disables the channel; decisions are
+still evaluated and recorded in `/api/state` under `queue.pushes`. If BOTH
+userscripts die nothing fires — deliberate: that failure degrades benignly
+(§2) and a second liveness mechanism is a second thing to get wrong.
 
 ## 8. Acceptance tests
 
