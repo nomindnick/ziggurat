@@ -991,6 +991,34 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > doesn't apply. §8.2's at-box foreground confirmation and §8.1/§8.4 remain
 > for the weekend.
 >
+> **PRACTICE RUN 3 — same day, a LIVE PUBLIC MOCK with ten humans.** Beginner
+> 10-team H2H-Points PPR snake (ESPN standard settings, 16 rounds, 30 s
+> clock), our seat 6, operator remote, same flags/--no-push configuration.
+> All 160 picks synced, **zero blocks, zero conflicts, zero halts**; 16/16
+> of our picks committed hands-free. Three results: **(1) The expiry
+> question is closed.** With a verified-clean queue and Autopick read OFF in
+> the DOM, our pick 6 expired and ESPN committed a player who was neither
+> the queue head (available; untaken for 100 more picks) nor even ESPN's
+> visible-rank best — pre-arm expiry runs ESPN's internal autopick logic,
+> unpredictable from the screen. Lobby-ON is now measured twice, once
+> clean. **(2) The armed regime commits the queue head at turn start** —
+> both report-bracketed picks match exactly, and the divergence plays are
+> only explicable as queue commits: Loveland 15 spots over board, and **the
+> full K/DST play executed in a room of live humans able to snipe it**
+> (D/ST at 86, K at 95). **(3) The live room-model recalibration adapted on
+> real mixed human/autopick behavior for the first time** (reach ≈13 spots
+> at pick 80, ≈21 by 126, vs the 17.78 prior — the mixed room sits where it
+> should). Two observations recorded, not fixed: the writer's report stream
+> was sparse this run (79 reports over ~55 min vs run 2's 191 over 12 —
+> cadence question, benign here since every commit was correct; check the
+> writer's early-return paths if it recurs) and the roster shape went
+> maximally thin at RB (2 RBs total behind a CMC anchor — the flat-rate
+> availability model prices bench RBs below WR darts; the "Weakness: RB"
+> pattern, now twice observed, is a Phase-4 calibration question). Also
+> operator-observed: ESPN kicks the draft-room session if the same account
+> opens the room from a second device — runbook §3.5 now says only the
+> desktop opens the room on draft night.
+>
 > **ROOM COMPOSITION CHANGED — all 10 seats are now owned** (the two ownerless
 > seats attached ~2026-08-08 and ~2026-08-12, from `league_teams` history). The
 > 2.2 prior `autodraft_fraction = 0.2` is a 2025 fit and no longer describes the

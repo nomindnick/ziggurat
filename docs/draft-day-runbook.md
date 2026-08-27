@@ -243,10 +243,20 @@ design: **armed autopick commits the QUEUE head at turn start; an unarmed
 expiry commits from ESPN'S OWN BOARD and ignores the queue entirely** (run 2,
 pick 9: queue held the engine's list, expiry took ESPN's #8 Amon-Ra St. Brown
 — a board pick, not a queue pick; every armed pick from 12 on tracked the
-queue, incl. an 18-spot Loveland reach and D/ST/K ~40 spots early). So the
-§4 checklist item is not a formality: **flip Autopick ON manually in the
-lobby, before pick 1** — otherwise round 1, the most valuable pick of the
-draft, is decided by ESPN's board instead of the engine.
+queue, incl. an 18-spot Loveland reach and D/ST/K ~40 spots early). Run 3
+(a live public mock, 2026-08-27) removed the last asterisk: with a
+**verified-clean queue** and Autopick confirmed OFF in the DOM, expiry
+committed a player who was neither the queue head (available, untaken for
+another 100 picks) **nor ESPN's visible-rank best** — the pre-arm pick comes
+from ESPN's internal autopick logic and is not predictable from anything on
+the screen. So the §4 checklist item is not a formality: **flip Autopick ON
+manually in the lobby, before pick 1** — otherwise round 1, the most
+valuable pick of the draft, is decided by a black box.
+
+**One session per room.** ESPN kicks the draft-room session when the same
+account opens the room from another device (operator-observed 2026-08-27).
+On draft night the desktop's tab is the one wired to the cockpit: nobody
+opens the draft room from a phone or laptop while it runs.
 
 ---
 
@@ -405,6 +415,16 @@ launching device** (it looks like the real one but with the temporary
 leagueId), and only then point the desktop tab at it. The cockpit needs no
 restart — it binds to whatever league the sync feed claims first. On draft
 night this problem does not exist: the real room IS the known URL.
+
+Public mock-lobby drafts (run 3) are friendlier than the private practice
+flow: joining puts you in a **waiting room**
+(`/football/waitingroom?leagueId=<temp>`) that shows the room's settings,
+the full draft order (your slot included) well before start, and an **Enter
+The Draft** button when the room opens — so the cockpit can be started with
+the right `--slot` minutes early and the same tab clicks through when the
+button appears. Beginner 10-team H2H-Points PPR snake mocks matched the
+league's roster shape (16 rounds, standard lineup) but ran a 30 s pick
+clock.
 
 ### 8.1 The mid-draft kill test (spec §8.3, unrun as of 2026-08-27)
 
