@@ -495,3 +495,14 @@ def test_def_and_pk_position_aliases_route_correctly():
 def test_score_dst_direct_matches_dispatch():
     line = {"points_allowed": 13, "yards_allowed": 410, "sacks": 4}
     assert score_dst(line) == pytest.approx(score("DST", line))
+
+
+def test_an_offensive_players_return_td_scores_six():
+    """ESPN Misc KRTD/PRTD apply to offensive players (settings paste +
+    live pull, 2026-08-27). nflverse's `special_teams_tds` was silently
+    unpriced before this test existed — a KR-TD week under-scored by 6."""
+    from ziggurat.core.scoring import score_offense
+
+    base = {"receptions": 4, "receiving_yards": 50}
+    with_ret = dict(base, special_teams_tds=1)
+    assert score_offense(with_ret) == score_offense(base) + 6.0

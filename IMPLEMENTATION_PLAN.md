@@ -1036,6 +1036,30 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > which upgrades the Sleeper /research ownership ingest from corroborator to
 > REQUIRED for the holdout years.
 >
+> **FULL LEAGUE-SETTINGS RE-VERIFICATION (operator paste vs live mSettings
+> pull vs code, 2026-08-27).** All 46 scoring items match exactly — the live
+> D/ST values sit in `pointsOverrides["16"]` (slot-keyed), and merged they
+> are byte-identical to the committed fixture the guard test locks to
+> `scoring.py`. Roster slots/starters/bench/IR, draft (snake, 90 s, manual
+> order, 2026-08-31 19:00 PDT, our seat = position 9 re-confirmed from the
+> live `pickOrder`), trade deadline/veto, and schedule (14 matchups, 6
+> playoff teams, Total-PF seeding) all match. THREE findings: (1) **CLAUDE.md
+> stated the wrong waiver mechanism** — the league runs weekly
+> reset-to-inverse-standings (`waiverOrderReset: true`) with processing ~3–4
+> AM PT every day EXCEPT Tuesday, not rolling move-to-back with a single
+> Wednesday batch; corrected in the cadence intro (the queue-liberally
+> conclusion survives and strengthens — priority is use-it-or-lose-it weekly).
+> (2) **Offensive return TDs were silently unpriced in realized scoring** —
+> ESPN Misc KRTD/PRTD (6 pts) apply to the player, nflverse carries
+> `special_teams_tds`, and the offense weight map never included it; mapped
+> to `points_per_def_td` (same league value) with a regression test.
+> Projection feeds don't forecast return TDs, so no board/valuation number
+> moves. (3) Position MAXIMUMS (QB 4 / RB 8 / WR 8 / TE 3 / K 3 / DST 3) are
+> ESPN-enforced but not encoded — recorded as accepted (sims never exceeded
+> them; the queue mechanism degrades gracefully), alongside the standing
+> note that 3.4's drop suggestions don't consult ESPN's undroppable list
+> (ESPN blocks such a drop; the operator relays the refusal).
+>
 > **ROOM COMPOSITION CHANGED — all 10 seats are now owned** (the two ownerless
 > seats attached ~2026-08-08 and ~2026-08-12, from `league_teams` history). The
 > 2.2 prior `autodraft_fraction = 0.2` is a 2025 fit and no longer describes the

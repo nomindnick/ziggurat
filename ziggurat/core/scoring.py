@@ -156,6 +156,15 @@ _OFFENSE_WEIGHTS: dict[str, str] = {
     "passing_2pt_conversions": "points_per_two_point_conversion",
     "rushing_2pt_conversions": "points_per_two_point_conversion",
     "receiving_2pt_conversions": "points_per_two_point_conversion",
+    # An OFFENSIVE player's own kick/punt-return TD scores 6 (ESPN Misc
+    # KRTD/PRTD) — the same value the league gives every return TD, so it
+    # rides points_per_def_td rather than growing a twin field. Found in the
+    # 2026-08-27 settings re-verification: nflverse carries the stat as
+    # `special_teams_tds` and it was silently unpriced (realized scoring
+    # only — projection feeds don't forecast return TDs). No double-count:
+    # ESPN awards the player AND his team's D/ST separately, and D/ST
+    # realized scoring prices through team_defense, never this map.
+    "special_teams_tds": "points_per_def_td",
 }
 
 _DST_EVENT_WEIGHTS: dict[str, str] = {

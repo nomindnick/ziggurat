@@ -688,10 +688,14 @@ committed files or logs).
 The in-season loop, keyed by day. "Run the Tuesday workflow" means: do the
 steps under **Tuesday**, in order, and journal the result — each day below is
 executable by a fresh session from this file alone. Two ESPN facts shape the
-rhythm: queued waiver claims are processed in overnight batches (~3:00–4:30 AM
-ET Wednesday) and priority resets after a successful claim, so **Tuesday claims
-are free — queue liberally**; what clears waivers is first-come-first-served,
-so **Wednesday morning is when speed matters**.
+rhythm (re-verified against the live `mSettings` pull 2026-08-27): waivers
+process ~3–4 AM PT **every morning except Tuesday** (`waiverProcessDays`; the
+Wednesday run is the week's big batch because the weekend's locked players
+clear then), and the waiver order **resets every week to inverse standings**
+(`waiverOrderReset` — NOT rolling move-to-back), so priority is
+use-it-or-lose-it within the week and **Tuesday claims are free — queue
+liberally**; what clears waivers is first-come-first-served, so **Wednesday
+morning is when speed matters**.
 
 **Division of labor:** the tools recommend and explain; only the operator acts
 in the ESPN app (claims, adds, lineup changes, IR moves). Every workflow ends
