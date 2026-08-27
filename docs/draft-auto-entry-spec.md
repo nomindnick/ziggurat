@@ -629,20 +629,31 @@ load-bearing safety layer and the script is not.
 
 ---
 
-## 10. Draft-night runbook (draft here, refine after rehearsals)
+## 10. Draft-night runbook
 
-- **18:00** — room opens. Start `ziggurat draft-web` with the correct
-  `--slot` / `--pick-order`. **Seat translation is the highest-consequence
-  hand-transcription in the system**: ESPN's `pickOrder` is 1-based *team ids*;
-  `--pick-order` takes 0-based *seat ids*. Get it wrong and the engine silently
-  plays someone else's hand. Verify against ESPN's own displayed draft slot.
-- **18:45** — confirm the userscripts are live in the draft tab (badge visible),
-  the cockpit shows a full board, and the queue writer has populated a queue.
-- **19:00–~19:30** — operator present, rounds 1–3. Watch that the committed
-  pick matches `desired[0]` every time.
-- **~19:30 onward** — unattended. Pushes are informational only.
-- **23:15** — the scheduled league sync captures the completed draft (ESPN
-  flushes atomically at completion; no new code needed).
+**MOVED 2026-08-27 → [`draft-day-runbook.md`](./draft-day-runbook.md).** That
+file is the executable procedure for both draft night and every practice run,
+and it is covered by `tests/test_draft_runbook.py`, which re-derives every
+command it quotes against the real CLI and checks the userscript versions it
+names against the shipped files. Keep the procedure there; keep the *design*
+here.
+
+Two corrections this section carried until the move, recorded because both were
+stated confidently and both were wrong:
+
+- **`--pick-order` is not needed and should not be passed.** The bullet here
+  called seat translation "the highest-consequence hand-transcription in the
+  system" and told the operator to derive it carefully. Seat ids are arbitrary
+  internal labels and synced picks arrive positionally, so identity order is
+  equivalent — proven 2026-08-27 by running `snake_sequence` both ways and
+  getting the identical 16 overall picks. `--slot 9` alone is correct. The
+  right fix for a dangerous manual step was to remove it, not to warn harder.
+- **No Pick History tab discipline is needed** (§6d already established this;
+  the runbook now says so where the operator will read it).
+
+The timeline itself is unchanged and lives in the runbook: 18:00 room opens,
+18:45 badges + Autopick check, 19:00–19:30 present for rounds 1–3, unattended
+after, 23:15 the scheduled league sync captures the completed draft.
 
 ---
 

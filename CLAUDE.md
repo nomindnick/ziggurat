@@ -519,6 +519,16 @@ synced picks arrive positionally, so identity order is provably equivalent (the
 the highest-consequence hand-transcription in the system rather than managing
 it.
 
+**The executable procedure for draft night — and for every practice run before
+it — is [`docs/draft-day-runbook.md`](./docs/draft-day-runbook.md)**: setup,
+preflight, launch order, the three flags never to pass, the badge and Autopick
+checks, the four-rung fallback ladder, and the two acceptance tests still unrun
+(§8.3 mid-draft kill, §8.4 injected refusal). It is treated as an interface,
+not prose — `tests/test_draft_runbook.py` re-derives every command it quotes
+against the real CLI and checks the userscript versions it names against the
+shipped files, so a renamed flag or a bumped script rots it loudly instead of
+at 18:45 on draft night.
+
 Update this section whenever a phase or checkpoint closes.
 
 ## Standing rules (non-negotiable, from the SPEC)

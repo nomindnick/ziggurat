@@ -179,21 +179,19 @@ leave the timers running throughout.**
 
 ### 4.1 From the desktop (the 2026 plan)
 
-No database copy, no second environment, no divergence risk — the board is
-already refreshed daily here by the 3.1b timers. What actually needs doing:
+**The procedure moved 2026-08-27 → [`draft-day-runbook.md`](./draft-day-runbook.md).**
+Follow that; it is tested against the CLI and covers practice runs too. What
+this section got wrong, both now fixed there: Tampermonkey **is** installed on
+this box (it was not on 2026-08-10), and `--pick-order` must **not** be passed
+— the seat translation this section called "the one that silently ruins a
+draft" turned out to be unnecessary rather than merely dangerous.
 
-- **Install Tampermonkey in Chrome** (as of 2026-08-10 it is NOT installed on
-  this box — verified against `~/.config/google-chrome/*/Extensions`). Without
-  it there is no DOM sync and every pick is manual entry.
-- Start the cockpit, open `http://127.0.0.1:8811/sync.user.js` once to install
-  the per-run script (the port and token are baked in at serve time).
-- **Get the seat translation right — this is the one that silently ruins a
-  draft.** ESPN's `draftSettings.pickOrder` is a list of **1-based team ids** in
-  draft-position order; `draft-web --pick-order` wants **0-based seat ids**, and
-  `--slot` is 1-based. Seating the engine in the wrong chair raises no error —
-  it just plays someone else's hand, with every survival estimate wrong. Derive
-  it, do not eyeball it.
-- One full dress rehearsal on this box against sim rivals before the day.
+What remains true here, and is the reason drafting on the timer box is safe:
+**`ziggurat/draft/` never writes to the database.** It contains no `INSERT`,
+`UPDATE`, `DELETE`, `upsert`, or `commit()` — it reads the board and persists
+only to a local timestamped `session-*.jsonl` journal, which is what `--resume`
+replays. No database copy, no second environment, no divergence risk, and no
+reason to stop the cadence: **leave the timers running throughout.**
 
 ### 4.2 From the laptop (fallback only)
 
