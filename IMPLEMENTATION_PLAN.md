@@ -1019,6 +1019,23 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > opens the room from a second device — runbook §3.5 now says only the
 > desktop opens the room on draft night.
 >
+> **SAME-DAY FOLLOW-UP — the two draft-decision backtests RAN (early Phase-4
+> pre-work, operator-requested), and both validated the engine unchanged.**
+> Full numbers in gitignored `intel/research/draft-backtest-early-findings.md`.
+> (1) D/ST: the realized top-3-vs-replacement prize is 2.5–3.2 pts/wk in
+> every season 2021–25, August signals capture roughly half of it (ECR rho
+> +0.30…+0.54) — and a VOR-shrinkage tweak was BUILT AND TESTED rather than
+> argued about: shrinking D/ST VOR 50% on the live board changes neither the
+> engine's points nor its R9 timing (75% shrink merely swaps the D/ST and K
+> rounds; yardstick identical). The candidate tweak is a measured no-op, so
+> nothing ships. (2) RB insurance: 2021–23 the waiver wire's 3rd-best
+> sub-15%-owned RB out-scored the drafted rounds-10-14 bench RB every
+> season — the thin-RB lean is realized-validated for an attentive operator;
+> the handcuff-conditional form stays open as 4.x follow-up. Data finding
+> for 4.1: the db_fpecr ownership series is UNUSABLE in-season for 2024–25,
+> which upgrades the Sleeper /research ownership ingest from corroborator to
+> REQUIRED for the holdout years.
+>
 > **ROOM COMPOSITION CHANGED — all 10 seats are now owned** (the two ownerless
 > seats attached ~2026-08-08 and ~2026-08-12, from `league_teams` history). The
 > 2.2 prior `autodraft_fraction = 0.2` is a 2025 fit and no longer describes the
@@ -2494,6 +2511,13 @@ Operate the full loop through NFL Week 1 for real. Journal every friction, wrong
 **Goal:** Measure the signals before trusting them. Runs in parallel with Phases 2–3 wherever hours allow — nothing here blocks draft day or Week 1, but signal deployments in-season are gated on results here. Standing methodology for every experiment: strict `as_of` cuts, train on 2021–23 / validate on 2024–25, grade decisions not outcomes.
 
 ### 4.1 [Build] Backtest harness & decision grading
+**Pre-work note (2026-08-27):** three ad-hoc analyses already ran against a
+scratch download of the db_fpecr panel (gitignored `data/backtest/`), before
+this item's build — see Checkpoint 2's 08-27 follow-up entry and gitignored
+`intel/research/draft-backtest-early-findings.md`. Carry two findings into
+this build: `dp` preseason pages are clean 2021–2025 for RB/K/DST, and the
+panel's in-season ownership (`wp`/`player_owned_espn`) dies after 2023 — the
+Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 **Goal:** Replay engine over the historical spine: step week-by-week through past seasons, exercising production code paths; scorecards for lead-time-vs-market (using the 1.2 proxy) and precision@k (k ≤ 3, the realistic claim budget).
 **Done when:** a trivial baseline strategy replays through 2023 producing graded weekly decisions.
 **Checkpoint-1 amendment (2026-07-20):** the **first deliverable is the historical market-panel ingester** deferred from 1.5 — DynastyProcess `db_fpecr` weekly PPR ECR (`ecr_type='wp'`, with `ecr/best/worst/sd`) into a new panel table read under **`latest_truth`** (immutable accepted bulk history), NFL week inferred from `scrape_date`, edge week dropped, off-cadence scrapes deduped, **our copy pinned/mirrored**; plus the Sleeper `/research` weekly ownership series (frozen snapshots; use w/w deltas). Scorecards: **lead-time-vs-market** (weeks from a Ziggurat flag at T to the ECR re-rank at T+1/T+2, + hit-rate) and **precision@k, k≤3**. The replay steps week-by-week exercising production code paths, all reads through `latest_truth` accessors (a bulk DB reads empty under the default `historical` view — by design).
