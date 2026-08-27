@@ -498,12 +498,26 @@ Calendar anchors (draft SCHEDULED 2026-08-10; all confirmed against ESPN's own
   ingested `schedules` table; Week 1 runs through 09-14. This is the Phase 3
   hard deadline and the Checkpoint 3 trigger.
 
-Room composition as of 2026-08-10: **2 of 10 seats still have no owner
-attached** (ESPN default names, unchanged since 2026-07-21). Unowned at draft
-time means autodraft — which is exactly the 2025 pattern the 2.2 opponent model
-was calibrated on (2 of 10 seats autodrafted), so the prior is holding. Re-check
-ownership near draft day: a seat that stays empty is the most *predictable* seat
-in the room, and a seat that fills late invalidates that.
+Room composition as of 2026-08-27: **all 10 seats are owned.** The two
+ownerless seats attached ~2026-08-08 and ~2026-08-12 (read from `league_teams`
+history, not reported by ESPN). This RETIRES the note that stood here from
+2026-08-10: the 2.2 opponent model's `autodraft_fraction = 0.2` is a 2025 fit
+(2 of 10 seats autodrafted that year) and no longer describes this room. It is
+not zeroed — owned is not the same as *present*, and a manager who no-shows
+autodrafts anyway — but it is now an **assumption, not an observation**, and the
+sim's ~2 random autodraft seats are the softest input to every survival
+estimate. The sensitivity is real at our slot: forcing autodrafters to 0 moves
+round 1 from RB 66% to RB **92%** and drops elite RBs to pick 9 more often.
+
+**Draft slot: 9 of 10** (read 2026-08-27 from `draftSettings.pickOrder` +
+`resolve_own_team(SWID)`; the array is now the real post-hat-draw order, not the
+placeholder). Overall picks 9, 12, 29, 32, 49, 52, 69, 72, 89, 92, 109, 112,
+129, 132, 149, 152. Draft-night command is `ziggurat draft-web --season 2026
+--slot 9` — **no `--pick-order`**: seat ids are arbitrary internal labels and
+synced picks arrive positionally, so identity order is provably equivalent (the
+16 overall picks are identical either way). That removes what the plan called
+the highest-consequence hand-transcription in the system rather than managing
+it.
 
 Update this section whenever a phase or checkpoint closes.
 

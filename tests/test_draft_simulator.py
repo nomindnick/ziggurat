@@ -313,11 +313,34 @@ def test_load_board_unions_the_full_espn_universe(tmp_path):
         if r["espn_id"] is not None:
             assert str(r["espn_id"]) in ids, f"{r['player']} missing from board"
     # union entries carry zero house value and never a fabricated projection
-    extras = [e for e in board if e.house_points == 0.0 and e.vor == 0.0]
+    extras = [e for e in board if e.house_points == 0.0]
     assert extras, "expected at least one ESPN-only union entry in the fixture"
     for e in extras:
         assert e.position in ("QB", "RB", "WR", "TE", "DST", "K")
         assert e.espn_overall_rank >= 1
+
+
+def test_union_entries_are_floored_below_every_priced_player(tmp_path):
+    # An ABSENT projection is not a measurement of replacement level, and the
+    # difference is not cosmetic. Union entries used to land at ``vor 0.0``,
+    # which outranks every priced player whose vor is NEGATIVE — and past
+    # roughly round 11 that is all of them, because replacement level sits at
+    # the last starter (only ~90 of the live board's 3,263 entries are
+    # positive). Measured on the real board 2026-08-27, from slot 9: 46 of 60
+    # picks in rounds 12-16 went to players with NO projection at all, over
+    # Chris Godwin (174 house pts) and RJ Harvey (165). The path is the
+    # engine's "single best by VOR" candidate slot, which a zero wins outright,
+    # so the invariant belongs here on the board rather than on the engine.
+    conn = _build_board_db(tmp_path / "board.sqlite")
+    board = load_board(conn, as_of="2026-08-01", season=2026)
+    conn.close()
+
+    priced = [e for e in board if e.house_points]
+    unpriced = [e for e in board if not e.house_points]
+    assert priced and unpriced, "fixture must carry both priced and union entries"
+    assert max(e.vor for e in unpriced) < min(e.vor for e in priced), (
+        "an unpriced union entry must never outrank a priced player by VOR"
+    )
 
 
 def test_espn_display_names_serves_the_other_sides_vocabulary(tmp_path):

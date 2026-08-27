@@ -436,9 +436,23 @@ def load_board(
     # players the projections-based board has never heard of (deep rookie
     # kickers especially — 45 such players on the real 2026 pool). A pick that
     # is not on the board CANNOT be entered, which dams the sync feed and
-    # manual entry alike. Union the rest of the ESPN universe in as
-    # zero-value entries: enterable, resolvable, rank-ordered after everything
-    # real, and never recommended (vor 0, points 0, deep rank).
+    # manual entry alike. Union the rest of the ESPN universe in as UNPRICED
+    # entries: enterable, resolvable, rank-ordered after everything real, and
+    # never recommended.
+    #
+    # "Never recommended" is the load-bearing half, and ``vor=0.0`` did not
+    # deliver it (measured 2026-08-27 on the live board): only ~90 of 3,263
+    # entries carry POSITIVE vor, because replacement level sits at the last
+    # starter — so from roughly round 11 on, every priced player still
+    # available is NEGATIVE. A zero then outranks all of them, both in the
+    # engine's "single best by VOR" candidate slot and in its pick score: 46 of
+    # 60 slot-9 picks in rounds 12-16 went to players with no projection at all
+    # while Chris Godwin (174 house pts) and RJ Harvey (165) sat on the board.
+    #
+    # An absent projection is not a measurement of replacement level. Floor
+    # these strictly BELOW the worst priced entry so the paragraph above is
+    # true by construction rather than by the luck of a sign.
+    unpriced_vor = min((e.vor for e in board), default=0.0) - 1.0
     used_ids = {e.player_id for e in board}
     tail = 0
     for r in espn_rows:
@@ -459,7 +473,7 @@ def load_board(
                 position=pos,
                 espn_overall_rank=int(rank),
                 house_points=0.0,
-                vor=0.0,
+                vor=unpriced_vor,
                 team=(base.TEAM_ALIASES.get(str(team).upper(), str(team).upper())
                       if team else None),
             )

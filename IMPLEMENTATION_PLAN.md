@@ -804,6 +804,67 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > a queue that can only be appended to is useless by round 3 as the board
 > re-ranks. That is P0; if `Remove` cannot be driven, the queue-first design is
 > dead and the fallback is active card-path clicking with verify-after-commit.
+>
+> **DRAFT ORDER READ 2026-08-27 — slot 9 of 10, and the "highest-consequence
+> hand-transcription" turned out not to be one.** `draftSettings.pickOrder` now
+> serves the real post-hat-draw array (no longer the placeholder), and
+> `resolve_own_team(SWID)` maps our cookie to the seat sitting **9th**, machine-
+> confirmed rather than transcribed. Our 16 overall picks are 9, 12, 29, 32, 49,
+> 52, 69, 72, 89, 92, 109, 112, 129, 132, 149, 152 (the 3-then-17 turn rhythm).
+> The `--pick-order` translation this checkpoint flagged as the single most
+> dangerous manual step (0-based seat ids vs ESPN's 1-based team ids) is
+> **unnecessary**: seat ids are arbitrary internal labels, synced picks arrive
+> positionally, and `snake_sequence` was verified to produce the IDENTICAL 16
+> picks under identity order + `--slot 9` and under ESPN-team-id seats +
+> `--slot 10`. Draft-night command is therefore `ziggurat draft-web --season
+> 2026 --slot 9` with NO `--pick-order`, which removes the failure mode rather
+> than managing it. Confidence run on the draft-day desktop the same day:
+> cockpit launches, `operator_slot` 8, and driving it to overall 9 produces
+> live recommendations with Rule-6 reasons. §10's runbook step should be
+> amended accordingly.
+>
+> **UNPRICED BOARD ENTRIES OUTRANKED PRICED ONES — found and fixed 2026-08-27
+> (`simulator.load_board`).** The Checkpoint-2 board-completeness fix unions the
+> full ESPN universe in at `vor=0.0, house_points=0.0`, commented "never
+> recommended (vor 0, points 0, deep rank)". That comment was true only while
+> something priced was above zero. **Only ~90 of the live board's 3,263 entries
+> carry POSITIVE vor** — replacement level sits at the last starter, so from
+> roughly round 11 on, every priced player still available is NEGATIVE, and a
+> zero outranks all of them. The path is the engine's "single best by VOR"
+> candidate slot (`DEFAULT_CANDIDATE_WIDTH` takes top-C by ESPN rank *plus* the
+> best by VOR), which an unpriced entry wins outright; `engine.py`'s
+> `(c.vor * frac if c.vor > 0 else c.vor)` then passes the negative through
+> undiscounted. **Measured from slot 9 on the real board: 46 of 60 picks in
+> rounds 12-16 went to players with NO projection at all** — a fullback at ESPN
+> #994, UDFAs at #1226/#1258/#1360 — while Chris Godwin (174 house pts), RJ
+> Harvey (165) and Jalen Coker (189) sat there. Hands-off auto-entry would have
+> drafted ~4 of our 16 picks as noise with nobody watching.
+>
+> **Fix:** union entries are floored strictly BELOW the worst priced entry
+> (`min(priced vor) - 1.0`), so "never recommended" holds by construction rather
+> than by the luck of a sign. Re-verified on the real board with the same 12
+> seeds: **46/60 → 0/60**; rounds 12-16 now fill with Josh Downs, Kelce/Andrews,
+> Goff, Coker, Harvey, Diggs, Juwan Johnson, Schultz. Starting-lineup metric is
+> **bit-identical** (engine slot 9, n=40, seed 42: median 2187.5, mean 2184.9
+> before and after) — which is the point: the 2.2/2.3 tournament scores bench
+> picks zero and therefore could never have caught this, the same blind spot
+> that hid rehearsal 1's QB-stacking defect. `follow-VOR` was hurt MORE than the
+> engine and improves (mean 1982.1 → 2081.1), narrowing the slot-9 margin to
+> **+104 vs follow-VOR / +153 vs follow-ESPN** (house-projected, self-graded).
+> Regression test: `test_union_entries_are_floored_below_every_priced_player`
+> asserts the invariant on the board, where the defect lived, not on the engine.
+> **Residual, unchanged and still ungraded:** the tail now runs into the QB=3
+> cap instead (QB 2.0 → 3.0 per draft in a 1-QB league), i.e. one bench slot is
+> still misallocated — the documented bench-blind residual, now spent on a
+> droppable backup QB rather than on a fullback. Phase 4 grades realized value.
+>
+> **ROOM COMPOSITION CHANGED — all 10 seats are now owned** (the two ownerless
+> seats attached ~2026-08-08 and ~2026-08-12, from `league_teams` history). The
+> 2.2 prior `autodraft_fraction = 0.2` is a 2025 fit and no longer describes the
+> room; owned is not the same as *present*, so it is not zeroed, but it is now
+> an assumption rather than an observation. Sensitivity at slot 9 is real: with
+> autodrafters forced to 0, round 1 goes RB **92%** (vs 66%) and elite RBs reach
+> pick 9 more often.
 
 ---
 
