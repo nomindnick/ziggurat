@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.6
+// @version      1.7
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -47,7 +47,7 @@
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.6";
+  const VERSION = "1.7";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -632,9 +632,25 @@
       if (aria === "false") return "off";
       return null;
     };
-    const known = read(p.querySelector('.autoPick-container input[type="checkbox"]'));
+    // v1.7 (live practice draft, 2026-08-27): the primary lookup was scoped to
+    // the QUEUE PANEL, but `.autoPick-container` is a sibling control OUTSIDE
+    // it — so the scoped query missed, and the old fallback below then read
+    // THE FIRST CHECKBOX IT COULD FIND in the panel and reported that
+    // unrelated control's state as the autopick state. Measured: the writer
+    // reported `autopick: off` while the real toggle read `checked: true`.
+    //
+    // That is a false ALARM in the direction the operator is told to act on
+    // (runbook: "confirm Autopick is ON"), and it fires at exactly the moment
+    // they are checking. An unlabelled checkbox is not evidence about
+    // autopick: search the whole document for the NAMED control, and if that
+    // is not present, say "unknown" rather than inventing a reading.
+    const named = document.querySelector('.autoPick-container input[type="checkbox"]')
+      || p.querySelector('.autoPick-container input[type="checkbox"]');
+    const known = read(named);
     if (known) return known;
-    for (const t of p.querySelectorAll('input[type="checkbox"], [role="switch"]')) {
+    for (const t of document.querySelectorAll(
+      '.autoPick-container [role="switch"], .autoPick-toggle [role="switch"]'
+    )) {
       const v = read(t);
       if (v) return v;
     }

@@ -858,6 +858,75 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > still misallocated — the documented bench-blind residual, now spent on a
 > droppable backup QB rather than on a fullback. Phase 4 grades realized value.
 >
+> **FIRST LIVE PRACTICE DRAFT ON THE CURRENT BUILD — 2026-08-27, all 160
+> picks, and it found what four rehearsals and three audits did not.** Run
+> remotely from this session: Chrome driven via the extension, the operator not
+> at the box, the room opened from their laptop and joined by URL. The build
+> under test was the one no live draft had ever exercised (`webapp.py` changed
+> 08-17, after the 08-16 graduation run) plus the same-day `load_board` VOR
+> floor.
+>
+> **Verified:** slot 9 seating END TO END in a real ESPN room (our picks landed
+> at overall 9, 12, 29, 32, 49, 52 … — the league-specific practice room honours
+> the real `pickOrder`, so `--slot 9` with no `--pick-order` is now confirmed by
+> observation, not just by geometry); sync harvest + back-fill (joined at pick
+> 20, recovered every earlier pick, later caught up 63 → 125 in one go);
+> queue-fed commits (`achieved: ['N. Collins', 'J. Allen']` matches exactly what
+> we drafted at 29 and 32 — ESPN's autopick committing from Ziggurat's queue,
+> and Josh Allen at 32 / Loveland at 49 are the same modal picks the slot-9
+> profile predicted that morning); refuse-rather-than-guess (two blocks, zero
+> wrong players committed); and the manual-entry fallback under the sync layer.
+>
+> **NOT a valid §8.2 acceptance pass** — joined mid-draft, and the tab was
+> hidden throughout, so queue fidelity was never really measured. It was a far
+> better bug-finding run than a clean one would have been.
+>
+> **Four defects, all fixed the same day:**
+> 1. **(major) ESPN's injury designation broke the pick parser and DAMMED THE
+>    FEED.** The Pick History cell renders `Kenneth Walker III` + `Q` + `KC` +
+>    `RB` concatenated; the status-flag guard required the character before the
+>    flag to be lowercase or a period (protecting "DK Metcalf"), but a
+>    GENERATIONAL SUFFIX is uppercase — so the `Q` survived into the name
+>    (`Kenneth Walker IIIQ`), disagreed with the clean anchor text, and the
+>    commit gate refused. **The refusal was correct behaviour on a bad parse.**
+>    Every blocked pick stops the whole feed until a human enters it by hand —
+>    while the operator is meant to be hands-off from round 4. 2 of 160 picks
+>    today; higher on 08-31 with designations settled. The test fixtures already
+>    covered a suffix and a status flag **separately, never together**, which is
+>    exactly why three adversarial audits missed it. Fixed in
+>    `sync._ends_a_real_name`; both live cells are now verbatim regression
+>    cases; mutation-checked (5 tests fail without the fix).
+> 2. **(major) A hidden tab throttles both userscripts.** `document.hidden` was
+>    true for the whole run; the queue writer stalled after ~pick 33 and ESPN
+>    then autodrafted off ITS board. The signature is diagnostic and worth
+>    memorising: **D/ST at 149 and K at 152** — the room's own behaviour —
+>    instead of the engine's R9/R10 divergence play. Runbook §3.5b now makes the
+>    foreground tab a checklist item.
+> 3. **(major) `autopickState()` reported `off` while the toggle read
+>    `checked: true`.** Its primary selector was scoped to the queue panel and
+>    `.autoPick-container` sits outside it, so it fell through to reading
+>    whatever checkbox was nearest and reported that control's state. A false
+>    alarm in the exact direction the runbook tells the operator to act on, at
+>    the exact moment they check. **Queue writer v1.7** reads the named control
+>    and returns `unknown` rather than inventing a state — the recurring lesson
+>    of this codebase, now in its fifth costume: an absence reported as a
+>    measurement is the dangerous failure, not the loud one. Node-backed test
+>    (`tests/test_draft_queue_userscript.py`) runs the real shipped function
+>    against the live DOM shape; the pre-fix source fails it.
+> 4. **(minor, Rule 6) The refusal message was unactionable.** It read
+>    `'Kenneth Walker III' has no exact board match (closest: Kenneth Walker
+>    III)` — two identical strings, because it printed the anchor name while the
+>    failing check was against the cell name. It cost this session a wrong
+>    diagnosis (a team mismatch that does not exist) and would have cost the
+>    operator more at 19:30. Refusals now name the field that disagreed.
+>
+> **Operator action before the next practice run: reinstall the queue writer
+> userscript** (v1.6 → v1.7) from `http://127.0.0.1:8811/queue.user.js`.
+> Remaining gates unchanged: §8.3 (mid-draft kill) and the live half of §8.4
+> (injected refusal → exactly one push) are still unrun, and a clean hands-off
+> run on the fixed build with the tab in front is what §8.2 still needs. The
+> 160-pick journal is kept at `data/draft/practice/session-20260827-091611.jsonl`.
+>
 > **ROOM COMPOSITION CHANGED — all 10 seats are now owned** (the two ownerless
 > seats attached ~2026-08-08 and ~2026-08-12, from `league_teams` history). The
 > 2.2 prior `autodraft_fraction = 0.2` is a 2025 fit and no longer describes the

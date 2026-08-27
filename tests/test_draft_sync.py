@@ -31,6 +31,12 @@ from ziggurat.draft.sync import (
         ("Cam SkatteboQNYGRB", "Cam Skattebo", "NYG", "RB"),      # Q status flag
         ("Marvin Harrison Jr.ARIWR", "Marvin Harrison Jr.", "ARI", "WR"),
         ("Kenneth Walker IIISEARB", "Kenneth Walker III", "SEA", "RB"),
+        # SUFFIX + STATUS TOGETHER — both cells captured verbatim from a live
+        # practice draft, 2026-08-27, where both BLOCKED the pick feed.
+        ("Kenneth Walker IIIQKCRB", "Kenneth Walker III", "KC", "RB"),
+        ("Luther Burden IIIQCHIWR", "Luther Burden III", "CHI", "WR"),
+        ("Patrick Mahomes IIOKCQB", "Patrick Mahomes II", "KC", "QB"),
+        ("Marvin Harrison Jr.OARIWR", "Marvin Harrison Jr.", "ARI", "WR"),
         ("DK MetcalfPITWR", "DK Metcalf", "PIT", "WR"),
         ("Amon-Ra St. BrownDETWR", "Amon-Ra St. Brown", "DET", "WR"),
     ],
@@ -43,6 +49,77 @@ def test_parse_history_cell_unparseable_passes_through():
     # No trailing position token -> raw text unchanged, no fabricated fields.
     assert parse_history_cell("Round 1") == ("Round 1", None, None)
     assert parse_history_cell("") == ("", None, None)
+
+
+def test_generational_suffix_plus_status_flag_parses():
+    """MEASURED, live practice draft 2026-08-27 — the defect three adversarial
+    audits missed because the fixtures covered each half separately.
+
+    This file already pinned a generational suffix ("Kenneth Walker IIISEARB")
+    and a status flag ("Cam SkatteboQNYGRB") — but never the two TOGETHER,
+    which is the combination that actually occurs whenever an injured player
+    with a suffix is drafted. The old guard required the character before the
+    flag to be lowercase or a period; a suffix is uppercase, so the flag
+    survived into the name ("Kenneth Walker IIIQ"), disagreed with the clean
+    anchor text, and the commit gate refused — DAMMING THE ENTIRE PICK FEED
+    until a human entered the pick by hand. Two of 160 picks, in one draft.
+    """
+    assert parse_history_cell("Kenneth Walker IIIQKCRB")[0] == "Kenneth Walker III"
+    assert parse_history_cell("Luther Burden IIIQCHIWR")[0] == "Luther Burden III"
+    # and the flag must still not be invented where there is none
+    assert parse_history_cell("Kenneth Walker IIIKCRB")[0] == "Kenneth Walker III"
+
+
+def test_suffixed_injured_pick_commits_end_to_end():
+    """The parse is a means; COMMITTING is the end. Both live-blocked picks
+    must now clear the gate confidently against a board that spells the name
+    with and without the suffix (the board's nflverse names do both)."""
+    board = (
+        BoardEntry("2001", "Walker Delta III", "RB", 21, 240.0, 47.0, "KC"),
+        BoardEntry("2002", "Burden Echo", "WR", 54, 215.0, 19.0, "CHI"),
+    )
+    for payload, want in (
+        ({"overall": 20, "player": "Walker Delta IIIQKCRB",
+          "player_clean": "Walker Delta III"}, "2001"),
+        # ESPN carries the suffix, the board does not — suffix-blind identity
+        ({"overall": 63, "player": "Burden Echo IIIQCHIWR",
+          "player_clean": "Burden Echo III"}, "2002"),
+    ):
+        pick = parse_payload_pick(payload)
+        assert pick is not None
+        # the cell-parsed name and the anchor name must AGREE; their
+        # disagreement is what the gate refused on
+        assert pick.cell_name == pick.name
+        res = resolve_synced_pick(NameResolver(board), board, pick, taken=frozenset())
+        assert res.confident, f"{payload['player']} still blocks: {res.reason}"
+        assert res.entry.player_id == want
+
+
+def test_a_refusal_names_the_field_that_disagreed():
+    """Rule 6. MEASURED 2026-08-27: the live refusal read "'Kenneth Walker III'
+    has no exact board match (closest: Kenneth Walker III)" — two IDENTICAL
+    strings, because it printed the anchor name while the failing check was
+    against the cell name. It cost this session a wrong diagnosis (a team
+    mismatch that did not exist), and it would cost the operator far more at
+    19:30 with 90 seconds on the clock."""
+    from ziggurat.draft.sync import ParsedPick
+
+    board = (BoardEntry("2001", "Walker Delta III", "RB", 21, 240.0, 47.0, "KC"),)
+
+    def reason(**kw):
+        base = dict(overall=20, name="Walker Delta III", cell_name="",
+                    position="RB", team="KC", espn_id=None, fantasy_team=None)
+        base.update(kw)
+        return resolve_synced_pick(
+            NameResolver(board), board, ParsedPick(**base), taken=frozenset()
+        ).reason
+
+    # the two names printed must never be the only thing an operator sees
+    cell = reason(cell_name="Walker Delta IIIQ")
+    assert "cell text parses as 'Walker Delta IIIQ'" in cell
+    assert "IIIQ" in cell, "the refusal must show the string that actually failed"
+    assert "position WR on ESPN vs RB on the board" in reason(position="WR")
+    assert "team SEA on ESPN vs KC on the board" in reason(team="SEA")
 
 
 def test_status_flag_never_eats_name_capitals():

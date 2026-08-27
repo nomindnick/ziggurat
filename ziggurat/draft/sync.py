@@ -86,6 +86,36 @@ def _canon_pos(pos: str | None) -> str | None:
     return "DST" if up in ("D/ST", "DST", "DEF") else up
 
 
+# Generational suffixes render in CAPS at the end of a real name, which is
+# exactly where the "must follow a lowercase letter" rule below misfires.
+_GENERATIONAL = frozenset({"II", "III", "IV", "V", "VI", "JR", "SR"})
+
+
+def _ends_a_real_name(trimmed: str) -> bool:
+    """Is ``trimmed`` the end of a real player name, i.e. did we just strip a
+    genuinely separate status token rather than a name's own final letter?
+
+    MEASURED DEFECT (live practice draft, 2026-08-27). The rule was "the char
+    before the flag must be lowercase or a period", which protects "DK" in
+    "DK Metcalf" — but a GENERATIONAL SUFFIX is uppercase, so every player
+    carrying both a suffix and an injury designation failed it:
+
+        "Kenneth Walker IIIQKCRB" -> name "Kenneth Walker IIIQ"   (Q kept)
+
+    The trailing Q then disagreed with the anchor-text name ("Kenneth Walker
+    III"), and the commit gate's cell-vs-anchor check refused the pick — which
+    DAMS THE WHOLE PICK FEED until a human enters it by hand. Two of 160 picks
+    blocked this way in one practice draft; on draft day, a week from Week 1
+    with designations settled, the rate is higher. The refusal was correct
+    behaviour on a bad parse, and the parse is what was wrong.
+    """
+    if not trimmed:
+        return False
+    if trimmed[-1].islower() or trimmed[-1] == ".":
+        return True
+    return trimmed.rsplit(" ", 1)[-1].upper() in _GENERATIONAL
+
+
 def parse_history_cell(text: str) -> tuple[str, str | None, str | None]:
     """Split ESPN's concatenated player cell into (name, nfl_team, position).
 
@@ -137,10 +167,7 @@ def parse_history_cell(text: str) -> tuple[str, str | None, str | None]:
     for flag in _STATUS_FLAGS:
         if name.endswith(flag) and len(name) > len(flag):
             trimmed = name[: -len(flag)].rstrip()
-            # Only treat it as a status flag when it directly follows a
-            # lowercase letter or period (end of a real name), so "DK" in
-            # "DK Metcalf" or a "III" suffix is never clipped.
-            if trimmed and (trimmed[-1].islower() or trimmed[-1] == "."):
+            if _ends_a_real_name(trimmed):
                 name = trimmed
             break
     return (name, _norm_team(team), pos)
@@ -284,6 +311,36 @@ def _entry_matches_pick(entry: BoardEntry, pick: ParsedPick) -> bool:
     return True
 
 
+def _why_not_matched(entry: BoardEntry, pick: ParsedPick) -> str:
+    """Name the SPECIFIC disagreement behind a refusal.
+
+    MEASURED (live practice draft, 2026-08-27): the refusal read
+    ``'Kenneth Walker III' has no exact board match (closest: Kenneth Walker
+    III)`` — two identical strings, because the message printed the clean
+    anchor name while the check that actually failed was against the CELL
+    name, which carried an unstripped injury flag. Rule 6: the operator is a
+    novice with 90 seconds on the clock; a refusal that does not say what
+    disagreed is a refusal they cannot act on, and it sent this session
+    chasing a team mismatch that did not exist.
+    """
+    if pick.position is not None and _canon_pos(entry.position) != pick.position:
+        return f"position {pick.position} on ESPN vs {entry.position} on the board"
+    if (
+        pick.team is not None
+        and entry.team is not None
+        and _norm_team(entry.team) != pick.team
+    ):
+        return f"team {pick.team} on ESPN vs {entry.team} on the board"
+    if not _same_name(entry.name, pick.name):
+        return f"name '{pick.name}' vs board '{entry.name}'"
+    if pick.cell_name and not _same_name(entry.name, pick.cell_name):
+        return (
+            f"the row's own two names disagree — link says '{pick.name}', "
+            f"cell text parses as '{pick.cell_name}' (board: '{entry.name}')"
+        )
+    return "fields disagree"
+
+
 def resolve_synced_pick(
     resolver: NameResolver,
     board: Sequence[BoardEntry],
@@ -344,6 +401,7 @@ def resolve_synced_pick(
             return SyncResolution(True, top, f"name match ({pick.name})")
         return SyncResolution(
             False, None,
-            f"'{pick.name}' has no exact board match (closest: {top.name})",
+            f"'{pick.name}' does not match the board's '{top.name}': "
+            f"{_why_not_matched(top, pick)}",
         )
     return SyncResolution(False, None, f"no board match for '{pick.name}'")

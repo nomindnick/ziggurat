@@ -40,7 +40,7 @@ seconds.
 |---|---|---|
 | The desktop is the draft machine | you are sitting at it | settled 2026-08-10 |
 | Tampermonkey in Chrome | `ls ~/.config/google-chrome/Default/Extensions/dhdgffkkebhmkfjojejmpbldmpobfkfo` | installed |
-| Queue writer userscript **v1.6** | Tampermonkey icon → Dashboard; check the version column | installed |
+| Queue writer userscript **v1.7** | Tampermonkey icon → Dashboard; check the version column | **REINSTALL NEEDED** — the installed copy is v1.6 |
 | Sync userscript **v1.1** | same dashboard | installed |
 | ESPN cookies valid | `.venv/bin/ziggurat league status` says `ok` | ok |
 
@@ -181,6 +181,29 @@ is stale: `.pick-history` reads fine regardless of which tab is active, proven
 by a full 160-pick run in which the tab was never visited. **No tab discipline
 is needed.**
 
+### 3.5b The draft tab must stay VISIBLE and in front
+
+**MEASURED 2026-08-27, and it silently cost a whole practice draft.** Chrome
+throttles timers in a hidden tab. Both userscripts are timer-driven, so a
+backgrounded draft tab does not fail loudly — it just slows to a crawl and then
+stops. In that run `document.hidden` was `true` throughout: the queue writer
+stalled after roughly pick 33 and never recovered, and from that point ESPN
+autodrafted off ITS board instead of ours.
+
+The result is the tell to memorise, because it is what a throttled writer looks
+like from the outside: **D/ST went at 149 and the kicker at 152** — exactly the
+room's own behaviour — instead of the engine's R9/R10 divergence play. The
+board was never wrong; it just was not being written to ESPN any more.
+
+So: the draft room must be the **active tab in a window that is not minimised
+and not fully behind another window**. Do not park it on a second desktop and
+do not tab away to another site in that window. Other windows in front of it
+are what `document.hidden` reacts to.
+
+The queue writer does say so — its report carries `(note: tab hidden — timers
+throttled)` — but that text is inside the report, not on the badge, so nobody
+reads it in time. If picks stop arriving in the cockpit, check this first.
+
 ### 3.5 Confirm ESPN's Autopick toggle is ON
 
 **This is the single most load-bearing setting in the whole design, and it is
@@ -190,7 +213,16 @@ queue when your clock expires. Autopick off and the mechanism has nothing to
 fire.
 
 The queue writer reads the toggle every cycle and shouts `AUTOPICK OFF!` in the
-badge if it is off. Confirm it visually anyway before the first pick.
+badge if it is off. **Confirm it visually anyway before the first pick** — that
+instruction earned its keep on 2026-08-27, when the writer reported
+`autopick: off` while the DOM checkbox read `checked: true`. Its selector was
+scoped to the queue panel and the control sits outside it, so it fell back to
+reading whatever checkbox was nearest and reported that. Fixed in **v1.7**: it
+now reads the named control and says `unknown` rather than inventing a state.
+
+Three readings, three meanings: `ON` is what you want; `AUTOPICK OFF!` means go
+look at the toggle; **`unknown` means the writer could not find the control at
+all** — treat that as "check it yourself", not as a soft off.
 
 ---
 
@@ -202,7 +234,8 @@ Everything in one place. On draft night, be here by **18:45**.
 - [ ] cockpit running, terminal open, page loads at `http://127.0.0.1:8811/`
 - [ ] exactly one ESPN draft room tab open
 - [ ] both badges present, queue badge green and `LIVE`
-- [ ] ESPN **Autopick toggle ON**
+- [ ] the draft tab is the **active, visible, unobscured** tab (§3.5b)
+- [ ] ESPN **Autopick toggle ON** — and see §3.5 on trusting that reading
 - [ ] the queue writer has populated a non-empty ESPN Pick Queue
 - [ ] cockpit shows a full board and your seat as **9**
 
@@ -267,10 +300,19 @@ recommendations degrade. Reload the ESPN tab — re-activation re-renders all
 rows and the harvester dedupes by pick number, so it back-fills everything it
 missed.
 
-**A pick refuses to commit.** By design: the gate refuses rather than guesses on
-an ambiguous name. Use the one-click "Find him" assist in the cockpit, or enter
-the pick manually via search. If the cockpit and ESPN disagree about a pick,
-use "Use ESPN's pick" — ESPN is always ground truth.
+**A pick refuses to commit — and this one is urgent.** By design the gate
+refuses rather than guessing on an ambiguous name, and that is correct. But a
+blocked pick **dams the entire feed behind it**: every later pick queues up
+`pending` and the cockpit's board state freezes at the block, so its
+recommendations go stale from that moment. Clear it promptly. Use the one-click
+"Find him" assist, or enter the pick manually via search — the moment it lands,
+the backlog drains in one go (measured 2026-08-27: 63 → 125 instantly).
+
+The refusal message names the field that disagreed — position, team, or the
+row's own two names. Read it; it tells you whether ESPN and the board disagree
+about the player or the parse went wrong. If the cockpit and ESPN disagree
+about a pick that DID commit, use "Use ESPN's pick" — ESPN is always ground
+truth.
 
 **The cockpit dies.** ESPN's queue survives it — autopick keeps drafting from
 the last-written queue, which is exactly the fallback this design exists to
