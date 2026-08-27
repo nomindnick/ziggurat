@@ -91,6 +91,11 @@ _PUSH_NEAR_PICKS = 10         # only escalate depth when the pick is this close
 _PUSH_DEFICIT_MAX = 1         # ONE thin-queue heads-up per draft, ever
 _PUSH_STALL_MAX = 2
 _PUSH_HALT_MAX = 2
+_PUSH_HIDDEN_REPORTS = 6      # consecutive hidden-tab reports (~30 s at the
+                              # writer's 5 s cadence; Chrome's first-stage
+                              # background throttling keeps reports flowing, so
+                              # receipt-time evaluation still sees the streak)
+_PUSH_HIDDEN_MAX = 2          # two nudges per draft, spacing-railed like stall
 _PUSH_MIN_INTERVAL_S = 300.0  # spacing between deficit/stall pushes
 _PUSH_FAIL_BACKOFF_S = 60.0   # a failed send retries, but not per-report
 _PUSH_STALL_S = 300.0         # mid-draft with no pick reaching the cockpit
@@ -206,6 +211,11 @@ class WebCockpit:
     # a consecutive-failure streak. Step 2 records and displays; the push
     # decision (spec §9 step 4) reads the streak — it is never made here.
     _queue_last_report: dict[str, Any] | None = field(default=None, init=False)
+    # Monotonic receipt time of the last writer report: /api/state serves its
+    # age so the cockpit page can say "writer silent for Ns" — the one signal
+    # that survives the writer dying entirely (a dead writer sends nothing, so
+    # every report-content signal goes dark exactly when it matters).
+    _queue_report_at: float | None = field(default=None, init=False)
     _queue_bad_streak: int = field(default=0, init=False)
     _queue_reports_received: int = field(default=0, init=False)
     # Bounded history of writer reports (newest last). The first live test
@@ -226,6 +236,7 @@ class WebCockpit:
     _push_fail_until: float | None = field(default=None, init=False)
     _push_inflight: bool = field(default=False, init=False)
     _deficit_streak: int = field(default=0, init=False)
+    _hidden_streak: int = field(default=0, init=False)
     _halt_active: bool = field(default=False, init=False)
     _halt_pushed: bool = field(default=False, init=False)
     _stall_pushed: bool = field(default=False, init=False)
@@ -309,6 +320,10 @@ class WebCockpit:
                 "sync": self._sync_state(),
                 "queue": {
                     "last_report": self._queue_last_report,
+                    "report_age_s": (
+                        None if self._queue_report_at is None
+                        else round(self._clock() - self._queue_report_at, 1)
+                    ),
                     "bad_streak": self._queue_bad_streak,
                     "received": self._queue_reports_received,
                     "pushes": {
@@ -417,6 +432,14 @@ class WebCockpit:
         # the whole queue-first design.
         autopick_raw = payload.get("autopick")
         autopick = autopick_raw if autopick_raw in ("on", "off", "unknown") else None
+        # The draft tab's visibility, straight from the writer (v1.8 sends a
+        # structured boolean; v1.6/1.7 only appended a note to `reason`, so
+        # sniff that text as the fallback). A hidden tab is the silent-stall
+        # mode the 2026-08-27 live run hit: Chrome throttles the writer's
+        # timers, the queue goes stale, and ESPN autopilot drifts onto its own
+        # board with nothing anywhere turning red.
+        hidden_raw = payload.get("hidden")
+        hidden = hidden_raw if type(hidden_raw) is bool else ("tab hidden" in reason)
         with self._lock:
             # VALIDATE against the first-room-wins binding — NEVER establish
             # it. The binding is claimed only by the pick feed (/api/sync),
@@ -433,6 +456,7 @@ class WebCockpit:
                     "restart the cockpit to re-bind)"
                 )
             self._queue_reports_received += 1
+            self._queue_report_at = self._clock()
             self._queue_bad_streak = 0 if ok else self._queue_bad_streak + 1
             self._queue_last_report = {
                 "ok": ok,
@@ -441,11 +465,13 @@ class WebCockpit:
                 "reported_overall": overall if type(overall) is int else None,
                 "session_overall": self.session.overall_pick,
                 "autopick": autopick,
+                "hidden": hidden,
             }
             self._queue_reports.append(dict(self._queue_last_report,
                                             n=self._queue_reports_received))
             del self._queue_reports[:-_QUEUE_REPORT_HISTORY]
-            decision = self._push_decision(achieved=achieved, reason=reason)
+            decision = self._push_decision(achieved=achieved, reason=reason,
+                                           hidden=hidden)
             resp = {
                 "ok": True,
                 "epoch": self.sync_epoch,
@@ -469,7 +495,8 @@ class WebCockpit:
     # and a cockpit-side timer thread would buy that non-emergency at the cost
     # of a second liveness mechanism to get wrong.
 
-    def _push_decision(self, *, achieved: list[str], reason: str) -> dict[str, Any] | None:
+    def _push_decision(self, *, achieved: list[str], reason: str,
+                       hidden: bool = False) -> dict[str, Any] | None:
         """Decide, under the cockpit lock, whether this report escalates.
         Returns the composed push (kind/title/body) or None. Messages are
         ACTION-ONLY and name-free (operator attention contract; the Rule-5
@@ -504,11 +531,21 @@ class WebCockpit:
         )
         self._deficit_streak = self._deficit_streak + 1 if deficit else 0
 
+        # Hidden tab (added after the 2026-08-27 live run, where a hidden tab
+        # silently degraded 12 of 16 picks): unlike deficit this is a FACT,
+        # not a heuristic — the writer read document.hidden. Mid-draft only:
+        # pre-lobby the operator is at the keyboard by definition (§4
+        # checklist), and post-complete nobody cares.
+        started = bool(self.session.picks) and not self.session.complete
+        self._hidden_streak = self._hidden_streak + 1 if (hidden and started) else 0
+
         kind = None
         if self._halt_active and not self._halt_pushed:
             kind = "halt"
         elif self._stall_should_fire(now):
             kind = "stall"
+        elif self._hidden_streak >= _PUSH_HIDDEN_REPORTS:
+            kind = "hidden"
         elif self._deficit_streak >= _PUSH_DEFICIT_REPORTS:
             kind = "deficit"
         if kind is None:
@@ -517,7 +554,8 @@ class WebCockpit:
         # Rails. Per-KIND budgets (audit: a shared budget let benign thinness
         # spend everything, silencing a later genuine halt), and the halt lane
         # BYPASSES the spacing rail — a halt must never wait out noise.
-        caps = {"deficit": _PUSH_DEFICIT_MAX, "stall": _PUSH_STALL_MAX, "halt": _PUSH_HALT_MAX}
+        caps = {"deficit": _PUSH_DEFICIT_MAX, "stall": _PUSH_STALL_MAX,
+                "halt": _PUSH_HALT_MAX, "hidden": _PUSH_HIDDEN_MAX}
         if self._push_inflight or self._push_counts.get(kind, 0) >= caps[kind]:
             return None
         if kind != "halt":
@@ -535,6 +573,11 @@ class WebCockpit:
             body = ("No pick has reached the cockpit for 5+ minutes mid-draft. "
                     "Either the room is paused or the sync feed is dead — open "
                     "the ESPN draft tab and check both badges.")
+        elif kind == "hidden":
+            body = ("The ESPN draft tab is HIDDEN — Chrome is throttling the "
+                    "queue writer, so the queue is going stale while the room "
+                    "drafts on. Click the ESPN draft tab and keep its window "
+                    "visible and in front.")
         else:
             away = (target - head) if target is not None else 0
             body = (f"Draft queue is thin: {len(achieved)} queued, want {want}. "
@@ -585,6 +628,8 @@ class WebCockpit:
             elif decision["kind"] == "stall":
                 if self._last_head_seen == decision["head"]:
                     self._stall_pushed = True
+            elif decision["kind"] == "hidden":
+                self._hidden_streak = 0  # re-arm: a second push needs a fresh run
             else:
                 self._deficit_streak = 0  # re-arm only after a fresh run of deficits
         else:

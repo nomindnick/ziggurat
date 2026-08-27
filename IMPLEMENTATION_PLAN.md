@@ -921,11 +921,75 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 >    operator more at 19:30. Refusals now name the field that disagreed.
 >
 > **Operator action before the next practice run: reinstall the queue writer
-> userscript** (v1.6 → v1.7) from `http://127.0.0.1:8811/queue.user.js`.
+> userscript** (v1.6 → v1.8) from `http://127.0.0.1:8811/queue.user.js`.
 > Remaining gates unchanged: §8.3 (mid-draft kill) and the live half of §8.4
 > (injected refusal → exactly one push) are still unrun, and a clean hands-off
 > run on the fixed build with the tab in front is what §8.2 still needs. The
 > 160-pick journal is kept at `data/draft/practice/session-20260827-091611.jsonl`.
+>
+> **THE HIDDEN-TAB FAILURE IS NOW LOUD — same day, second round.** Finding 2
+> above was fixed at the source of the *silence*, not just documented: the
+> queue writer (v1.8) reports `document.hidden` as a structured boolean each
+> cycle, and the cockpit turns a sustained `true` into (a) a pulsing full-width
+> **ESPN DRAFT TAB IS HIDDEN** banner on the cockpit page and (b) a fourth §7
+> push lane (`hidden`: 6 consecutive reports mid-draft, budget 2,
+> spacing-railed — the same audit-paid rails as deficit/stall/halt). A
+> reason-text sniff covers v1.6/1.7 writers, so the alarm works before the
+> pending reinstall; both the threshold and the sniff are mutation-verified. A
+> second cockpit-page variant — **QUEUE WRITER SILENT** — fires when no report
+> has arrived for 90 s (past Chrome's 60 s intensive-throttling cadence),
+> which is the one signal that survives the writer dying entirely; /api/state
+> now serves `report_age_s` and the page shows a writer status line (ok/
+> degraded · autopick · age). All three banner states were verified live in
+> the real page via injected reports (hidden → red banner; visible → clears,
+> line green; 136 s quiet → SILENT). The Tampermonkey reinstall itself proved
+> **not remotely automatable** (extension pages are walled off from the
+> automation extension; no auto-update ever fired — the script ships no
+> `@updateURL` and TM's storage shows v1.6 still installed), so it stays a
+> one-click operator action at the box.
+>
+> **The hidden tab's ROOT CAUSE was then measured: the LOCKED DESKTOP.** The
+> 08-27 run was driven remotely with the operator away — `loginctl` shows the
+> graphical session `LockedHint=yes`, so Chrome sat behind the GNOME lock
+> shield and `document.hidden` was true regardless of tab discipline; after 5
+> minutes Chrome's intensive throttling cut the writer to ~1 cycle/min, which
+> is exactly the pick-33 stall. Remote runs now launch Chrome with
+> `--disable-background-timer-throttling --disable-backgrounding-occluded-windows
+> --disable-renderer-backgrounding` (runbook §8.0) — verified to hold the ~5 s
+> report cadence past the 5-minute cliff behind the locked screen — and use
+> `--no-push` (the hidden banner/lane read true, truthfully, all run; a human
+> watches /api/state instead). At the box the flags are unnecessary; §3.5b
+> remains the primary discipline.
+>
+> **Strategy-from-slot delivered (the calendar-bound item):** 140 engine
+> drafts at slot 9 on the live board → `intel/research/draft-strategy-slot9.md`
+> (round-by-round modal picks, the R1 availability→choice ladder, roster-shape
+> flags incl. the deliberate 51% early double-TE and the Chase-passed
+> divergence, and the autodraft sensitivity re-measured on the live board:
+> zero-auto moves R1 to RB 82% and RAISES our median 2181 → 2213 — a full room
+> is good for us, and the engine needs no knob either way).
+>
+> **PRACTICE RUN 2 — same day, all 160 picks, hands-off, ZERO sync blocks.**
+> Remote configuration (locked desktop + runbook §8.0 anti-throttle flags,
+> `--no-push`, installed writer still v1.6 — the reason-text sniff carried the
+> hidden detection). The room was all-bot (every seat on ESPN autopick,
+> ~12-minute draft — a far harsher pace than the 90 s room). Result: **the
+> full divergence play executed live through the queue-first pipeline for the
+> first time** — LA D/ST at overall 89 and Dicker at 109 against a room
+> taking K/DST in R13+ — and picks 12→152 tracked the engine's queue
+> throughout (Loveland at 32 is an 18-spot reach over ESPN's board; nothing
+> but the queue explains it). Journal 160/160; 191/191 writer reports kept,
+> `hidden: true` in every one, cadence held past Chrome's 5-minute cliff; no
+> halts. **Two facts this run bought:** (1) *ESPN's Autopick arms itself* —
+> OFF until a seat's first clock expiry, ON thereafter; an UNARMED expiry
+> commits from ESPN's OWN board and ignores the Pick Queue (pick 9: queue
+> held the engine's list, ESPN took its #8 ASB), while armed autopick commits
+> the queue head at turn start. Runbook §3.5 now instructs flipping Autopick
+> ON in the lobby before pick 1 — that closes the P2 unknown. (2) *A practice
+> draft is a NEW temporary league with its own leagueId* — the real league's
+> draft URL never boots a practice room (runbook §8.0b); on draft night this
+> doesn't apply. §8.2's at-box foreground confirmation and §8.1/§8.4 remain
+> for the weekend.
 >
 > **ROOM COMPOSITION CHANGED — all 10 seats are now owned** (the two ownerless
 > seats attached ~2026-08-08 and ~2026-08-12, from `league_teams` history). The

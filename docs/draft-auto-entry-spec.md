@@ -571,7 +571,13 @@ window is vacuous), pick ≤ 10 away, **capped at ONE per draft**); **halt**
 the audit showed benign tail noise could spend a shared budget and silence
 the one push that matters); **stall** (5 min with no pick reaching the
 cockpit mid-draft; the message names both causes — paused room or dead feed
-— budget 2, re-armed by a head change). Rails: 5-min spacing on
+— budget 2, re-armed by a head change); **hidden** (added 2026-08-27 after a
+live practice run lost 12 of 16 picks to a backgrounded draft tab: the v1.8
+writer reports `document.hidden` as a structured boolean each cycle — with a
+reason-text sniff covering v1.6/1.7 writers — and 6 consecutive hidden
+reports mid-draft escalate, budget 2, spacing-railed, streak re-armed by the
+push; the cockpit page also renders a pulsing banner for both "hidden" and
+"no report for 90 s", so the alarm exists even with `--no-push`). Rails: 5-min spacing on
 deficit/stall, publish-then-record (a failed send consumes neither budget
 nor spacing, 60 s backoff — the 3.6 standing lesson), network I/O outside
 the cockpit lock (tested with a blocking publisher), episode flags recorded

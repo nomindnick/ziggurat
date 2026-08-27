@@ -1054,6 +1054,93 @@ def test_push_stall_fires_rearms_and_caps(tmp_path, make_draft_board):
     assert len(pusher.calls) == 2      # stall budget (2) exhausted
 
 
+# ------------------------------------------- the hidden-tab lane (2026-08-27)
+# The first live practice run lost 12 of 16 picks to a HIDDEN draft tab:
+# Chrome throttled the writer's timers, the queue went stale, and ESPN
+# autodrafted off its own board — with nothing anywhere turning red. Unlike
+# deficit this trigger is a fact, not a heuristic: the writer reads
+# document.hidden. These tests mirror the deficit suite's rails.
+
+
+def test_push_hidden_fires_on_a_sustained_hidden_tab(tmp_path, make_draft_board):
+    pusher = _FakePush()
+    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(5):
+        _healthy(cockpit, hidden=True)
+    assert pusher.calls == []          # a glance at another window is not a page
+    _healthy(cockpit, hidden=True)
+    assert len(pusher.calls) == 1      # 6th consecutive (~30 s): escalate
+    body = pusher.calls[0][1]
+    assert "HIDDEN" in body and "tab" in body.lower()  # names the action
+    # Budget 2, spacing-railed like stall: the streak re-arms after the push,
+    # rebuilds while the tab stays hidden, and fires once spacing allows.
+    for _ in range(10):
+        _healthy(cockpit, hidden=True)
+    assert len(pusher.calls) == 1      # inside the 5-min spacing: quiet
+    t[0] += 301
+    cockpit._last_head_change_at = t[0]  # keep the (correct) stall path quiet
+    for _ in range(6):
+        _healthy(cockpit, hidden=True)
+    assert len(pusher.calls) == 2      # second nudge after spacing
+    t[0] += 301
+    cockpit._last_head_change_at = t[0]
+    for _ in range(12):
+        _healthy(cockpit, hidden=True)
+    assert len(pusher.calls) == 2      # budget (2) exhausted: silence
+
+
+def test_push_hidden_reason_text_covers_pre_v18_writers(tmp_path, make_draft_board):
+    # v1.6/1.7 writers send no structured flag — only the appended note. The
+    # cockpit must sniff it, or the lane is dead for exactly the installed
+    # writer the alarm was built for.
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(6):
+        _thin(cockpit, ok=True, achieved=["A", "B", "C"],
+              reason="(note: tab hidden — timers throttled)")
+    assert len(pusher.calls) == 1
+    assert "HIDDEN" in pusher.calls[0][1]
+
+
+def test_push_hidden_streak_resets_when_the_tab_comes_back(tmp_path, make_draft_board):
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    for _ in range(5):
+        _healthy(cockpit, hidden=True)
+    _healthy(cockpit)                  # tab visible again: episode over
+    for _ in range(5):
+        _healthy(cockpit, hidden=True)
+    assert pusher.calls == []          # a never-resetting counter would fire here
+
+
+def test_push_hidden_ignores_the_lobby_and_the_finished_draft(tmp_path, make_draft_board):
+    # Pre-draft the operator is at the keyboard by definition (§4 checklist)
+    # — the checklist covers it, the phone must not.
+    pusher = _FakePush()
+    cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, pusher, prime_picks=0)
+    for _ in range(10):
+        _healthy(cockpit, hidden=True)
+    assert pusher.calls == []
+
+
+def test_state_exposes_hidden_flag_and_report_age(tmp_path, make_draft_board):
+    # The cockpit page's banner and "Ns ago" line read these; report_age_s is
+    # the one signal that survives the writer dying entirely.
+    pusher = _FakePush()
+    cockpit, _s, t = _push_cockpit(tmp_path, make_draft_board, pusher)
+    q = cockpit.state_json()["queue"]
+    assert q["report_age_s"] is None   # no report yet: age must not lie
+    _healthy(cockpit, hidden=True)
+    t[0] += 4.5
+    q = cockpit.state_json()["queue"]
+    assert q["last_report"]["hidden"] is True
+    assert q["report_age_s"] == 4.5
+    _healthy(cockpit)
+    q = cockpit.state_json()["queue"]
+    assert q["last_report"]["hidden"] is False
+    assert q["report_age_s"] == 0.0
+
+
 def test_push_absent_channel_records_the_decision(tmp_path, make_draft_board):
     cockpit, _s, _t = _push_cockpit(tmp_path, make_draft_board, None)
     for _ in range(6):

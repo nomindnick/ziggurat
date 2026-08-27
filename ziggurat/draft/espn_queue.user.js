@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.7
+// @version      1.8
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -47,7 +47,7 @@
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.7";
+  const VERSION = "1.8";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -739,6 +739,11 @@
       ok: ok,
       reason: reason || "",
       autopick: autopickState(),
+      // v1.8: structured visibility. The 2026-08-27 live run lost 12 of 16
+      // picks to a hidden tab; the cockpit turns a sustained true here into
+      // a loud banner + one phone push. The reason-text note (below) stays
+      // for humans reading the raw report log.
+      hidden: !!document.hidden,
     });
   }
 

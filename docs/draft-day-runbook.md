@@ -40,7 +40,7 @@ seconds.
 |---|---|---|
 | The desktop is the draft machine | you are sitting at it | settled 2026-08-10 |
 | Tampermonkey in Chrome | `ls ~/.config/google-chrome/Default/Extensions/dhdgffkkebhmkfjojejmpbldmpobfkfo` | installed |
-| Queue writer userscript **v1.7** | Tampermonkey icon → Dashboard; check the version column | **REINSTALL NEEDED** — the installed copy is v1.6 |
+| Queue writer userscript **v1.8** | Tampermonkey icon → Dashboard; check the version column | **REINSTALL NEEDED** — the installed copy is v1.6 |
 | Sync userscript **v1.1** | same dashboard | installed |
 | ESPN cookies valid | `.venv/bin/ziggurat league status` says `ok` | ok |
 
@@ -198,11 +198,22 @@ board was never wrong; it just was not being written to ESPN any more.
 So: the draft room must be the **active tab in a window that is not minimised
 and not fully behind another window**. Do not park it on a second desktop and
 do not tab away to another site in that window. Other windows in front of it
-are what `document.hidden` reacts to.
+are what `document.hidden` reacts to — and so is the **GNOME lock screen**:
+the 2026-08-27 run's `document.hidden: true` was measured to be the LOCKED
+DESKTOP (`loginctl … LockedHint=yes`) during a remotely-driven run, not a
+tabbing mistake. A remote/unattended run therefore launches Chrome with
+throttling disabled (see §8.0); at the box, an unlocked screen with the tab
+in front needs no flags.
 
-The queue writer does say so — its report carries `(note: tab hidden — timers
-throttled)` — but that text is inside the report, not on the badge, so nobody
-reads it in time. If picks stop arriving in the cockpit, check this first.
+Since v1.8 this failure is LOUD instead of silent: the writer reports
+`document.hidden` as a structured flag every cycle, and the cockpit turns a
+sustained `true` into a pulsing red **ESPN DRAFT TAB IS HIDDEN** banner across
+the top of the page plus one phone push (budget: two per draft). A second
+variant — **QUEUE WRITER SILENT** — fires on the cockpit page when no report
+has arrived for 90 s, which is what a closed tab or a dead Chrome looks like
+(a merely hidden tab still reports, throttled). The banner is the alarm, not
+the fix: the rule above still stands, and if picks stop arriving in the
+cockpit, check the tab first.
 
 ### 3.5 Confirm ESPN's Autopick toggle is ON
 
@@ -223,6 +234,19 @@ now reads the named control and says `unknown` rather than inventing a state.
 Three readings, three meanings: `ON` is what you want; `AUTOPICK OFF!` means go
 look at the toggle; **`unknown` means the writer could not find the control at
 all** — treat that as "check it yourself", not as a soft off.
+
+**How the toggle actually arms (operator knowledge + measured live,
+2026-08-27 run 2):** ESPN starts every seat with Autopick OFF; it flips ON
+the first time that seat's clock expires, and then stays ON until manually
+disabled. The two regimes commit differently, and the difference is the whole
+design: **armed autopick commits the QUEUE head at turn start; an unarmed
+expiry commits from ESPN'S OWN BOARD and ignores the queue entirely** (run 2,
+pick 9: queue held the engine's list, expiry took ESPN's #8 Amon-Ra St. Brown
+— a board pick, not a queue pick; every armed pick from 12 on tracked the
+queue, incl. an 18-spot Loveland reach and D/ST/K ~40 spots early). So the
+§4 checklist item is not a formality: **flip Autopick ON manually in the
+lobby, before pick 1** — otherwise round 1, the most valuable pick of the
+draft, is decided by ESPN's board instead of the engine.
 
 ---
 
@@ -347,6 +371,41 @@ which is a great deal more than it sounds like.
 
 ## 8. Practice-run extras
 
+### 8.0 Remote / unattended runs: disable Chrome's timer throttling
+
+A practice run driven remotely (operator away, desktop screen locked) runs
+Chrome behind the lock shield, so `document.hidden` is true for the whole
+draft and Chrome's *intensive throttling* cuts the userscripts' timers to
+once per minute after 5 minutes — the exact failure that cost the 2026-08-27
+run its second half. For any run where a human is not sitting at the box with
+the tab in front, launch Chrome as:
+
+```bash
+google-chrome --disable-background-timer-throttling   --disable-backgrounding-occluded-windows --disable-renderer-backgrounding
+```
+
+With those flags the writer keeps its ~5 s cadence even hidden (verified
+2026-08-27: steady full-rate reports well past the 5-minute cliff behind a
+locked screen). Two consequences to expect during such a run: the cockpit's
+red **TAB IS HIDDEN** banner shows throughout (it is truthful — the tab *is*
+hidden; the flags merely make that harmless), and the `hidden` push lane will
+page accordingly — so remote practice runs use `--no-push` and a human watches
+`/api/state` instead. On draft night, at the box, the flags are unnecessary
+but harmless; the §3.5b rule (tab visible and in front) remains the primary
+discipline either way.
+
+### 8.0b A practice draft is a NEW temporary league — get the URL from the launcher
+
+"League Specific Practice Draft" creates a throwaway league with its **own
+leagueId**; the real league's draft-room URL never boots a practice room (it
+loads only the auth responder and sits blank — measured 2026-08-27, run 2's
+first ten minutes). So a pre-parked tab on the real URL is useless for
+practice: launch the practice draft first, copy the room URL **from the
+launching device** (it looks like the real one but with the temporary
+leagueId), and only then point the desktop tab at it. The cockpit needs no
+restart — it binds to whatever league the sync feed claims first. On draft
+night this problem does not exist: the real room IS the known URL.
+
 ### 8.1 The mid-draft kill test (spec §8.3, unrun as of 2026-08-27)
 
 Around round 6, Ctrl-C the cockpit and leave it dead for several picks. What
@@ -401,7 +460,7 @@ discovery, which only ever looks one directory deep.
 | Our picks | 9, 12, 29, 32, 49, 52, 69, 72, 89, 92, 109, 112, 129, 132, 149, 152 |
 | Command | `.venv/bin/ziggurat draft-web --season 2026 --slot 9` |
 | Cockpit | `http://127.0.0.1:8811/` |
-| Userscripts | `/sync.user.js` (v1.1), `/queue.user.js` (v1.6) |
+| Userscripts | `/sync.user.js` (v1.1), `/queue.user.js` (v1.8) |
 | Journal | `data/draft/session-<timestamp>.jsonl` |
 | Sync token | `data/draft/sync-token.txt` — do not delete |
 | Practice venue | ESPN mock lobby → "League Specific Practice Draft" |

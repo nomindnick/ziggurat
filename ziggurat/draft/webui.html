@@ -58,6 +58,20 @@
     background: #3a2822; border: 1px solid var(--bad); font-size: 13px;
   }
 
+  /* queue-writer status + the tab alarm. The 2026-08-27 live run lost 12 of
+     16 picks to a HIDDEN draft tab: Chrome throttled the writer's timers and
+     nothing anywhere turned red. The writer's own badge lives in the tab
+     that's hidden — the cockpit is the one place the operator is looking. */
+  #writerline { min-height: 16px; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  #writerline.on { color: var(--good); }
+  #writerline.warn { color: var(--warn); }
+  #tabwarn {
+    display: none; margin: 0 0 10px; padding: 10px 14px; border-radius: 6px;
+    background: var(--bad); color: #0b1017; font-weight: 700; font-size: 15px;
+    animation: tabpulse 1.2s ease-in-out infinite;
+  }
+  @keyframes tabpulse { 50% { opacity: 0.6; } }
+
   /* quick-pick strip: the likely next picks as one-press buttons */
   #quick { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
   #quick button.qp {
@@ -123,10 +137,12 @@
   <div id="recal"></div>
   <div id="journal"></div>
 </header>
+<div id="tabwarn"></div>
 <main>
   <section>
     <h2>Enter pick</h2>
     <div id="syncline"></div>
+    <div id="writerline"></div>
     <div id="syncblocked"></div>
     <div id="entrymode"></div>
     <div id="quick"></div>
@@ -280,8 +296,42 @@ function renderState(s) {
 
   renderQuick(s);
   renderSync(s.sync);
+  renderWriter(s);
   renderAvail();
   renderRoster(s);
+}
+function renderWriter(s) {
+  // Writer telemetry (POST /api/queue/status -> state.queue) + the alarm.
+  // Hidden beats silent: a hidden tab still reports (throttled), so the
+  // structured flag is authoritative; "silent" (no report for 90 s — past
+  // Chrome's 60 s intensive-throttling cadence) means the tab is closed,
+  // the writer is dead, or Chrome is gone.
+  const q = s.queue || {};
+  const line = $("writerline"), warn = $("tabwarn");
+  const lr = q.last_report;
+  if (!q.received || !lr) {
+    line.textContent = "queue writer: no reports yet (install from /queue.user.js — ESPN autopick then drafts from the queue)";
+    line.className = "";
+    warn.style.display = "none";
+    return;
+  }
+  const age = q.report_age_s;
+  const silent = age != null && age > 90 && !s.complete;
+  const ap = lr.autopick;
+  const apTxt = ap === "on" ? " · autopick ON" : ap === "off" ? " · AUTOPICK OFF!" : " · autopick ?";
+  const okTxt = lr.ok ? `ok · ${(lr.achieved || []).length} queued` : `degraded (streak ${q.bad_streak})`;
+  const ageTxt = age == null ? "" : age < 10 ? " · just now" : ` · ${Math.round(age)}s ago`;
+  line.textContent = `queue writer: ${okTxt}${apTxt}${ageTxt}`;
+  line.className = (lr.ok && ap === "on" && !lr.hidden && !silent) ? "on" : "warn";
+  if (lr.hidden && !s.complete) {
+    warn.textContent = "⚠ ESPN DRAFT TAB IS HIDDEN — Chrome is throttling the queue writer and the queue is going stale. Click the ESPN draft tab and keep its window visible and in front.";
+    warn.style.display = "block";
+  } else if (silent) {
+    warn.textContent = `⚠ QUEUE WRITER SILENT for ${Math.round(age)}s — the ESPN draft tab is closed, its writer is dead, or Chrome is gone. Open the tab and check its badge.`;
+    warn.style.display = "block";
+  } else {
+    warn.style.display = "none";
+  }
 }
 function renderSync(sync) {
   const line = $("syncline"), blk = $("syncblocked");
