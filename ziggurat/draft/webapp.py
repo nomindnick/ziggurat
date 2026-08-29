@@ -57,6 +57,50 @@ _UI_PATH = Path(__file__).with_name("webui.html")
 _USERSCRIPT_PATH = Path(__file__).with_name("espn_sync.user.js")
 _QUEUE_USERSCRIPT_PATH = Path(__file__).with_name("espn_queue.user.js")
 
+
+def _userscript_version(path: Path) -> str:
+    """The ``@version`` the shipped userscript declares.
+
+    Read from the file rather than restated as a literal here: the version the
+    cockpit EXPECTS and the version it SERVES are then the same string by
+    construction, so bumping a script can never leave the check that polices
+    it behind.
+    """
+    for line in path.read_text(encoding="utf-8").splitlines()[:20]:
+        if line.startswith("// @version"):
+            parts = line.split(None, 2)
+            return parts[2].strip() if len(parts) > 2 else ""
+    return ""
+
+
+# Installed-vs-shipped userscript identity. Tampermonkey installs a SNAPSHOT:
+# editing the file here changes what /queue.user.js serves but NOT what the
+# browser is running, and the difference is invisible from both sides. On
+# 2026-08-27 the runbook recorded the installed writer as v1.6 against a
+# shipped v1.8 — i.e. missing the autopick-selector fix AND the hidden-tab
+# alarm — and the only check for it was "look at the Tampermonkey dashboard".
+# The scripts now name themselves in every report and the cockpit says so out
+# loud, because an 18:45 by-eye check is exactly the kind that gets skipped.
+_SYNC_SCRIPT_VERSION = _userscript_version(_USERSCRIPT_PATH)
+_QUEUE_SCRIPT_VERSION = _userscript_version(_QUEUE_USERSCRIPT_PATH)
+
+
+def _script_state(reported: str | None, expected: str) -> dict[str, Any]:
+    """Three distinguishable states, deliberately — the middle one is the
+    dangerous one and reads identically to the others if collapsed:
+
+    * ``reported is None, stale False`` — nothing has reported yet (unknown).
+    * ``reported None, stale True``     — a script IS reporting but names no
+      version: it predates self-identification, so it is stale by definition.
+    * ``reported set``                  — compared directly against shipped.
+    """
+    return {
+        "expected": expected,
+        "reported": reported or None,
+        "stale": reported is not None and reported != expected,
+    }
+
+
 # Sync bookkeeping caps: pending picks are bounded by draft size; conflict
 # messages are display-only and bounded so a pathological feed can't grow RAM.
 _MAX_CONFLICTS_SHOWN = 12
@@ -211,6 +255,11 @@ class WebCockpit:
     # a consecutive-failure streak. Step 2 records and displays; the push
     # decision (spec §9 step 4) reads the streak — it is never made here.
     _queue_last_report: dict[str, Any] | None = field(default=None, init=False)
+    # The version each userscript names in its own reports; None until one
+    # arrives, "" when a pre-self-identification script reports (see
+    # ``_script_state``).
+    _queue_version: str | None = field(default=None, init=False)
+    _sync_version: str | None = field(default=None, init=False)
     # Monotonic receipt time of the last writer report: /api/state serves its
     # age so the cockpit page can say "writer silent for Ns" — the one signal
     # that survives the writer dying entirely (a dead writer sends nothing, so
@@ -326,6 +375,8 @@ class WebCockpit:
                     ),
                     "bad_streak": self._queue_bad_streak,
                     "received": self._queue_reports_received,
+                    "script": _script_state(self._queue_version,
+                                            _QUEUE_SCRIPT_VERSION),
                     "pushes": {
                         "channel": "wired" if self.pusher is not None else "absent",
                         "sent": self._pushes_sent,
@@ -440,6 +491,10 @@ class WebCockpit:
         # board with nothing anywhere turning red.
         hidden_raw = payload.get("hidden")
         hidden = hidden_raw if type(hidden_raw) is bool else ("tab hidden" in reason)
+        # The writer names itself (v1.9+). Absent is not "unknown, assume fine":
+        # a reporting script that will not say its version predates the field,
+        # which is the stale case this check exists to catch.
+        version = str(payload.get("version") or "")[:20]
         with self._lock:
             # VALIDATE against the first-room-wins binding — NEVER establish
             # it. The binding is claimed only by the pick feed (/api/sync),
@@ -457,6 +512,7 @@ class WebCockpit:
                 )
             self._queue_reports_received += 1
             self._queue_report_at = self._clock()
+            self._queue_version = version
             self._queue_bad_streak = 0 if ok else self._queue_bad_streak + 1
             self._queue_last_report = {
                 "ok": ok,
@@ -850,6 +906,7 @@ class WebCockpit:
                     "restart the cockpit to re-bind)"
                 )
             self._sync_received += len(parsed)
+            self._sync_version = str(payload.get("version") or "")[:20]
             state_changed = False
             for pick in sorted(parsed, key=lambda p: p.overall):
                 if pick.overall > draft_size:
@@ -900,6 +957,11 @@ class WebCockpit:
                 {"overall": k, "message": self._sync_conflicts[k][0]}
                 for k in sorted(self._sync_conflicts)
             ],
+            # Unlike the writer (which reports every cycle from page load), the
+            # sync script only posts when it has picks — so this stays unknown
+            # until the draft's first pick, and the UI says that rather than
+            # alarming on it.
+            "script": _script_state(self._sync_version, _SYNC_SCRIPT_VERSION),
         }
 
     def sync_fix(self, overall: int) -> dict[str, Any]:

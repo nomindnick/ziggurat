@@ -8,6 +8,9 @@ The same pattern list is enforced twice:
   * tests/test_repo_boundary.py
 
 Paths are repo-relative with forward slashes, as printed by `git diff --name-only`.
+
+Names are not the only signal: ``looks_like_sqlite`` (below) lets the hook catch
+a database by its magic header no matter what it is called.
 """
 
 import re
@@ -48,3 +51,27 @@ BOUNDARY_PATTERNS: tuple[str, ...] = (
 def violations(paths: list[str]) -> list[str]:
     """Return the subset of `paths` that cross the public-repo boundary."""
     return [p for p in paths if any(re.search(pat, p) for pat in BOUNDARY_PATTERNS)]
+
+
+#: The first 16 bytes of every SQLite database file, by file format.
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def looks_like_sqlite(head: bytes) -> bool:
+    """Is this the start of a SQLite database file, whatever it is called?
+
+    WHY A CONTENT CHECK EXISTS AT ALL (2026-08-29). Every pattern above keys on
+    the NAME, so the guard's reach is exactly as wide as someone's imagination
+    about naming — which is the same failure the trailing-suffix note above
+    already paid for once. A database that lands in the tree under a name no
+    pattern anticipated (a scratch copy, a typo'd path, a script that wrote its
+    output to the string ``"None"``) is untracked, invisible to all three
+    enforcement points, and one ``git add -A`` from being public. The magic
+    header cannot be argued with: it is a database regardless of what it is
+    called, and the file whose exposure Rule 5 exists to prevent is 600 MB of
+    exactly this format.
+
+    This complements the name patterns; it does not replace them. A `.env` has
+    no signature to match, and `intel/` is about location, not content.
+    """
+    return head.startswith(SQLITE_MAGIC)

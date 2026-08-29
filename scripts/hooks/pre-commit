@@ -20,7 +20,40 @@ from pathlib import Path
 # in-repo package importable directly (stdlib-only import, safe everywhere).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from ziggurat.repo_guard import violations  # noqa: E402
+from ziggurat.repo_guard import (  # noqa: E402
+    SQLITE_MAGIC,
+    looks_like_sqlite,
+    violations,
+)
+
+
+def staged_head(path: str, n: int = len(SQLITE_MAGIC)) -> bytes:
+    """The first ``n`` bytes of the STAGED blob at ``path`` (b"" on any error).
+
+    The staged blob, not the working tree: what a commit publishes is what is in
+    the index, and the two can differ. Bounded — the pipe is closed after ``n``
+    bytes, so a 600 MB database costs 16 bytes and not a full read.
+    """
+    proc = subprocess.Popen(
+        ["git", "cat-file", "blob", f":{path}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        return proc.stdout.read(n) or b""
+    except OSError:
+        return b""
+    finally:
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        proc.kill()
+        proc.wait()
+
+
+def content_violations(paths: list[str]) -> list[str]:
+    """Staged files that ARE databases whatever they are named."""
+    return [p for p in paths if looks_like_sqlite(staged_head(p))]
 
 
 def staged_paths() -> list[str]:
@@ -39,10 +72,18 @@ def main(argv: list[str]) -> int:
     else:
         paths = staged_paths()
     bad = violations(paths)
-    if bad:
+    # Name patterns are only as wide as the names someone thought of; the magic
+    # header catches a database whatever it is called. Skipped for --paths,
+    # which is the pattern-check entry point and takes paths that need not exist.
+    by_content = [] if "--paths" in argv else [
+        p for p in content_violations(paths) if p not in bad
+    ]
+    if bad or by_content:
         print("COMMIT BLOCKED — league-private paths staged (this repo is public):", file=sys.stderr)
         for p in bad:
             print(f"  {p}", file=sys.stderr)
+        for p in by_content:
+            print(f"  {p}  (a SQLite database — matched by CONTENT, not by name)", file=sys.stderr)
         print("", file=sys.stderr)
         print("Unstage with: git restore --staged <path>", file=sys.stderr)
         print("These paths are the SPEC privacy boundary; do not force past this.", file=sys.stderr)

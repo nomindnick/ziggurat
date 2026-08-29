@@ -72,6 +72,16 @@
   }
   @keyframes tabpulse { 50% { opacity: 0.6; } }
 
+  /* Stale-userscript banner. Deliberately NOT the pulsing red of #tabwarn:
+     this is a pre-clock condition with a 30-second fix (reinstall), not a
+     mid-draft emergency, and two identical alarms teach the operator to read
+     neither. It is independent of #tabwarn — both can show at once, because
+     they have different fixes. */
+  #scriptwarn {
+    display: none; margin: 0 0 10px; padding: 10px 14px; border-radius: 6px;
+    background: var(--warn); color: #0b1017; font-weight: 700; font-size: 15px;
+  }
+
   /* quick-pick strip: the likely next picks as one-press buttons */
   #quick { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
   #quick button.qp {
@@ -137,6 +147,7 @@
   <div id="recal"></div>
   <div id="journal"></div>
 </header>
+<div id="scriptwarn"></div>
 <div id="tabwarn"></div>
 <main>
   <section>
@@ -297,6 +308,7 @@ function renderState(s) {
   renderQuick(s);
   renderSync(s.sync);
   renderWriter(s);
+  renderScripts(s);
   renderAvail();
   renderRoster(s);
 }
@@ -321,7 +333,9 @@ function renderWriter(s) {
   const apTxt = ap === "on" ? " · autopick ON" : ap === "off" ? " · AUTOPICK OFF!" : " · autopick ?";
   const okTxt = lr.ok ? `ok · ${(lr.achieved || []).length} queued` : `degraded (streak ${q.bad_streak})`;
   const ageTxt = age == null ? "" : age < 10 ? " · just now" : ` · ${Math.round(age)}s ago`;
-  line.textContent = `queue writer: ${okTxt}${apTxt}${ageTxt}`;
+  const ver = (q.script || {}).reported;
+  const verTxt = ver ? ` · v${ver}` : "";
+  line.textContent = `queue writer: ${okTxt}${apTxt}${verTxt}${ageTxt}`;
   line.className = (lr.ok && ap === "on" && !lr.hidden && !silent) ? "on" : "warn";
   if (lr.hidden && !s.complete) {
     warn.textContent = "⚠ ESPN DRAFT TAB IS HIDDEN — Chrome is throttling the queue writer and the queue is going stale. Click the ESPN draft tab and keep its window visible and in front.";
@@ -332,6 +346,31 @@ function renderWriter(s) {
   } else {
     warn.style.display = "none";
   }
+}
+function renderScripts(s) {
+  // Installed-vs-shipped userscript identity. Tampermonkey runs a SNAPSHOT of
+  // each script, so editing the repo copy changes what the cockpit serves and
+  // nothing about what the browser executes — a drift invisible from both
+  // sides. On 2026-08-27 the installed writer was v1.6 against a shipped v1.8
+  // (no autopick-selector fix, no hidden-tab alarm) and the only check was an
+  // operator reading the Tampermonkey dashboard at 18:45.
+  //
+  // `stale` is only ever true for a script that ACTUALLY REPORTED and
+  // disagreed — including one that reports no version at all, which means it
+  // predates self-identification. A script that has not reported yet is
+  // unknown, not stale, and says nothing: the sync script only posts once it
+  // has picks, so before the draft's first pick silence is the correct state
+  // and alarming on it would be crying wolf.
+  const el = $("scriptwarn");
+  const bad = [];
+  const q = (s.queue || {}).script;
+  const y = (s.sync || {}).script;
+  if (q && q.stale) bad.push(`queue writer is ${q.reported ? "v" + q.reported : "an old build (it reports no version)"}, shipped is v${q.expected}`);
+  if (y && y.stale) bad.push(`sync script is ${y.reported ? "v" + y.reported : "an old build (it reports no version)"}, shipped is v${y.expected}`);
+  if (!bad.length) { el.style.display = "none"; return; }
+  el.textContent = "⚠ STALE USERSCRIPT — " + bad.join("; ")
+    + ". Reinstall from /queue.user.js and /sync.user.js (Tampermonkey will offer to update), then reload the ESPN draft tab.";
+  el.style.display = "block";
 }
 function renderSync(sync) {
   const line = $("syncline"), blk = $("syncblocked");

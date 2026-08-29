@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ziggurat.repo_guard import violations
+from ziggurat.repo_guard import SQLITE_MAGIC, looks_like_sqlite, violations
 
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "scripts" / "hooks" / "pre-commit"
@@ -151,3 +151,78 @@ def test_nothing_tracked_crosses_the_boundary():
     ).stdout
     tracked = [p for p in out.split("\0") if p]
     assert violations(tracked) == []
+
+
+# ---------------------------------------------------- content-based detection
+# The name patterns reach exactly as far as the names someone thought of. That
+# gap has already cost this repo once (the trailing-suffix note in repo_guard),
+# and a database can land in the tree under a name nobody anticipated — a
+# scratch copy, a typo'd path, a script that wrote its output to the string
+# "None". The magic header settles it regardless of the name.
+
+
+def test_the_sqlite_magic_is_the_real_file_signature():
+    """Read from an ACTUAL database rather than trusting the constant."""
+    db = REPO / "db" / "ziggurat.sqlite"
+    if not db.exists():
+        pytest.skip("no local database to sample")
+    assert looks_like_sqlite(db.read_bytes()[:16])
+
+
+def test_a_database_named_anything_is_still_detected():
+    assert looks_like_sqlite(SQLITE_MAGIC + b"\x10\x00\x01\x01")
+    # ...and the check is a PREFIX test, so a short read still decides.
+    assert looks_like_sqlite(SQLITE_MAGIC)
+
+
+def test_ordinary_files_are_not_flagged_as_databases():
+    for head in (b"", b"# a markdown file\n", b"\x89PNG\r\n\x1a\n",
+                 b"SQLite format 2\x00", b"sqlite format 3\x00",
+                 b"-- SQL text mentioning SQLite format 3"):
+        assert not looks_like_sqlite(head), head
+
+
+@needs_git
+def test_the_hook_blocks_a_database_whose_NAME_is_allowed(tmp_path):
+    """End-to-end through the real hook, in a throwaway repo.
+
+    The point is the pairing: `violations` ALLOWS this path by name, and the
+    commit is blocked anyway. Anything less than both halves is a test that
+    would still pass if the content check were deleted.
+    """
+    repo = tmp_path / "r"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, text=True, check=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "t")
+
+    name = "scratch-copy"           # matches no boundary pattern, deliberately
+    assert violations([name]) == [], "precondition: the NAME must be allowed"
+    (repo / name).write_bytes(SQLITE_MAGIC + b"\x10\x00" + b"\x00" * 200)
+    run("git", "add", name)
+
+    out = subprocess.run(
+        [sys.executable, str(HOOK)], cwd=repo, capture_output=True, text=True
+    )
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert name in out.stderr
+    assert "CONTENT" in out.stderr
+
+
+@needs_git
+def test_the_hook_still_passes_an_ordinary_commit(tmp_path):
+    """The content check must not block normal work (no false positives)."""
+    repo = tmp_path / "r2"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, text=True, check=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "t")
+    (repo / "notes.md").write_text("nothing private here\n")
+    (repo / "mod.py").write_text("VALUE = 1\n")
+    run("git", "add", "notes.md", "mod.py")
+    out = subprocess.run(
+        [sys.executable, str(HOOK)], cwd=repo, capture_output=True, text=True
+    )
+    assert out.returncode == 0, out.stdout + out.stderr

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat draft sync
 // @namespace    ziggurat
-// @version      1.1
+// @version      1.2
 // @description  Mirror ESPN draft-room picks (Pick History panel) into the local Ziggurat cockpit. Read-only on the ESPN page; picks flow one way, to 127.0.0.1.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -13,6 +13,14 @@
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
+  // v1.2: self-identification only (no behaviour change). The cockpit diffs
+  // this against the shipped file so a stale install is visible instead of
+  // being an 18:45 by-eye check of the Tampermonkey dashboard. Note this
+  // rides the pick batch, so it is unknown until the draft's FIRST pick —
+  // deliberately, because a picks-free "hello" POST would claim the
+  // first-room-wins binding (the exact defect the audit fixed on the writer's
+  // telemetry endpoint).
+  const VERSION = "1.2";
   const POLL_MS = 1200;
   // A pick the cockpit repeatedly refuses to accept OR park (e.g. it parses as
   // malformed server-side) is abandoned after this many sends and flagged —
@@ -106,7 +114,7 @@
           "Content-Type": "application/json",
           "X-Zig-Sync-Token": TOKEN,
         },
-        data: JSON.stringify({ league: LEAGUE, picks }),
+        data: JSON.stringify({ league: LEAGUE, picks, version: VERSION }),
         timeout: 8000,
         onload: (resp) => {
           inFlight = false;

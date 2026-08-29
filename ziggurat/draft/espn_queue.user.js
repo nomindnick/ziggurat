@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ziggurat queue writer
 // @namespace    ziggurat
-// @version      1.8
+// @version      1.9
 // @description  Keep ESPN's Pick Queue equal to the cockpit's desired queue (GET /api/queue) so ESPN's own autopick commits Ziggurat's pick when the clock expires. Never clicks Draft. Auto-entry spec §6.
 // @match        https://fantasy.espn.com/football/draft*
 // @grant        GM_xmlhttpRequest
@@ -35,6 +35,15 @@
 // drifts it with its own need suggestions. The writer now sets the filter to
 // the target's position before every search and restores All Pos. after.
 //
+// v1.9 — pre-draft hardening. The writer now NAMES ITSELF in every status
+// report, because Tampermonkey runs a snapshot: editing this file changes
+// what /queue.user.js serves and not one byte of what the browser executes.
+// On 2026-08-27 the runbook recorded the installed copy as v1.6 against a
+// shipped v1.8 — missing both the autopick-selector fix and the hidden-tab
+// alarm — and the only check for that was an operator reading the
+// Tampermonkey dashboard by eye at 18:45. The cockpit now compares this
+// string against the shipped file and says so on the page.
+//
 // v1.6 — run 3 (the first run that EXECUTED v1.5; spec §6e). The writer was
 // removing its own correct DST adds: the queue row's concatenated text
 // ("169Texans D/STHOUD/STRemove") failed a word-boundary-anchored is-DST
@@ -47,7 +56,7 @@
   "use strict";
   const COCKPIT = "http://127.0.0.1:{{PORT}}";
   const TOKEN = "{{TOKEN}}";
-  const VERSION = "1.8";
+  const VERSION = "1.9";
 
   const TICK_MS = 1500;         // watch cadence (history signature + due polls)
   const POLL_MS = 5000;         // /api/queue refresh even when nothing observed
@@ -739,6 +748,10 @@
       ok: ok,
       reason: reason || "",
       autopick: autopickState(),
+      // v1.9: which script is ACTUALLY running in this browser. The cockpit
+      // diffs it against the shipped file — a silently stale install is
+      // otherwise invisible from both sides.
+      version: VERSION,
       // v1.8: structured visibility. The 2026-08-27 live run lost 12 of 16
       // picks to a hidden tab; the cockpit turns a sustained true here into
       // a loud banner + one phone push. The reason-text note (below) stays

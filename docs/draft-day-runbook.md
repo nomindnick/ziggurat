@@ -40,12 +40,31 @@ seconds.
 |---|---|---|
 | The desktop is the draft machine | you are sitting at it | settled 2026-08-10 |
 | Tampermonkey in Chrome | `ls ~/.config/google-chrome/Default/Extensions/dhdgffkkebhmkfjojejmpbldmpobfkfo` | installed |
-| Queue writer userscript **v1.8** | Tampermonkey icon → Dashboard; check the version column | **REINSTALL NEEDED** — the installed copy is v1.6 |
-| Sync userscript **v1.1** | same dashboard | installed |
+| Queue writer userscript **v1.9** | the cockpit page says so (below) | verify Monday |
+| Sync userscript **v1.2** | the cockpit page says so (below) | verify Monday |
 | ESPN cookies valid | `.venv/bin/ziggurat league status` says `ok` | ok |
 
-If either version differs from the table, reinstall it (below) — the versions
-here are checked against the shipped files by
+**You no longer check these by eye.** Since queue writer v1.9 / sync v1.2 each
+script names itself in every report and the cockpit diffs that against the
+shipped file, so a stale install announces itself as an amber **STALE
+USERSCRIPT** banner across the top of the cockpit page, naming both versions
+and the fix. Green means the browser is running what this repo ships.
+
+This matters because Tampermonkey runs a **snapshot**: editing the script here
+changes what `/queue.user.js` serves and not one byte of what Chrome executes.
+That drift is invisible from both sides, and it had already happened — on
+2026-08-27 the installed writer was **v1.6 against a shipped v1.8**, i.e.
+missing both the autopick-selector fix and the hidden-tab alarm, with nothing
+but this table and an operator's memory standing between that and a live draft.
+
+Two honest limits of the banner: the **writer** reports from the moment the
+ESPN tab loads, so its version is confirmed before the clock starts; the
+**sync** script only posts once it has picks, so it reads "not reported yet"
+until the draft's first pick and is confirmed a few picks in. Neither script
+having reported is shown as unknown, never as stale — a banner that cries wolf
+during the pre-clock window is one you will have stopped reading by 19:00.
+
+The versions in the table are checked against the shipped files by
 `tests/test_draft_runbook.py::test_the_userscript_versions_match_the_shipped_files`,
 so this table is wrong only if the install is stale, not if the doc is.
 
@@ -64,6 +83,21 @@ serve time.
 database — it reads the board and appends to a local journal — so the cadence
 and the draft cannot collide. The 23:15 league sync is how the completed draft
 gets captured (§7).
+
+The reverse direction needs checking too, and was (2026-08-29): a **resume
+(§6) re-reads the board from the database** at the journal header's `as_of`,
+so a timer that rewrote `espn_ranks` mid-draft would hand the resumed session a
+different board than the one it started on. It cannot happen on Monday —
+`espn_ranks` is in the `daily` group (07:20 +≤15 min), the `gameday` group is
+weather only, and **no ingest timer fires between 18:00 and 23:00 at all**. The
+board is therefore frozen across the whole draft window, restart included. The
+one timer that does fire in that window is the 20-minute **alerts** tick, which
+only reads and pushes news.
+
+Which is worth knowing for a second reason: **your phone will get ordinary
+injury-news alerts during the draft**, on the same ntfy topic as the cockpit's
+own escalations. A push during the draft is not necessarily about the draft —
+read the text before reacting to it.
 
 ---
 
@@ -268,6 +302,7 @@ Everything in one place. On draft night, be here by **18:45**.
 - [ ] cockpit running, terminal open, page loads at `http://127.0.0.1:8811/`
 - [ ] exactly one ESPN draft room tab open
 - [ ] both badges present, queue badge green and `LIVE`
+- [ ] **no amber STALE USERSCRIPT banner** on the cockpit page (§1)
 - [ ] the draft tab is the **active, visible, unobscured** tab (§3.5b)
 - [ ] ESPN **Autopick toggle ON** — and see §3.5 on trusting that reading
 - [ ] the queue writer has populated a non-empty ESPN Pick Queue
@@ -480,7 +515,7 @@ discovery, which only ever looks one directory deep.
 | Our picks | 9, 12, 29, 32, 49, 52, 69, 72, 89, 92, 109, 112, 129, 132, 149, 152 |
 | Command | `.venv/bin/ziggurat draft-web --season 2026 --slot 9` |
 | Cockpit | `http://127.0.0.1:8811/` |
-| Userscripts | `/sync.user.js` (v1.1), `/queue.user.js` (v1.8) |
+| Userscripts | `/sync.user.js` (v1.2), `/queue.user.js` (v1.9) |
 | Journal | `data/draft/session-<timestamp>.jsonl` |
 | Sync token | `data/draft/sync-token.txt` — do not delete |
 | Practice venue | ESPN mock lobby → "League Specific Practice Draft" |

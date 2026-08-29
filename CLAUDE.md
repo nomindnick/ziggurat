@@ -498,21 +498,38 @@ Calendar anchors (draft SCHEDULED 2026-08-10; all confirmed against ESPN's own
   ingested `schedules` table; Week 1 runs through 09-14. This is the Phase 3
   hard deadline and the Checkpoint 3 trigger.
 
-Room composition as of 2026-08-27: **all 10 seats are owned.** The two
-ownerless seats attached ~2026-08-08 and ~2026-08-12 (read from `league_teams`
-history, not reported by ESPN). This RETIRES the note that stood here from
-2026-08-10: the 2.2 opponent model's `autodraft_fraction = 0.2` is a 2025 fit
-(2 of 10 seats autodrafted that year) and no longer describes this room. It is
-not zeroed — owned is not the same as *present*, and a manager who no-shows
-autodrafts anyway — but it is now an **assumption, not an observation**, and the
-sim's ~2 random autodraft seats are the softest input to every survival
-estimate. The sensitivity is real at our slot: forcing autodrafters to 0 moves
-round 1 from RB 66% to RB **92%** and drops elite RBs to pick 9 more often.
+Room composition, re-verified live 2026-08-29: **all 10 seats are owned**
+(10/10 in `mTeam`; the two ownerless seats attached ~2026-08-08 and ~2026-08-12,
+read from `league_teams` history, not reported by ESPN). So the 2.2 opponent
+model's `autodraft_fraction = 0.2` — a 2025 fit, 2 of 10 seats autodrafted, both
+of them ownerless — is now an **assumption, not an observation**.
 
-**Draft slot: 9 of 10** (read 2026-08-27 from `draftSettings.pickOrder` +
-`resolve_own_team(SWID)`; the array is now the real post-hat-draw order, not the
-placeholder). Overall picks 9, 12, 29, 32, 49, 52, 69, 72, 89, 92, 109, 112,
-129, 132, 149, 152. Draft-night command is `ziggurat draft-web --season 2026
+**Measured 2026-08-29 and CLOSED: the prior stays at 0.2 unchanged.** The note
+that stood here conflated two different quantities, and only one of them is
+tunable:
+
+- the room's TRUE autodraft count changes *the board we face* (top-pick share at
+  9 moves 41% → 60% between 0 and 3 autodrafters). Unknowable until Monday and
+  not a parameter — nothing to set.
+- the ENGINE'S BELIEF about that count is the only tunable, and it is
+  **decision-irrelevant**: paired on identical room draws (N=80, R=256, live
+  board, slot 9), believing anything in 0.0–0.3 recommends the *same player* in
+  77–80 of 80 draws at pick 9 and 79–80 of 80 at pick 12, whatever the room
+  actually does. Only an implausible 0.4 moves picks, and every pick it moves
+  goes to a lower-VOR player — 0.2 sits on the safe side.
+
+Two structural facts that made this worth measuring rather than assuming, and
+which remain true: live recalibration re-fits **only `reach_sigma`**, never this
+prior, and it does not engage until 20 room picks (`LIVE_RECAL_MIN_PICKS`) — so
+picks 9 and 12 are decided *entirely* on the cold-start 2025 priors. That is
+fine, because the belief does not matter; it would not be fine if it did.
+Numbers and caveats: gitignored `intel/research/autodraft-prior-2026-08-29.md`.
+
+**Draft slot: 9 of 10** (re-read live 2026-08-29 from `draftSettings.pickOrder`
++ `resolve_own_team(SWID)` — the post-hat-draw order, re-confirmed two days out
+along with the date, the 90 s clock, SNAKE/MANUAL, and 10/10 owned seats).
+Overall picks 9, 12, 29, 32, 49, 52, 69, 72, 89, 92, 109, 112, 129, 132, 149,
+152. Draft-night command is `ziggurat draft-web --season 2026
 --slot 9` — **no `--pick-order`**: seat ids are arbitrary internal labels and
 synced picks arrive positionally, so identity order is provably equivalent (the
 16 overall picks are identical either way). That removes what the plan called

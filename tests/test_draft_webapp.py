@@ -10,12 +10,14 @@ recompute, and verbatim reasons in the state payload (Rule 6).
 """
 
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
 
 import pytest
 
+from ziggurat.draft import webapp
 from ziggurat.draft.session import DraftSession
 from ziggurat.draft.webapp import serve
 
@@ -1279,3 +1281,112 @@ def test_push_fires_through_the_http_surface(tmp_path, make_draft_board):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# --------------------------------------------- installed-vs-shipped userscripts
+# Tampermonkey runs a SNAPSHOT of each script. Editing the repo copy changes
+# what /queue.user.js serves and not one byte of what the browser executes, and
+# the drift is invisible from both sides — on 2026-08-27 the runbook recorded
+# the installed writer as v1.6 against a shipped v1.8 (missing the
+# autopick-selector fix AND the hidden-tab alarm) with nothing but an operator
+# reading the Tampermonkey dashboard at 18:45 standing between that and a live
+# draft. The scripts now name themselves and the cockpit diffs them.
+
+
+def test_a_script_that_has_not_reported_is_unknown_not_stale(cockpit):
+    base, _session = cockpit
+    st = _get(base, "/api/state")
+    for block in (st["queue"]["script"], st["sync"]["script"]):
+        assert block["reported"] is None
+        # Silence is not evidence of staleness. The sync script in particular
+        # does not post until the draft's first pick, so alarming here would
+        # put a false banner on the page for the whole pre-clock window — the
+        # way an alarm gets trained out of an operator.
+        assert block["stale"] is False
+        assert block["expected"]
+
+
+def test_the_writer_naming_the_shipped_version_reads_clean(cockpit):
+    base, session = cockpit
+    shipped = webapp._QUEUE_SCRIPT_VERSION
+    _queue_status_post(base, session,
+                       {"achieved": ["A", "B", "C"], "ok": True, "version": shipped})
+    block = _get(base, "/api/state")["queue"]["script"]
+    assert block == {"expected": shipped, "reported": shipped, "stale": False}
+
+
+def test_a_writer_naming_an_old_version_reads_stale(cockpit):
+    base, session = cockpit
+    _queue_status_post(base, session,
+                       {"achieved": ["A", "B", "C"], "ok": True, "version": "1.6"})
+    block = _get(base, "/api/state")["queue"]["script"]
+    assert block["reported"] == "1.6"
+    assert block["stale"] is True
+
+
+def test_a_writer_that_reports_no_version_at_all_reads_stale(cockpit):
+    """The v1.6/v1.7 case, and the whole reason the check exists: a script old
+    enough to lack the field is exactly the script this catches. Absent must
+    NOT collapse into the not-yet-reported state above."""
+    base, session = cockpit
+    _queue_status_post(base, session, {"achieved": ["A", "B", "C"], "ok": True})
+    block = _get(base, "/api/state")["queue"]["script"]
+    assert block["reported"] is None
+    assert block["stale"] is True
+
+
+def test_the_sync_script_version_rides_the_pick_batch(cockpit):
+    base, session = cockpit
+    shipped = webapp._SYNC_SCRIPT_VERSION
+    token = (session.journal_path.parent / "sync-token.txt").read_text().strip()
+    req = urllib.request.Request(
+        base + "/api/sync",
+        data=json.dumps({"league": "", "picks": [], "version": shipped}).encode(),
+        headers={"Content-Type": "application/json", "X-Zig-Sync-Token": token},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        json.loads(r.read())
+    block = _get(base, "/api/state")["sync"]["script"]
+    assert block == {"expected": shipped, "reported": shipped, "stale": False}
+
+
+def test_a_junk_version_cannot_grow_the_report(cockpit):
+    base, session = cockpit
+    _queue_status_post(base, session,
+                       {"achieved": [], "ok": True, "version": "9" * 500})
+    block = _get(base, "/api/state")["queue"]["script"]
+    assert len(block["reported"]) <= 20
+    assert block["stale"] is True
+
+
+def test_each_userscript_reports_the_version_its_header_declares():
+    """The header, the in-script constant, and the value actually SENT must be
+    one string. Bumping ``@version`` while the payload keeps sending the old
+    constant would produce a permanently-stale banner on a correct install —
+    an alarm that is wrong is worse than no alarm."""
+    for path, sender in (
+        (webapp._QUEUE_USERSCRIPT_PATH, "version: VERSION"),
+        (webapp._USERSCRIPT_PATH, "version: VERSION"),
+    ):
+        source = path.read_text(encoding="utf-8")
+        header = re.search(r"^// @version\s+(\S+)", source, re.M)
+        assert header, f"{path.name} has no @version header"
+        const = re.search(r'const VERSION = "([^"]+)"', source)
+        assert const, f"{path.name} declares no VERSION constant"
+        assert const.group(1) == header.group(1), (
+            f"{path.name}: @version {header.group(1)} != VERSION "
+            f"{const.group(1)}"
+        )
+        assert sender in source, f"{path.name} never sends its version"
+
+
+def test_the_cockpit_expects_exactly_what_it_serves():
+    """The expected version is parsed from the shipped file, so it cannot be
+    left behind by a bump — this pins that it is parsed, not restated."""
+    assert webapp._QUEUE_SCRIPT_VERSION == re.search(
+        r"^// @version\s+(\S+)",
+        webapp._QUEUE_USERSCRIPT_PATH.read_text(encoding="utf-8"), re.M).group(1)
+    assert webapp._SYNC_SCRIPT_VERSION == re.search(
+        r"^// @version\s+(\S+)",
+        webapp._USERSCRIPT_PATH.read_text(encoding="utf-8"), re.M).group(1)
