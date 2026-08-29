@@ -461,19 +461,43 @@ button appears. Beginner 10-team H2H-Points PPR snake mocks matched the
 league's roster shape (16 rounds, standard lineup) but ran a 30 s pick
 clock.
 
-### 8.1 The mid-draft kill test (spec §8.3, unrun as of 2026-08-27)
+### 8.1 The mid-draft kill test (spec §8.3) — RUN 2026-08-29, PASSED
 
-Around round 6, Ctrl-C the cockpit and leave it dead for several picks. What
-must hold: **the last good queue still carries the remaining picks**, and no
-wrong player is committed. Then resume (§6) and confirm the replayed state
-matches ESPN.
+`SIGKILL` at overall 45; ESPN drafted picks 49 and 52 from the last-written
+queue with no cockpit alive. Resume in 4 s, 0 conflicts.
 
-### 8.2 The refusal test (spec §8.4, live half unrun as of 2026-08-27)
+**What it taught, and the reason depth matters:** rivals took the top FOUR rows
+of our queue in the four picks between the kill and our turn. ESPN reached row 4
+for pick 49 and row 5 for 52. **A queue sitting at the `K_MIN=3` floor would
+have been exhausted and pick 49 would have fallen through to ESPN's own board.**
 
-Feed a recommendation that cannot resolve to an ESPN row. Assert: it refuses
-rather than guessing, the queue stays valid (the writer skips and takes the next
-recommendation), and **exactly one** push fires — not zero, not a stream. Run
-this one *without* `--no-push`.
+Measured the same day over a full draft: off-turn queue depth is median 4, but
+**22% of the time below the floor and 8% empty**, worst continuous stretch 19 s.
+On-turn thinness is excluded — the writer structurally cannot add during your
+own clock, and autopick reads the queue at turn start, so it is harmless.
+
+That 22% is at CPU practice pace, where the writer reports once per ~4 picks. On
+draft night it cycles every ~5 s against a 90 s clock — ~70x more refill
+opportunity — so expect far healthier depth. **That is arithmetic, not a
+measurement.** If you ever restart the cockpit mid-draft, glance at the writer
+line first: restarting into a thin queue is the one combination these two
+findings say is dangerous.
+
+### 8.2 The refusal test (spec §8.4) — RUN 2026-08-29, PASSED in two halves
+
+Refusal: six players poisoned at the `espn_names` seam. The writer searched,
+got `not_in_pool`, and skipped — **no poisoned name ever reached the queue and
+nothing similar was substituted**. Queue stayed usable throughout.
+
+Push: **a practice draft cannot test this.** The deficit push needs 6
+consecutive thin reports while your pick is within 10; at CPU pace only 2-3 land
+in that window before your turn resets the streak. Zero pushes in a practice run
+is uninformative. Driven directly instead: fired on exactly the 6th report,
+`ntfy=200`, and 8 further reports added none — the one-per-draft budget holds.
+First time the draft cockpit's ntfy path has fired live.
+
+Harnesses for both are in gitignored `intel/research/` (see
+`acceptance-tests-2026-08-29.md`).
 
 ### 8.3 Clean up afterwards
 
@@ -502,6 +526,17 @@ discovery, which only ever looks one directory deep.
   selectors §3 depends on. A clean rehearsal on Saturday proves nothing about
   Monday. This is not paranoia, it is the reason the fallback ladder in §6 has
   four rungs.
+- **`no_control` add failures** — the writer finds a player's row but it offers
+  no queue button. Second-commonest cause of a thinning queue (14 of 51 add
+  failures in the 2026-08-29 run), clustered by cycle and weighted late. The
+  attractive explanation — ESPN's position maximums — was tested and is WRONG
+  (we held 4 RBs against a max of 8 at most of the failures). Accepted for
+  Monday because the degradation is the designed one: the add is charged, the
+  player is skipped after two failures, the next recommendation is taken, and it
+  never produces a wrong pick. The real defect is diagnostic — the label
+  collapses "no queue button exists" with "the button is disabled", which have
+  different causes. Split it and re-measure after the draft, not 48 hours
+  before it.
 
 ---
 

@@ -539,8 +539,15 @@ it.
 **The executable procedure for draft night — and for every practice run before
 it — is [`docs/draft-day-runbook.md`](./docs/draft-day-runbook.md)**: setup,
 preflight, launch order, the three flags never to pass, the badge and Autopick
-checks, the four-rung fallback ladder, and the two acceptance tests still unrun
-(§8.3 mid-draft kill, §8.4 injected refusal). It is treated as an interface,
+checks, and the four-rung fallback ladder. **Both remaining acceptance tests
+were run 2026-08-29 and PASSED** (§8.3 mid-draft kill; §8.4 refusal, whose push
+half a practice draft structurally cannot reach and which was therefore driven
+directly — the first live firing of the draft cockpit's ntfy path). The kill
+test's finding is the one to carry: rivals ate the top FOUR queue rows in the
+four picks between the kill and our turn, so **queue DEPTH is the safety
+margin**, and off-turn depth sat below the K_MIN=3 floor 22% of a practice
+draft. Draft-night cadence should make that far healthier (~70x more refill
+opportunity at 90 s/pick) but that is arithmetic, not measurement. It is treated as an interface,
 not prose — `tests/test_draft_runbook.py` re-derives every command it quotes
 against the real CLI and checks the userscript versions it names against the
 shipped files, so a renamed flag or a bumped script rots it loudly instead of
