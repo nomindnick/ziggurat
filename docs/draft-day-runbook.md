@@ -476,12 +476,17 @@ Measured the same day over a full draft: off-turn queue depth is median 4, but
 On-turn thinness is excluded — the writer structurally cannot add during your
 own clock, and autopick reads the queue at turn start, so it is harmless.
 
-That 22% is at CPU practice pace, where the writer reports once per ~4 picks. On
-draft night it cycles every ~5 s against a 90 s clock — ~70x more refill
-opportunity — so expect far healthier depth. **That is arithmetic, not a
-measurement.** If you ever restart the cockpit mid-draft, glance at the writer
-line first: restarting into a thin queue is the one combination these two
-findings say is dangerous.
+That 22% was at CPU practice pace, where the writer reported once per ~4 picks.
+**Re-measured the same evening against a 30 s human clock and the concern
+largely dissolves**: 1 report per 0.89 picks, median depth **7 of a max 8**,
+below the floor only **4%** of the time and empty 3%. `no_control` add failures
+fell from 14 to 3 over the same comparison. Monday's 90 s clock is 3x slower
+again, so expect healthier still. The CPU-pace numbers were a pace artifact, as
+the cadence arithmetic predicted — this is now measured, not inferred.
+
+Still true, and the reason to keep the finding: if you ever restart the cockpit
+mid-draft, glance at the writer line before walking away. Restarting into a thin
+queue is the one combination these findings say is dangerous.
 
 ### 8.2 The refusal test (spec §8.4) — RUN 2026-08-29, PASSED in two halves
 
@@ -498,6 +503,29 @@ First time the draft cockpit's ntfy path has fired live.
 
 Harnesses for both are in gitignored `intel/research/` (see
 `acceptance-tests-2026-08-29.md`).
+
+### 8.2b The notification sidecar (prototype — use it on draft night)
+
+`intel/research/draft_sidecar.py` (gitignored, persists across sessions). Runs
+BESIDE the cockpit, changes no shipped code, and publishes through the same
+`make_draft_pusher` egress so the Rule-5 scrub still applies:
+
+```bash
+.venv/bin/python intel/research/draft_sidecar.py --slot 9 --heartbeat-min 10
+```
+
+It exists because the shipped push lane is tuned for a season of waiver quiet,
+which is the wrong setting for one evening when the operator is putting a child
+to bed and wants to know the thing has not silently died. It sends **each of
+your picks as it lands** (16, naturally bounded, and the signal the operator
+actually wants), a **heartbeat every N minutes** naming facts rather than "OK",
+and rate-limited alarms for: pick feed blocked, writer silent, tab hidden,
+autopick not ON, thin queue near your pick, cockpit unresponsive.
+
+Validated end to end on the 2026-08-29 dress rehearsal (public mock, 30 s clock,
+operator away): 18 pushes, all `ntfy=200`, correct throughout. Fold the useful
+parts into the cockpit's own push lane after the draft — the shipped budgets
+(`_PUSH_DEFICIT_MAX=1` etc.) remain unchanged and untuned for draft night.
 
 ### 8.3 Clean up afterwards
 
