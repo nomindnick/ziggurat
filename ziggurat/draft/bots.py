@@ -257,25 +257,62 @@ class BoardState:
         self._vor_head[pos] = i
         return entries[i] if i < len(entries) else None
 
+    # ------------------------------------------------------ cross-position order
+    #
+    # DETERMINISM (item 3.11, 2026-08-31). Every "best across several positions"
+    # answer below scans ``allowed``, which every caller in this package passes as
+    # a SET of position strings (``allowed_positions`` returns a set). Python
+    # randomises str hashing per process, so a set of positions iterates in a
+    # different order under every PYTHONHASHSEED — verified: four seeds, four
+    # distinct orders. The old form kept the FIRST strictly-better entry, so an
+    # exact cross-position tie was resolved by that iteration order and the same
+    # (state, seed) could draft two different players in two processes.
+    #
+    # The ties are real rather than theoretical, but the COUNT this comment used
+    # to give was wrong and the correction matters, because it changes how much
+    # the fix is worth. ``simulator.load_board`` floors every UNPRICED
+    # ESPN-universe row at one identical ``vor`` — that is **35** rows on the live
+    # 2026 board (measured 2026-08-31), not 1,215; 1,215 is the count of rows on
+    # the ``<POS>:<rank>`` ID fallback, a different quantity that was conflated
+    # with this one. Those 35 sit at ESPN rank 410 and worse, so the tier is not
+    # reached inside a 160-pick draft. So this fix buys nothing on TONIGHT'S
+    # board — it is kept because a total order costs nothing, because the board is
+    # re-pulled daily and the count is an input nobody controls, and because the
+    # cockpit's journal replay promises bit-identical reconstruction in a NEW
+    # process, i.e. under a NEW hash seed.
+    #
+    # The fix is the engine's own tie-break ladder (``engine.recommend``'s sort
+    # key), applied here: the primary axis, then the other axis, then
+    # ``player_id`` lexicographic — a TOTAL order over distinct players that
+    # contains no set, no dict and no wall clock. The cockpit's journal replay
+    # promises bit-identical reconstruction; this is what makes that promise
+    # survive a restart in a fresh process.
+
+    @staticmethod
+    def _rank_key(e: BoardEntry) -> tuple[int, float, str]:
+        """Total order for "best by ESPN rank": lower rank, then higher VOR, then id."""
+        return (e.espn_overall_rank, -e.vor, e.player_id)
+
+    @staticmethod
+    def _vor_key(e: BoardEntry) -> tuple[float, int, str]:
+        """Total order for "best by VOR": higher VOR, then lower ESPN rank, then id."""
+        return (-e.vor, e.espn_overall_rank, e.player_id)
+
     def best_by_rank(self, allowed: Iterable[str]) -> BoardEntry | None:
-        best: BoardEntry | None = None
-        for pos in allowed:
-            e = self.front_rank(pos)
-            if e is not None and (best is None or e.espn_overall_rank < best.espn_overall_rank):
-                best = e
-        return best
+        fronts = [e for e in (self.front_rank(pos) for pos in allowed) if e is not None]
+        return min(fronts, key=self._rank_key) if fronts else None
 
     def best_by_vor(self, allowed: Iterable[str]) -> BoardEntry | None:
-        best: BoardEntry | None = None
-        for pos in allowed:
-            e = self.front_vor(pos)
-            if e is not None and (best is None or e.vor > best.vor):
-                best = e
-        return best
+        fronts = [e for e in (self.front_vor(pos) for pos in allowed) if e is not None]
+        return min(fronts, key=self._vor_key) if fronts else None
 
     def window_by_rank(self, allowed: Iterable[str], w: int) -> list[BoardEntry]:
-        """Up to ``w`` best available entries by ESPN rank across ``allowed``."""
-        gathered: list[tuple[int, BoardEntry]] = []
+        """Up to ``w`` best available entries by ESPN rank across ``allowed``.
+
+        Sorted on the same total order (see above): a rank tie across two
+        positions used to be broken by the order ``allowed`` happened to iterate.
+        """
+        gathered: list[tuple[tuple[int, float, str], BoardEntry]] = []
         for pos in allowed:
             entries = self._rank.get(pos)
             if not entries:
@@ -289,7 +326,7 @@ class BoardState:
             while j < len(entries) and taken_here < w:
                 e = entries[j]
                 if e.player_id not in self.taken:
-                    gathered.append((e.espn_overall_rank, e))
+                    gathered.append((self._rank_key(e), e))
                     taken_here += 1
                 j += 1
         gathered.sort(key=lambda t: t[0])

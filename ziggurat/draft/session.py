@@ -33,8 +33,17 @@ Design anchors (``intel/research/tui-2.4-recon.md`` §2/§3):
   ``resume`` validates the header against the passed board and replays to
   reproduce bit-identical state. One mechanism for correction and recovery.
 
-Rule 1: no DB accessor here — the board is loaded once at the ``simulator.load_board``
-edge and handed in. Rule 2: no scoring constant — value comes from the board's VOR.
+* **The composed engine is chosen HERE, once, at ``_engine()`` (item 3.11).**
+  Everything above the engine — the render layer, the queue writer, the posture
+  monitor, the contingency ladder — reaches it through that one factory, so the
+  week-by-week re-rank is wired in by wrapping its return value and nothing else
+  moves. ``weekly=None`` (no points map handed in) is the LEGACY engine, exactly
+  as it drafted through Checkpoint 2; that is what ``--legacy-engine`` produces
+  and what every pre-3.11 journal resumes into. See :meth:`_engine`.
+
+Rule 1: no DB accessor here — the board and the week-by-week points map are read
+once at the ``simulator.load_draft_board`` edge, at one ``as_of``, and handed in.
+Rule 2: no scoring constant — value comes from the board's VOR.
 """
 
 from __future__ import annotations
@@ -44,7 +53,7 @@ import json
 import os
 import random
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ziggurat.core.valuation import DEFAULT_ROSTER, RosterStructure
@@ -57,8 +66,76 @@ from ziggurat.draft.survival import (
     LiveRecalibration,
     recalibrate_from_pick_log,
 )
+from ziggurat.draft.variant_weekwise import (
+    WeekwiseInputError,
+    WeekwiseInputs,
+    WeekwisePicker,
+)
+from ziggurat.draft.variant_wheel import WheelPicker
+
+# ------------------------------------------------------------ engine profiles
+#
+# ITEM 3.11 (2026-08-31, the last change before the draft). The cockpit ships the
+# WEEK-BY-WEEK re-rank on by default. Both names are recorded in the journal
+# header so a resume cannot silently reconstruct a different engine than the one
+# that made the picks already in the file.
+
+#: A session handed a week-by-week points map: the SHIPPED default, and two
+#: re-ranks of the shipped engine composed over disjoint decision domains (see
+#: :meth:`DraftSession._engine` for why that arrangement and not the other one).
+#:
+#: * WEEK-BY-WEEK (``variant_weekwise``, weight 2), at the 8 picks the wheel term
+#:   does not own. The engine's additive one-ply score is re-ranked by what each
+#:   candidate does to a SEATED LINEUP in every week of the season — the only term
+#:   that can see a bye collision. Two held-out seeds at this seat, 500 paired
+#:   drafts: +0.0444 expected wins [+0.0287, +0.0600], unfillable starter weeks
+#:   0.47 -> 0.27, and +0.0199 [+0.0049, +0.0349] over a naive "+10 to every RB"
+#:   control — so the gain is the bye/roster-shape mechanism, not merely drafting
+#:   more running backs. Re-measured through THIS wiring on four further held-out
+#:   seeds (1,000 paired drafts, 2026-08-31): +0.0396/+0.0417/+0.0522/+0.0387, all
+#:   four intervals excluding zero.
+#: * PAIR VALUE (``variant_wheel``), at the 8 first-of-pair picks (overalls 9, 29,
+#:   49, 69, 89, 109, 129, 149 at seat 9 of 10), where only two rival picks
+#:   separate the operator's two turns and "which PAIR do I end up holding" is a
+#:   different question from "who is best now". Measured as the increment on top
+#:   of weekwise — i.e. on the composition as shipped — over eight held-out seeds,
+#:   2,000 paired drafts: +0.0182 [+0.0119, +0.0245], positive in all eight.
+#:
+#: Every one of those numbers is against the calibrated 2.2 MODEL of the room, on
+#: our own projections, graded by our own week-by-week objective. The one external
+#: validation this project has (2021-2025 ECR boards, realized weekly points)
+#: could not demonstrate that the engine beats the preseason consensus at all.
+ENGINE_COMPOSED = "composed"
+
+#: No points map: the engine exactly as it drafted through Checkpoint 2 and four
+#: rehearsals. ``--legacy-engine``, and rung 0 of the runbook's fallback ladder.
+ENGINE_LEGACY = "legacy"
+
+#: The blend weight the A/B selected. The weight is a PLATEAU, not a knife edge:
+#: 1, 2, 4 and 8 land within 0.012 expected wins of each other and the hole count
+#: falls monotonically across all four (variant_weekwise's "THE WEIGHT IS STILL A
+#: PLATEAU" table). 2 is the plateau's measured point estimate; nothing says it
+#: is optimal, only that the choice is not load-bearing.
+DEFAULT_WEEKWISE_WEIGHT = 2.0
 
 # ---------------------------------------------------- journal errors + discovery
+
+
+class EngineProfileMismatch(ValueError):
+    """A resume would continue this journal on a DIFFERENT engine (item 3.11).
+
+    The board hash already catches a resume against a board loaded differently;
+    nothing in the file's picks would catch resuming a composed session on the
+    legacy engine or the reverse. The picks already made would stand and every
+    remaining pick would be decided by a different engine, with no error
+    anywhere — so this refuses, and names the flag that fixes it.
+
+    A ``ValueError`` subclass so anything already catching that keeps working,
+    and a NAMED type so the two cockpits can print the sentence instead of a
+    traceback: this fires during a crash recovery, which is the worst moment of
+    the night to hand the operator a stack trace with the answer at the bottom
+    (measured 2026-08-31: 25 lines of frames above the one line that matters).
+    """
 
 
 class JournalExistsError(RuntimeError):
@@ -269,6 +346,8 @@ class DraftSession:
         session_seed: int = 42,
         rollouts: int = 512,
         rounds: int = ROUNDS,
+        weekly=None,
+        weekwise_weight: float = DEFAULT_WEEKWISE_WEIGHT,
     ) -> None:
         teams = roster.teams
         order = tuple(int(s) for s in pick_order)
@@ -304,6 +383,55 @@ class DraftSession:
         # tail line). Empty for a fresh start; the app prints each line after a
         # resume (recon §crash F2 / Rule 6).
         self.resume_warnings: list[str] = []
+        # Sentences about a DEGRADE the operator must see at launch (as opposed
+        # to a resume). Both front-ends print these next to resume_warnings.
+        self.launch_warnings: list[str] = []
+        # One legible line per DEGRADED recommendation (see _recommend_at). The
+        # cockpit renders these; an empty panel with no explanation was the
+        # pre-fix behaviour and is the thing this exists to prevent.
+        self.engine_faults: list[str] = []
+        # Rule-6 caveats keyed by POSITION, appended verbatim to the reasons of
+        # every recommendation at that position (item 3.11 audit finding 5). Set
+        # by the launcher, not by the engine: the caveat is a fact about the DATA
+        # the board was priced off ("this K board is uncorrected"), which the
+        # engine has no way to know and the operator has every reason to be told
+        # ON the pick rather than in a terminal line three hours earlier.
+        self.rec_caveats: dict[str, tuple[str, ...]] = {}
+
+        # The composed engine (item 3.11). The week-by-week inputs — the points
+        # map and the roster-independent opponent field pool — are built ONCE
+        # here, next to the board, because rebuilding the pool per decision is a
+        # measured 6x regression. WeekwiseInputs.build re-checks the points map
+        # against THIS board (grader.assert_board_coverage): a diverged id space
+        # would otherwise grade every candidate as a season of holes and read
+        # exactly like a real answer.
+        self.weekwise_weight = float(weekwise_weight)
+        self._weekwise: WeekwiseInputs | None = None
+        if weekly is not None and self.weekwise_weight:
+            # DEGRADE, DON'T DIE (item 3.11 audit finding 2). This construction is
+            # the last thing between the operator and a running cockpit, and it is
+            # an IMPROVEMENT to a cockpit that already works: at 18:45 the cost of
+            # refusing to start is total, the cost of drafting on the engine that
+            # ran four rehearsals is ~0.06 expected wins. Before this catch a
+            # WeekwiseInputError here left the front-ends (which catch only
+            # JournalExistsError and EngineProfileMismatch) printing a bare
+            # traceback that named no fallback. It is not silent: the warning is
+            # printed at launch and engine_profile then records LEGACY honestly,
+            # so a resume continues on the same engine that made the picks.
+            try:
+                self._weekwise = WeekwiseInputs.build(
+                    weekly, board=self.board, roster=roster
+                )
+            except Exception as exc:  # noqa: BLE001 — see the paragraph above
+                self._weekwise = None
+                self.launch_warnings.append(
+                    "ENGINE: week-by-week re-rank UNAVAILABLE — this session runs "
+                    "the pre-2026-08-31 engine, which is the engine that drafted "
+                    "four rehearsals. Nothing else is affected and no action is "
+                    f"needed; draft normally. Reason: {type(exc).__name__}: {exc}"
+                )
+        self.engine_profile = ENGINE_COMPOSED if self._weekwise else ENGINE_LEGACY
+
         self._recal: LiveRecalibration = self._compute_recal()
 
     # -- constructors ------------------------------------------------------
@@ -321,6 +449,8 @@ class DraftSession:
         roster: RosterStructure = DEFAULT_ROSTER,
         session_seed: int = 42,
         rollouts: int = 512,
+        weekly=None,
+        weekwise_weight: float = DEFAULT_WEEKWISE_WEIGHT,
     ) -> DraftSession:
         """Begin a fresh session, writing (and fsync'ing) a new journal header.
 
@@ -342,6 +472,8 @@ class DraftSession:
             roster=roster,
             session_seed=session_seed,
             rollouts=rollouts,
+            weekly=weekly,
+            weekwise_weight=weekwise_weight,
         )
         sess._header = sess._build_header()
         sess.journal_path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,12 +491,28 @@ class DraftSession:
         return sess
 
     @classmethod
-    def resume(cls, journal_path: Path, board: Sequence[BoardEntry]) -> DraftSession:
+    def resume(
+        cls,
+        journal_path: Path,
+        board: Sequence[BoardEntry],
+        *,
+        weekly=None,
+        weekwise_weight: float = DEFAULT_WEEKWISE_WEIGHT,
+    ) -> DraftSession:
         """Replay an existing journal to bit-identical state (crash recovery).
 
         Validates the journalled board provenance (count + hash) against ``board``
         and reconstructs session config from the header. Does NOT rewrite the file
         — subsequent picks append to it.
+
+        THE ENGINE PROFILE IS PART OF THAT PROVENANCE (item 3.11). The board hash
+        already catches a resume against a board loaded WITHOUT the kicker
+        correction — the correction re-ranks the whole board, so the hash moves —
+        but nothing in the file's picks would catch resuming a week-by-week
+        session on the legacy engine or the reverse. The picks already made would
+        stand and every remaining pick would be decided by a different engine,
+        with no error anywhere. So the header records which engine made them and
+        a mismatch RAISES, naming the flag that fixes it.
         """
         journal_path = Path(journal_path)
         lines = journal_path.read_text(encoding="utf-8").splitlines()
@@ -389,6 +537,10 @@ class DraftSession:
             flex_slots=rd["flex_slots"],
             flex_positions=frozenset(rd["flex_positions"]),
         )
+        # A journal written before item 3.11 carries no engine field, and it was
+        # written by the legacy engine — so that is the honest default, and an
+        # old journal resumes exactly as it always did.
+        journalled_engine = header.get("engine_profile", ENGINE_LEGACY)
         sess = cls(
             board=board,
             operator_slot=header["operator_slot"],
@@ -400,7 +552,40 @@ class DraftSession:
             session_seed=header["session_seed"],
             rollouts=header["rollouts"],
             rounds=header.get("rounds", ROUNDS),
+            weekly=weekly,
+            weekwise_weight=weekwise_weight,
         )
+        # The WEIGHT decides picks exactly as the profile does — the header
+        # records it for that reason — so a resume at a different weight is the
+        # same defect wearing a smaller number, and it used to be accepted
+        # silently while still reporting engine_profile 'composed' (audit minor).
+        journalled_weight = header.get("weekwise_weight")
+        if (
+            sess.engine_profile == ENGINE_COMPOSED
+            and journalled_engine == ENGINE_COMPOSED
+            and journalled_weight is not None
+            and float(journalled_weight) != sess.weekwise_weight
+        ):
+            raise EngineProfileMismatch(
+                f"this journal's picks were made with the week-by-week weight "
+                f"{float(journalled_weight)} but this session would continue at "
+                f"{sess.weekwise_weight}. The weight decides picks, so the picks "
+                f"already in the file would stand while every remaining pick was "
+                f"decided on a different setting — re-run with the journalled weight."
+            )
+        if sess.engine_profile != journalled_engine:
+            fix = (
+                "drop --legacy-engine"
+                if journalled_engine == ENGINE_COMPOSED
+                else "add --legacy-engine"
+            )
+            raise EngineProfileMismatch(
+                f"this journal's picks were made by the {journalled_engine!r} engine "
+                f"but this session would continue on {sess.engine_profile!r}. The "
+                f"picks already in the file would stand and every remaining pick "
+                f"would be decided differently, with nothing to show for it — "
+                f"re-run the same command and {fix}."
+            )
         sess._header = header
 
         # Torn-tail tolerance (recon §crash F2): a partial/corrupt FINAL line — the
@@ -513,13 +698,32 @@ class DraftSession:
 
     @property
     def engine(self) -> PickEngine:
-        """The operator's live pick engine (live-recalibrated priors when engaged).
+        """The engine the POSTURE COMPARATOR continues the draft with.
 
-        The posture comparator clones this per archetype (swapping ``need_schedule``
-        and neutralising survival), so it reflects the same weights/priors the
-        on-clock recommendation uses.
+        Live-recalibrated priors when engaged, so it reflects the same weights and
+        room model the on-clock recommendation uses — but deliberately the BARE
+        :class:`PickEngine`, never the composed picker :meth:`_engine` returns.
+
+        THIS IS A COST DECISION, NOT AN OVERSIGHT (item 3.11). ``project_postures``
+        continues the whole draft ``POSTURE_ROLLOUTS`` times for each of five need
+        schedules. The week-by-week term adds ``shortlist + 1`` roster grades to
+        EVERY pick of every one of those thousands of continuations — order ten
+        seconds per projection against a 90-second clock — and the wheel term adds
+        a survival batch. Both postures are compared with the same continuation
+        engine, so the comparison the monitor actually makes is unaffected; what it
+        cannot see is a posture that only pays off once those terms are picking.
+        (``variant_weekwise.POSTURE_CLONE_LABEL`` states the same choice; its
+        wrapper reaches it by zeroing its own weight on a posture clone, which is
+        the same engine by a longer road.)
+
+        It is also what keeps the comparator working at all. ``project_postures``
+        reads ``engine.need_schedule`` and then
+        ``dataclasses.replace(engine, need_schedule=..., survival=...)``, and both
+        cockpits catch a bare ``Exception`` around the posture call — so a wrapper
+        that did not satisfy that surface would kill the 2.4 hysteresis monitor for
+        the whole draft with no error, no log and no visible symptom.
         """
-        return self._engine()
+        return self._base_engine()
 
     @property
     def room_priors(self) -> RoomPriors | None:
@@ -594,6 +798,69 @@ class DraftSession:
 
     # -- recommendation surface (operator turn only) -----------------------
 
+    def _recommend_at(self, overall: int, *, top: int) -> Sequence[PickRec]:
+        """Recommend at ``overall``, FALLING BACK to the shipped 2.3 engine if the
+        composed one raises (item 3.11 audit finding 3).
+
+        WHY A FALLBACK AND NOT A RAISE. The composed engine's raise surface is
+        materially wider than the legacy engine's — ``grader.GradeInputError``,
+        ``WeekwiseInputError``, a ``zip(..., strict=True)`` in
+        ``WeekwisePicker.recommend``, the wheel's ``pair_analysis``. Above this
+        method both cockpits swallow a bare ``Exception`` into an EMPTY panel, and
+        the web cockpit's ``/api/queue`` then 500s once its cache goes cold — which
+        stops the queue writer reconciling and hands the pick to ESPN's own board.
+        That is the failure that cost the 2026-08-27 practice draft its second
+        half, and it is not a failure worth having over a re-rank worth 0.06
+        expected wins a season.
+
+        So a fault here degrades ONE recommendation to the engine that drafted four
+        rehearsals, on a FRESH context (identical to what ``--legacy-engine`` would
+        have produced at this state — the composed attempt cannot have left rng
+        draws behind), and says so: :attr:`engine_faults` accumulates one legible
+        line per fault and the cockpit renders it. Deterministic either way — the
+        fault reproduces from the same state, so a journal replay takes the same
+        branch.
+        """
+        ctx = self._operator_context(
+            overall=overall, own_roster=self.own_roster, taken=self._taken
+        )
+        engine = self._engine()
+        base = self._base_engine()
+        if engine is base or self._weekwise is None:
+            return self._with_caveats(engine.recommend(ctx, top=top))
+        try:
+            return self._with_caveats(engine.recommend(ctx, top=top))
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            note = (
+                f"ENGINE FAULT at overall {overall}: the week-by-week/pair re-rank "
+                f"raised {type(exc).__name__} ({exc}) — this recommendation was "
+                "made by the pre-2026-08-31 engine instead. The list below is "
+                "usable; nothing is missing from it. If it keeps happening, "
+                "re-launch with --legacy-engine (runbook §6 rung 0)."
+            )
+            if note not in self.engine_faults:
+                self.engine_faults.append(note)
+            fresh = self._operator_context(
+                overall=overall, own_roster=self.own_roster, taken=self._taken
+            )
+            return self._with_caveats(base.recommend(fresh, top=top))
+
+    def _with_caveats(self, recs: Sequence[PickRec]) -> Sequence[PickRec]:
+        """Append :attr:`rec_caveats` for a rec's position to its reasons.
+
+        A no-op when nothing is registered, so the golden master and every test
+        that builds a session directly see the engine's reasons VERBATIM.
+        """
+        if not self.rec_caveats:
+            return recs
+        out = []
+        for rec in recs:
+            extra = self.rec_caveats.get(rec.player.position)
+            out.append(
+                replace(rec, reasons=tuple(rec.reasons) + tuple(extra)) if extra else rec
+            )
+        return tuple(out)
+
     def recommend(self, top: int = 5) -> Sequence[PickRec]:
         """Top-``top`` engine recommendations for the operator's current pick.
 
@@ -605,12 +872,7 @@ class DraftSession:
                 "recommend() is only valid on the operator's turn "
                 f"(seat {self.operator_slot}); the clock is on seat {self.current_seat}"
             )
-        ctx = self._operator_context(
-            overall=self.overall_pick,
-            own_roster=self.own_roster,
-            taken=self._taken,
-        )
-        return self._engine().recommend(ctx, top=top)
+        return self._recommend_at(self.overall_pick, top=top)
 
     def next_operator_overall(self) -> int | None:
         """1-based overall of the operator's NEXT pick, or None when none remain.
@@ -648,10 +910,7 @@ class DraftSession:
             raise RuntimeError(
                 "no operator picks remain in this draft; there is nothing to queue"
             )
-        ctx = self._operator_context(
-            overall=target, own_roster=self.own_roster, taken=self._taken
-        )
-        return self._engine().recommend(ctx, top=top)
+        return self._recommend_at(target, top=top)
 
     def contingencies(self) -> Sequence[Contingency]:
         """Snake-turn "if X now -> then Y on the wheel" branches (top-3, 2-ply).
@@ -730,10 +989,69 @@ class DraftSession:
             return False
         return self._sequence[nxt - 1] == self.operator_slot
 
-    def _engine(self) -> PickEngine:
+    def _base_engine(self) -> PickEngine:
+        """The shipped 2.3 engine at this session's rollouts and live priors.
+
+        Fresh on every call so a live re-fit of the room model takes effect on the
+        very next recommendation.
+        """
         recal = self._recal
         priors = recal.priors if recal.engaged else None
         return PickEngine(rollouts=self.rollouts, room_priors=priors)
+
+    def _engine(self):
+        """THE one place the cockpit's DECISION engine is constructed (item 3.11).
+
+        Everything above it — the render layer, the queue writer, the contingency
+        ladder — reaches the engine through this factory, so the whole integration
+        is what this method returns. Both improvements WRAP the shipped engine
+        rather than editing it, which is what makes ``ENGINE_LEGACY`` provably the
+        engine that drafted four rehearsals rather than a code path that resembles
+        it (``tests/test_draft_golden.py`` holds both goldens).
+
+        THE COMPOSITION, AND WHY IT IS THIS ONE. Two measured improvements re-rank
+        the SAME candidate list, so the order they compose in is a real choice:
+
+          * ``WeekwisePicker`` re-ranks on ROSTER SHAPE — what each candidate does
+            to a seated lineup in every week of the season. It applies at every
+            pick.
+          * ``WheelPicker`` re-ranks on PAIR VALUE — which two players you end up
+            holding — and it engages ONLY where the operator's next pick is at
+            most ``max_pair_gap`` rival picks away. At seat 9 of 10 that is
+            exactly the first half of each tight pair: overalls 9, 29, 49, 69, 89,
+            109, 129, 149. Everywhere else it delegates to what it wraps,
+            verbatim.
+
+        So wheel OUTSIDE weekwise gives the two terms DISJOINT decision domains:
+        wheel owns the 8 first-of-pair picks, weekwise owns the other 8, and
+        neither ever re-ranks the other's output. That matters because it is the
+        only arrangement in which each term runs in exactly the regime it was
+        MEASURED in — ``pair_analysis`` reconstructs the engine's own score rather
+        than calling ``recommend``, so wheel never sees a week-by-week-adjusted
+        number, and weekwise never sees a two-pick total (a quantity on a
+        different scale, which would silently halve its blend weight).
+
+        The alternative — weekwise outside wheel — was rejected for that scale
+        mismatch, not on taste.
+
+        MEASURED, on the composition as shipped rather than on either part
+        (2026-08-31, frozen 2026-08-30 board, seat 9, ``rollouts=128``, the
+        calibrated 2.2 room, ``grader.grade_roster`` expected wins, paired on
+        identical rooms): adding the wheel term on top of weekwise is **+0.0182
+        expected wins, 95% CI +0.0119..+0.0245, n=2,000 paired drafts over EIGHT
+        held-out seeds, positive in all eight**. That is the same size as the
+        wheel's own solo held-out estimate at this seat (+0.0153), i.e. the two
+        terms are additive here rather than competing — turning weekwise off at
+        the 8 pair picks costs less than the wheel term gains there.
+        """
+        engine = self._base_engine()
+        if self._weekwise is None:
+            return engine
+        return WheelPicker(
+            engine=WeekwisePicker(
+                engine=engine, inputs=self._weekwise, weight=self.weekwise_weight
+            )
+        )
 
     def _operator_context(
         self,
@@ -825,6 +1143,11 @@ class DraftSession:
             },
             "board_count": len(self.board),
             "board_hash": _board_hash(self.board),
+            # Item 3.11: which engine made these picks. The board hash covers the
+            # kicker correction (it re-ranks the board); this covers the
+            # week-by-week re-rank, which leaves the board untouched.
+            "engine_profile": self.engine_profile,
+            "weekwise_weight": self.weekwise_weight if self._weekwise else 0.0,
         }
 
     def _header_line(self) -> str:

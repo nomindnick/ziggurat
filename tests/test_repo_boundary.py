@@ -226,3 +226,47 @@ def test_the_hook_still_passes_an_ordinary_commit(tmp_path):
         [sys.executable, str(HOOK)], cwd=repo, capture_output=True, text=True
     )
     assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_no_committed_file_hard_codes_a_real_espn_league_id():
+    """Rule 5, the half no pattern matcher can see: a VALUE copied out of `.env`.
+
+    The boundary guard matches PATHS (`intel/`, `*.sqlite*`, `.env*`); it cannot
+    see a secret pasted into a file whose path is perfectly public. That is not
+    hypothetical — the operator's real 10-digit ESPN league id sat in
+    ``tests/test_espn_ranks.py`` from commit dd0fcb9 until 2026-08-31, in a public
+    repo, in a test whose network seam is patched and which never asserts on the
+    value. Every other test in that file passes ``league_id=1``.
+
+    A league id is 6+ digits; a placeholder is 1 or 2. This scans the committed
+    tree for the shape rather than for the value, so the check itself carries
+    nothing private.
+    """
+    import re
+
+    pattern = re.compile(r"league_id\s*=\s*[\"']?(\d{6,})")
+    scanned = 0
+    offenders = []
+    for directory in ("tests", "ziggurat", "backtest", "scripts", "docs", "config"):
+        root = REPO / directory
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix not in (
+                ".py", ".md", ".toml", ".sh", ".js", ".html", ".sql", ".json"
+            ):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            scanned += 1
+            for match in pattern.finditer(text):
+                offenders.append(
+                    f"{path.relative_to(REPO)}: league_id with {len(match.group(1))} digits"
+                )
+    assert scanned > 50, "the scan found almost nothing — check the walk, not the result"
+    assert not offenders, (
+        "a real-looking ESPN league id is hard-coded in a committed file "
+        f"(Rule 5 — nothing from .env in a committed file): {offenders}"
+    )

@@ -1390,3 +1390,97 @@ def test_the_cockpit_expects_exactly_what_it_serves():
     assert webapp._SYNC_SCRIPT_VERSION == re.search(
         r"^// @version\s+(\S+)",
         webapp._USERSCRIPT_PATH.read_text(encoding="utf-8"), re.M).group(1)
+
+
+# ------------------------------------------- item 3.11 audit finding 3 + minors
+
+
+def test_the_state_payload_names_the_engine_and_carries_the_launch_notes(
+    tmp_path, make_draft_board
+):
+    """The cockpit PAGE must be able to answer "which engine is on the clock?".
+
+    Before this, only ``--legacy-engine`` printed an engine line, and it printed
+    it to the terminal at 18:45; the page itself never said. The same channel
+    carries the item-3.10 kicker note, which used to exist only as that one
+    terminal line the runbook tells the operator to forget (audit minors + 5).
+    """
+    board = make_draft_board()
+    session = DraftSession.start(
+        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "notes.jsonl", rollouts=8,
+    )
+    cockpit = webapp.WebCockpit(session=session, notes=("KICKER BOARD: uncorrected …",))
+    state = cockpit.state_json()
+    assert state["engine_profile"] == "legacy"
+    assert state["notes"] == ["KICKER BOARD: uncorrected …"]
+    assert state["engine_faults"] == []
+    assert state["engine_error"] is None
+
+
+def test_a_recommendation_failure_is_reported_instead_of_an_empty_panel(
+    tmp_path, make_draft_board, monkeypatch
+):
+    """Audit finding 3: ``_recompute`` used to swallow every exception into ``()``.
+
+    ``/api/state`` then reported ``is_operator_turn: True``, ``recs: 0`` and no
+    key anywhere containing 'err' — a blank panel on the clock with no
+    explanation and nothing pointing at the escape hatch. ``session.recommend``
+    now falls back to the shipped engine on a composed fault, so reaching this
+    path means BOTH engines failed; that must be said on the page, with the
+    command that gets the operator out of it.
+    """
+    import ziggurat.draft.engine as engine_mod
+
+    board = make_draft_board()
+    session = DraftSession.start(
+        board, operator_slot=0, pick_order=list(range(10)), season=2026,
+        as_of="2026-07-24", journal_path=tmp_path / "err.jsonl", rollouts=8,
+    )
+    cockpit = webapp.WebCockpit(session=session)
+    assert cockpit.state_json()["recs"], "sanity: the panel is normally full"
+
+    monkeypatch.setattr(
+        engine_mod.PickEngine, "recommend",
+        lambda self, ctx, top=5: (_ for _ in ()).throw(RuntimeError("total failure")),
+    )
+    cockpit._recompute()
+    state = cockpit.state_json()
+    assert state["is_operator_turn"] is True
+    assert state["recs"] == []
+    assert state["engine_error"], "an empty panel must never be silent"
+    assert "total failure" in state["engine_error"]
+    assert "--legacy-engine" in state["engine_error"]
+
+    # ... and it clears once the engine works again.
+    monkeypatch.undo()
+    cockpit._recompute()
+    assert cockpit.state_json()["engine_error"] is None
+
+
+def test_the_launch_banner_flushes_before_the_server_blocks():
+    """The cockpit URL must survive a REDIRECTED stdout (runbook §8.0).
+
+    ``launch`` prints the URL and the two userscript routes and then calls
+    ``serve_forever()``, which never returns. At a terminal stdout is
+    line-buffered and they appear at once; redirected (``nohup``, a log file, the
+    remote/unattended practice run §8.0 describes) it is BLOCK-buffered and the
+    ~950 bytes printed never reach the 8 KiB flush threshold — so the operator of
+    such a run saw the two ``typer.echo`` notes (click flushes its own stream) and
+    then nothing, which is indistinguishable from a hang. Measured 2026-08-31 and
+    fixed with explicit flushes; this pins them, because the failure is invisible
+    from a terminal and therefore invisible in every manual check.
+    """
+    import inspect
+
+    src = inspect.getsource(webapp.launch)
+    # Only the lines between building the server and the call that blocks; the
+    # shutdown message after it is flushed by interpreter exit.
+    window = src.split("server = serve(", 1)[1].split("serve_forever()", 1)[0]
+    printed = [ln for ln in window.splitlines() if ln.strip().startswith("print(")]
+    assert len(printed) >= 3, "the launch banner has moved; re-point this check"
+    for line in printed:
+        assert "flush=True" in line, (
+            "a launch banner line printed before serve_forever() must flush — "
+            f"this one does not: {line.strip()[:80]}"
+        )

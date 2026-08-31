@@ -573,16 +573,20 @@ def mock_draft(
 
 
 def _resolve_draft_launch(
-    *, season, as_of, journal, resume, pick_order, path, source, weeks,
+    *, season, as_of, journal, resume, pick_order, path, source, weeks, legacy=False,
 ):
     """Shared parse-level resolution for the two draft front-ends (Rule 3: this
     resolves WHICH journal/board to use — discovery and header parsing live in
     session.py; board loading in simulator.py). Returns
-    ``(board, resolved_season, resolved_as_of, resolved_journal, order,
-    espn_names)`` — the last is the ESPN-display-name map the web cockpit's
-    queue endpoint serves (auto-entry spec §6a); the TUI ignores it."""
+    ``(inputs, resolved_season, resolved_as_of, resolved_journal, order)`` where
+    ``inputs`` is the :class:`~ziggurat.draft.simulator.DraftInputs` bundle: the
+    board, the ESPN-display-name map the web cockpit's queue endpoint serves
+    (auto-entry spec §6a; the TUI ignores it), the week-by-week points map the
+    composed engine grades with, and the launch ``notes`` the front-end prints.
+
+    ``legacy`` is ``--legacy-engine``: the pre-2026-08-31 cockpit exactly."""
     from ziggurat.draft.session import find_latest_journal, read_journal_header
-    from ziggurat.draft.simulator import espn_display_names, load_board
+    from ziggurat.draft.simulator import load_draft_board
 
     draft_dir = REPO_ROOT / "data" / "draft"
 
@@ -621,15 +625,14 @@ def _resolve_draft_launch(
     order = [int(x) for x in pick_order.split(",")] if pick_order else None
 
     conn = connect(path)
-    board = load_board(
-        conn, as_of=resolved_as_of, season=resolved_season, source=source,
-        weeks=_parse_weeks(weeks),
-    )
-    espn_names = espn_display_names(
-        conn, board, as_of=resolved_as_of, season=resolved_season
-    )
-    conn.close()
-    if not board:
+    try:
+        inputs = load_draft_board(
+            conn, as_of=resolved_as_of, season=resolved_season, source=source,
+            weeks=_parse_weeks(weeks), legacy=legacy,
+        )
+    finally:
+        conn.close()
+    if not inputs.board:
         typer.echo(
             f"No draftable board for season {resolved_season} as of {resolved_as_of}: "
             "the database has no projections/ESPN ranks visible at that date. Check "
@@ -637,7 +640,9 @@ def _resolve_draft_launch(
             err=True,
         )
         raise typer.Exit(code=1)
-    return board, resolved_season, resolved_as_of, resolved_journal, order, espn_names
+    for line in inputs.notes:
+        typer.echo(line)
+    return inputs, resolved_season, resolved_as_of, resolved_journal, order
 
 
 @app.command("draft-board")
@@ -662,6 +667,14 @@ def draft_board(
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
     source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
     weeks: Annotated[Optional[str], typer.Option(help="Regular-season week window, e.g. '1-17'.")] = None,
+    legacy_engine: Annotated[bool, typer.Option(
+        "--legacy-engine", help="Draft with the pre-2026-08-31 engine exactly: no "
+        "week-by-week re-rank, no pair re-rank at the first pick of each of your "
+        "pairs (the term that visibly doubles the displayed score at those picks), "
+        "and no kicker correction (which is inert tonight in any case — its source "
+        "table is empty). The first thing to try if the cockpit misbehaves "
+        "(runbook §6, rung 0). A RE-LAUNCH decision: a resume on the other engine "
+        "refuses, by design.")] = False,
 ) -> None:
     """Launch the live draft-board TUI (item 2.4).
 
@@ -678,15 +691,16 @@ def draft_board(
     if not 1 <= slot <= DEFAULT_ROSTER.teams:
         raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
 
-    board, resolved_season, resolved_as_of, resolved_journal, order, _names = (
+    inputs, resolved_season, resolved_as_of, resolved_journal, order = (
         _resolve_draft_launch(
             season=season, as_of=as_of, journal=journal, resume=resume,
             pick_order=pick_order, path=path, source=source, weeks=weeks,
+            legacy=legacy_engine,
         )
     )
 
     draft_app.launch(
-        board,
+        inputs.board,
         operator_slot=slot - 1,
         pick_order=order,
         season=resolved_season,
@@ -696,6 +710,8 @@ def draft_board(
         rollouts=rollouts,
         seed=seed,
         roster=DEFAULT_ROSTER,
+        weekly=inputs.weekly,
+        kicker_corrected=inputs.kicker_corrected,
     )
 
 
@@ -725,6 +741,14 @@ def draft_web(
     no_push: Annotated[bool, typer.Option(
         "--no-push", help="Disable the §7 phone escalation (queue thin / writer "
         "halted / sync stalled). Decisions are still recorded in /api/state.")] = False,
+    legacy_engine: Annotated[bool, typer.Option(
+        "--legacy-engine", help="Draft with the pre-2026-08-31 engine exactly: no "
+        "week-by-week re-rank, no pair re-rank at the first pick of each of your "
+        "pairs (the term that visibly doubles the displayed score at those picks), "
+        "and no kicker correction (which is inert tonight in any case — its source "
+        "table is empty). The first thing to try if the cockpit misbehaves "
+        "(runbook §6, rung 0). A RE-LAUNCH decision: a resume on the other engine "
+        "refuses, by design.")] = False,
 ) -> None:
     """Launch the live-search web draft cockpit (Checkpoint 2).
 
@@ -739,15 +763,16 @@ def draft_web(
     if not 1 <= slot <= DEFAULT_ROSTER.teams:
         raise typer.BadParameter(f"slot must be 1..{DEFAULT_ROSTER.teams}")
 
-    board, resolved_season, resolved_as_of, resolved_journal, order, espn_names = (
+    inputs, resolved_season, resolved_as_of, resolved_journal, order = (
         _resolve_draft_launch(
             season=season, as_of=as_of, journal=journal, resume=resume,
             pick_order=pick_order, path=path, source=source, weeks=weeks,
+            legacy=legacy_engine,
         )
     )
 
     webapp.launch(
-        board,
+        inputs.board,
         operator_slot=slot - 1,
         pick_order=order,
         season=resolved_season,
@@ -758,9 +783,12 @@ def draft_web(
         seed=seed,
         roster=DEFAULT_ROSTER,
         port=port,
-        espn_names=espn_names,
+        espn_names=dict(inputs.espn_names),
         db_path=path,
         push=not no_push,
+        weekly=inputs.weekly,
+        kicker_corrected=inputs.kicker_corrected,
+        notes=inputs.notes,
     )
 
 

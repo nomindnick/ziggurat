@@ -14,6 +14,7 @@ recalibration honesty fields on a cold start.
 
 import json
 import os
+import pathlib
 from pathlib import Path
 from time import perf_counter
 
@@ -752,3 +753,441 @@ def test_recommend_upcoming_works_off_turn_and_excludes_taken(tmp_path, make_dra
     assert 0 < len(recs) <= 8
     assert all(r.player_id not in sess.taken for r in recs)
     assert all(r.reasons for r in recs)  # Rule 6: never an unexplained row
+
+
+# ------------------------------------------------------- the composed engine
+#
+# Item 3.11 (2026-08-31). ``_engine()`` is the ONE place the cockpit's decision
+# engine is constructed, and which engine it builds is decided by whether the
+# session was handed a week-by-week points map. These tests pin BOTH sides of
+# that switch, because the escape hatch (``--legacy-engine``) is only worth
+# having if it provably restores the engine that ran four rehearsals.
+
+
+def _synthetic_weekly(board, *, bye_of=lambda i: 5 + (i % 9)):
+    """A week-by-week points map over a synthetic board (Rule 5: no real names).
+
+    Each player scores a flat 1/16 of his season points in every week except one
+    bye, which is ABSENT rather than zero — the grader's missing-week convention,
+    and the whole reason the week-by-week term can see a collision at all.
+    """
+    from ziggurat.draft.grader import WeeklyPointsMap
+
+    points, positions, names, teams = {}, {}, {}, {}
+    for i, e in enumerate(board):
+        bye = bye_of(i)
+        points[e.player_id] = {
+            w: e.house_points / 16.0 for w in range(1, 18) if w != bye
+        }
+        positions[e.player_id] = e.position
+        names[e.player_id] = e.name
+        teams[e.player_id] = f"T{i % 32:02d}"
+    return WeeklyPointsMap(points, positions=positions, names=names, teams=teams)
+
+
+def _start_composed(tmp_path, board, **kw):
+    return _start(tmp_path, board, **kw) if kw.pop("_legacy", False) else DraftSession.start(
+        board,
+        operator_slot=kw.pop("operator_slot", 0),
+        pick_order=IDENTITY,
+        season=2026,
+        as_of="2026-07-22",
+        journal_path=Path(tmp_path) / f"{kw.pop('name', 'c')}.jsonl",
+        session_seed=kw.pop("seed", 42),
+        rollouts=kw.pop("rollouts", 8),
+        weekly=kw.pop("weekly"),
+    )
+
+
+def test_no_points_map_is_the_legacy_engine_exactly(tmp_path, make_draft_board):
+    """``--legacy-engine`` must be the ENGINE, not something that resembles it.
+
+    Not "a wrapper configured to be inert" — the bare
+    :class:`~ziggurat.draft.engine.PickEngine` object, which is what makes rung 0
+    of the runbook's fallback ladder a real fallback.
+    """
+    from ziggurat.draft.engine import PickEngine
+
+    sess = _start(tmp_path, make_draft_board())
+    assert sess.engine_profile == session_mod.ENGINE_LEGACY
+    assert type(sess._engine()) is PickEngine
+    assert type(sess.engine) is PickEngine
+
+
+def test_a_points_map_selects_the_composed_engine(tmp_path, make_draft_board):
+    """The shipped default is wheel OUTSIDE weekwise OUTSIDE the shipped engine.
+
+    The nesting order is the composition decision (``_engine``'s docstring): it
+    is what gives the two re-ranks disjoint decision domains, so each runs in
+    exactly the regime it was measured in. A future reordering would still pass
+    every behavioural test in this file — both orders draft *something* — so the
+    structure is pinned directly.
+    """
+    from ziggurat.draft.engine import PickEngine
+    from ziggurat.draft.variant_weekwise import WeekwisePicker
+    from ziggurat.draft.variant_wheel import WheelPicker
+
+    board = make_draft_board()
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board))
+    assert sess.engine_profile == session_mod.ENGINE_COMPOSED
+
+    outer = sess._engine()
+    assert isinstance(outer, WheelPicker), "the pair term must be OUTERMOST"
+    middle = outer.engine
+    assert isinstance(middle, WeekwisePicker), "the week-by-week term sits inside it"
+    assert middle.weight == session_mod.DEFAULT_WEEKWISE_WEIGHT == 2.0
+    inner = middle.engine
+    assert type(inner) is PickEngine, "and the shipped engine is at the bottom"
+    assert inner.rollouts == sess.rollouts
+
+
+def test_the_pair_term_engages_only_at_the_operators_pair_picks(tmp_path, make_draft_board):
+    """The disjointness the composition depends on, measured rather than asserted.
+
+    ``WheelPicker`` delegates VERBATIM wherever the operator's next pick is more
+    than ``max_pair_gap`` rival picks away, which at seat 9 of 10 is every second
+    pick of a pair. If it engaged everywhere, weekwise would be dead code on a
+    live board and the +0.044 arm would be silently gone.
+    """
+    from ziggurat.draft.variant_wheel import pair_window
+
+    board = make_draft_board()
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board), operator_slot=8)
+    gap = sess._engine().max_pair_gap
+    engaged = []
+    while not sess.complete:
+        if sess.is_operator_turn:
+            ctx = sess._operator_context(
+                overall=sess.overall_pick, own_roster=sess.own_roster, taken=sess.taken
+            )
+            if pair_window(ctx, gap).engaged:
+                engaged.append(sess.overall_pick)
+        sess.append_pick(_next_pid(sess, sess.current_seat))
+    # Seat 9 of 10 turns at the end of the snake: 9 & 12, 29 & 32, ... The FIRST
+    # of each pair is three overalls from the second, i.e. two rival picks.
+    assert engaged == [9, 29, 49, 69, 89, 109, 129, 149]
+
+
+def test_a_zero_weight_falls_back_to_the_legacy_engine(tmp_path, make_draft_board):
+    """A weight of 0 IS the legacy engine, so the session must say so rather than
+    building an inert wrapper and journalling it as 'weekwise' — a resume would
+    then refuse a legacy relaunch that is in fact identical."""
+    board = make_draft_board()
+    sess = DraftSession.start(
+        board, operator_slot=0, pick_order=IDENTITY, season=2026, as_of="2026-07-22",
+        journal_path=Path(tmp_path) / "z.jsonl", rollouts=8,
+        weekly=_synthetic_weekly(board), weekwise_weight=0.0,
+    )
+    assert sess.engine_profile == session_mod.ENGINE_LEGACY
+
+
+def test_the_posture_surface_is_the_bare_engine_under_both_profiles(tmp_path, make_draft_board):
+    """THE integration hazard, closed by construction rather than by a wrapper.
+
+    ``posture.project_postures`` reads ``session.engine.need_schedule`` and then
+    ``dataclasses.replace(engine, need_schedule=..., survival=...)``; both
+    cockpits catch a bare ``Exception`` around that call, so a ``session.engine``
+    that did not satisfy the surface would kill the 2.4 hysteresis monitor for the
+    whole draft with no error, no log and no visible symptom.
+
+    ``session.engine`` is therefore the BARE :class:`PickEngine` under both
+    profiles, while ``_engine()`` (the decision path) is the composed picker. That
+    is not a dodge — it is the same cost decision the wrappers make for
+    themselves: a posture projection continues the whole draft thousands of times,
+    and running either re-rank inside it would cost order ten seconds per
+    projection against a 90-second clock.
+    """
+    import dataclasses
+
+    from ziggurat.draft.engine import NEED_SCHEDULE_ZERO_RB, PickEngine
+    from ziggurat.draft.posture import _FrontSurvival
+
+    board = make_draft_board()
+    for sess in (
+        _start(tmp_path, board, name="post-legacy"),
+        _start_composed(tmp_path, board, weekly=_synthetic_weekly(board), name="post-comp"),
+    ):
+        engine = sess.engine
+        assert type(engine) is PickEngine
+        assert engine.rollouts == sess.rollouts
+        clone = dataclasses.replace(
+            engine, need_schedule=NEED_SCHEDULE_ZERO_RB, survival=_FrontSurvival()
+        )
+        assert clone.need_schedule is NEED_SCHEDULE_ZERO_RB
+        assert isinstance(clone.pick(sess._operator_context(
+            overall=sess.overall_pick, own_roster=sess.own_roster,
+            taken=sess.taken)), str)
+
+
+def test_the_live_posture_monitor_still_produces_a_projection(tmp_path, make_draft_board):
+    """End-to-end on the real comparator, because the failure is SILENT.
+
+    Reading ``session.engine`` and cloning it are the two steps that break; both
+    happen inside ``project_postures``, and every caller of it swallows the
+    exception. So the duck-typed surface is exercised through the real function
+    rather than reconstructed here.
+    """
+    from ziggurat.draft.posture import project_postures
+
+    board = make_draft_board()
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board), operator_slot=4)
+    _drive(sess, until=60)
+    assert project_postures(sess, rollouts=2) is not None
+
+
+def test_the_journal_header_records_which_engine_made_the_picks(tmp_path, make_draft_board):
+    board = make_draft_board()
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board))
+    header = json.loads(sess.journal_path.read_text().splitlines()[0])
+    assert header["engine_profile"] == session_mod.ENGINE_COMPOSED
+    assert header["weekwise_weight"] == 2.0
+
+    legacy = _start(tmp_path, board, name="legacy")
+    lheader = json.loads(legacy.journal_path.read_text().splitlines()[0])
+    assert lheader["engine_profile"] == session_mod.ENGINE_LEGACY
+    assert lheader["weekwise_weight"] == 0.0
+
+
+def test_resuming_a_composed_session_on_the_legacy_engine_refuses(tmp_path, make_draft_board):
+    """The picks already made would stand and every remaining pick would be
+    decided by a different engine, with nothing to show for it. The board hash
+    cannot catch this — the week-by-week term leaves the board untouched."""
+    board = make_draft_board()
+    weekly = _synthetic_weekly(board)
+    sess = _start_composed(tmp_path, board, weekly=weekly)
+    _drive(sess, until=12)
+
+    with pytest.raises(session_mod.EngineProfileMismatch, match="drop --legacy-engine"):
+        DraftSession.resume(sess.journal_path, board)          # no points map
+    # And the reverse direction, which is the likelier operator mistake.
+    legacy = _start(tmp_path, board, name="lg")
+    _drive(legacy, until=12)
+    with pytest.raises(session_mod.EngineProfileMismatch, match="add --legacy-engine"):
+        DraftSession.resume(legacy.journal_path, board, weekly=weekly)
+    # A ValueError subclass, so anything already catching that keeps working.
+    assert issubclass(session_mod.EngineProfileMismatch, ValueError)
+
+
+def test_both_cockpits_print_the_engine_mismatch_instead_of_a_traceback(tmp_path, make_draft_board):
+    """This refusal fires during a CRASH RECOVERY — the worst moment of the night
+    to hand the operator 25 frames with the one useful line at the bottom
+    (measured 2026-08-31 before this was a named exception). Both front-ends must
+    catch it by name, print the sentence, and exit 1.
+    """
+    from ziggurat.draft import app as draft_app
+    from ziggurat.draft import webapp
+
+    for module in (draft_app, webapp):
+        src = pathlib.Path(module.__file__).read_text(encoding="utf-8")
+        assert "EngineProfileMismatch" in src, (
+            f"{module.__name__}.launch does not catch the engine-profile refusal, "
+            "so it reaches the operator as a traceback"
+        )
+
+
+def test_a_pre_3_11_journal_still_resumes_on_the_legacy_engine(tmp_path, make_draft_board):
+    """A journal written before the engine field existed was written by the
+    legacy engine, so that is the honest default and an old file must not be
+    refused."""
+    board = make_draft_board()
+    sess = _start(tmp_path, board, name="old")
+    _drive(sess, until=6)
+    lines = sess.journal_path.read_text().splitlines()
+    header = json.loads(lines[0])
+    del header["engine_profile"], header["weekwise_weight"]
+    sess.journal_path.write_text(
+        "\n".join([json.dumps(header, sort_keys=True), *lines[1:]]) + "\n"
+    )
+    revived = DraftSession.resume(sess.journal_path, board)
+    assert revived.engine_profile == session_mod.ENGINE_LEGACY
+    assert len(revived.picks) == 6
+
+
+def test_a_composed_session_resumes_bit_identically(tmp_path, make_draft_board):
+    """The property draft night depends on: replay reproduces state exactly, and
+    the NEXT recommendation off that replayed state is the same one.
+
+    The week-by-week term grades a completed roster ``shortlist + 1`` times per
+    decision; any wall-clock or dict-ordering dependence in that path would
+    surface here as a resumed session recommending a different player.
+    """
+    board = make_draft_board()
+    weekly = _synthetic_weekly(board)
+    sess = _start_composed(tmp_path, board, weekly=weekly, operator_slot=4)
+    _drive(sess, until=44)
+    before = [(r.overall, r.seat, r.player_id) for r in sess.picks]
+    while not sess.is_operator_turn:
+        sess.append_pick(_next_pid(sess, sess.current_seat))
+    wanted = [(r.player_id, r.pick_score) for r in sess.recommend(top=5)]
+
+    revived = DraftSession.resume(sess.journal_path, board, weekly=weekly)
+    assert [(r.overall, r.seat, r.player_id) for r in revived.picks] == \
+        [(r.overall, r.seat, r.player_id) for r in sess.picks]
+    assert revived.own_roster == sess.own_roster
+    assert revived.taken == sess.taken
+    assert [(r.player_id, r.pick_score) for r in revived.recommend(top=5)] == wanted
+    assert before == [(r.overall, r.seat, r.player_id) for r in revived.picks[:44]]
+
+
+def test_the_two_engines_draft_different_rosters(tmp_path, make_draft_board):
+    """Guard the guard: if the switch did nothing, every test above would pass.
+
+    Driven on the same board, the same seed and the same room, the two engines
+    must actually diverge — otherwise the flag, the header field and the resume
+    refusal are all ceremony around a no-op.
+    """
+    board = make_draft_board()
+    weekly = _synthetic_weekly(board)
+    legacy = _start(tmp_path, board, operator_slot=4, name="a")
+    composed = _start_composed(
+        tmp_path, board, weekly=weekly, operator_slot=4, name="b"
+    )
+    _drive(legacy)
+    _drive(composed)
+    assert [e.player_id for e in legacy.own_roster] != \
+        [e.player_id for e in composed.own_roster]
+
+
+# ---------------------------------------------- item 3.11 audit fixes (2/3/5)
+
+
+def test_a_composed_engine_fault_falls_back_to_the_shipped_engine(
+    tmp_path, make_draft_board, monkeypatch
+):
+    """Audit finding 3: an on-clock fault must not produce a SILENT empty panel.
+
+    The composed path's raise surface is materially wider than the legacy
+    engine's (``GradeInputError``, ``WeekwiseInputError``, a ``strict=True`` zip
+    in ``WeekwisePicker.recommend``, the wheel's ``pair_analysis``), and both
+    cockpits wrap ``session.recommend()`` in a bare ``except Exception`` that
+    yields ``recs = ()``. With a cold queue cache ``/api/queue`` then 500s, the
+    writer stops reconciling and ESPN autopicks off ITS board — the failure that
+    cost the 2026-08-27 practice draft its second half. A re-rank worth 0.06
+    expected wins a season is not worth that, so a fault degrades ONE
+    recommendation to the engine that drafted four rehearsals, and says so.
+    """
+    import ziggurat.draft.variant_weekwise as vw
+
+    board = make_draft_board()
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board))
+    assert sess.engine_profile == "composed"
+
+    def boom(*a, **kw):
+        raise RuntimeError("injected re-rank fault")
+
+    monkeypatch.setattr(vw, "weekwise_adjustments", boom)
+    recs = sess.recommend(top=5)
+    assert len(recs) == 5, "the panel must still be full, not empty"
+    assert sess.engine_faults, "and the degrade must be recorded, not swallowed"
+    fault = sess.engine_faults[0]
+    assert "injected re-rank fault" in fault, "the cause must be named"
+    assert "--legacy-engine" in fault, "and the way out must be named"
+    # The queue endpoint reads the same surface, so it cannot 500 either.
+    assert len(sess.recommend_upcoming(top=8)) > 0
+
+
+def test_the_fallback_recommendation_is_exactly_the_legacy_engines(
+    tmp_path, make_draft_board, monkeypatch
+):
+    """A degraded recommendation must equal what ``--legacy-engine`` would say.
+
+    The fallback rebuilds a FRESH context rather than reusing the one the failed
+    composed attempt already drew rng from — otherwise "we fell back to the
+    shipped engine" would be true of the code path and false of the numbers.
+    """
+    import ziggurat.draft.variant_weekwise as vw
+
+    board = make_draft_board()
+    weekly = _synthetic_weekly(board)
+    composed = _start_composed(tmp_path, board, weekly=weekly, name="f-comp")
+    legacy = _start(tmp_path, board, name="f-legacy")
+    want = [r.player_id for r in legacy.recommend(top=5)]
+
+    monkeypatch.setattr(
+        vw, "weekwise_adjustments",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("x")),
+    )
+    got = [r.player_id for r in composed.recommend(top=5)]
+    assert got == want
+
+
+def test_a_weekwise_input_failure_starts_the_session_instead_of_crashing(
+    tmp_path, make_draft_board, monkeypatch
+):
+    """Audit finding 2, session half.
+
+    ``WeekwiseInputs.build`` is the last thing between the operator and a running
+    cockpit. Both front-ends catch only ``JournalExistsError`` and
+    ``EngineProfileMismatch``, so a ``WeekwiseInputError`` here used to print a
+    bare traceback that named no fallback. It now degrades to the engine that
+    drafted four rehearsals and records an honest ``engine_profile``, so a later
+    resume continues on the same engine that made the picks.
+    """
+    import ziggurat.draft.variant_weekwise as vw
+
+    board = make_draft_board()
+
+    def boom(cls, *a, **kw):
+        raise vw.WeekwiseInputError("injected input divergence")
+
+    monkeypatch.setattr(vw.WeekwiseInputs, "build", classmethod(boom))
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board))
+    assert sess.engine_profile == "legacy"
+    assert sess.launch_warnings, "the degrade must be visible at launch"
+    assert "injected input divergence" in sess.launch_warnings[0]
+    assert len(sess.recommend(top=3)) == 3, "and the cockpit must still recommend"
+
+
+def test_rec_caveats_ride_the_recommendation_at_that_position_only(
+    tmp_path, make_draft_board
+):
+    """Audit finding 5: Rule 6 puts the disclosure on the RECOMMENDATION.
+
+    The item-3.10 kicker note is printed to the terminal at 18:45 and the runbook
+    tells the operator to "read the first line, then forget it"; the kicker is
+    taken at ~21:00 off a panel that asserts "this is the best your scoring sees"
+    with no provenance at all. ``rec_caveats`` is how the launcher attaches that
+    fact to the pick, for every surface that reads ``PickRec.reasons`` — the
+    panel, the queue rows and the journal alike.
+    """
+    board = make_draft_board()
+    sess = _start_composed(tmp_path, board, weekly=_synthetic_weekly(board))
+    plain = sess.recommend(top=5)
+    sess.rec_caveats["K"] = ("CAVEAT — test sentence.",)
+    after = sess.recommend(top=5)
+    assert [r.player_id for r in after] == [r.player_id for r in plain], (
+        "a caveat must not re-order anything"
+    )
+    for was, now in zip(plain, after, strict=True):
+        if now.player.position == "K":
+            assert now.reasons == tuple(was.reasons) + ("CAVEAT — test sentence.",)
+        else:
+            assert now.reasons == was.reasons
+
+
+def test_resuming_a_composed_session_at_a_different_weight_refuses(
+    tmp_path, make_draft_board
+):
+    """The weight decides picks exactly as the profile does (audit minor).
+
+    The header records ``weekwise_weight`` for that reason, and a resume at a
+    different one used to be accepted silently while still reporting
+    ``engine_profile 'composed'`` — the picks already made would stand while
+    every remaining pick was decided on a different setting.
+    """
+    board = make_draft_board()
+    weekly = _synthetic_weekly(board)
+    sess = _start_composed(tmp_path, board, weekly=weekly, name="w")
+    _drive(sess, until=4)
+    with pytest.raises(session_mod.EngineProfileMismatch) as exc:
+        DraftSession.resume(
+            sess.journal_path, board, weekly=weekly,
+            weekwise_weight=sess.weekwise_weight + 0.25,
+        )
+    assert "weight" in str(exc.value)
+    # The journalled weight still resumes cleanly.
+    ok = DraftSession.resume(
+        sess.journal_path, board, weekly=weekly,
+        weekwise_weight=sess.weekwise_weight,
+    )
+    assert ok.engine_profile == "composed"

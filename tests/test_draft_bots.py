@@ -303,3 +303,119 @@ def test_2_2_pickers_ignore_opponent_rosters(make_draft_board):
                                          rng=random.Random(4), opponent_rosters=rivals)
         assert blind.state.taken == withopp.state.taken  # identical available board
         assert bot.pick(blind) == bot.pick(withopp)
+
+
+# ------------------------------------------------ cross-position determinism
+#
+# Item 3.11 (2026-08-31). ``BoardState``'s three "best across several positions"
+# answers scan ``allowed``, which every caller passes as a SET (``allowed_positions``
+# returns one). Python randomises str hashing per process, so a set of position
+# strings iterates in a different order under every PYTHONHASHSEED — verified in
+# four seeds, four distinct orders. The old form kept the FIRST strictly-better
+# entry, so an EXACT cross-position tie was decided by that order and the same
+# (state, seed) could draft two different players in two processes.
+#
+# The ties are not theoretical, though the count originally recorded here was
+# wrong: ``simulator.load_board`` floors every UNPRICED ESPN-universe row at ONE
+# identical ``vor`` — **35** rows on the live 2026 board (re-measured
+# 2026-08-31), not 1,215, which is the count on the ``<POS>:<rank>`` ID fallback
+# and a different quantity. Those 35 sit at ESPN rank 410 and worse, so they are
+# not reached in a 160-pick draft: this fix buys nothing on tonight's board. It
+# is kept because a total order costs nothing, the board is re-pulled daily, and
+# the cockpit promises a bit-identical journal replay — a replay after a crash
+# runs in a NEW process, i.e. under a new hash seed. That is the failure this
+# pins, and the tests below construct the tie directly rather than relying on a
+# board population nobody controls.
+
+
+def _tied_board():
+    """Two positions whose fronts tie exactly on VOR and exactly on rank.
+
+    Distinct ids either way, so a total order has something to decide on and a
+    set-order-dependent one has nothing.
+    """
+    return [
+        _entry("z-rb", "RB", 50, 100.0, 7.5),
+        _entry("a-wr", "WR", 50, 100.0, 7.5),
+        _entry("m-te", "TE", 50, 100.0, 7.5),
+        _entry("rb-2", "RB", 90, 40.0, 1.0),
+        _entry("wr-2", "WR", 91, 40.0, 1.0),
+    ]
+
+
+@pytest.mark.parametrize("permutation", [
+    ("RB", "WR", "TE"), ("WR", "TE", "RB"), ("TE", "RB", "WR"),
+    ("TE", "WR", "RB"), ("WR", "RB", "TE"), ("RB", "TE", "WR"),
+])
+def test_best_by_vor_and_rank_do_not_depend_on_the_order_positions_arrive_in(permutation):
+    """THE hash-seed test, expressed without needing a second interpreter.
+
+    A set's iteration order under a different PYTHONHASHSEED is, from
+    ``best_by_vor``'s point of view, exactly "the same positions in a different
+    order" — so driving every permutation of the allowed positions covers every
+    order any hash seed could produce, deterministically and in-process.
+
+    Both answers must be the SAME player under all six, and it must be the one
+    the engine's own tie-break ladder names: on an exact VOR tie the lower ESPN
+    rank wins, and on an exact rank tie too, the lexicographically first
+    ``player_id`` ("a-wr"). Under the pre-3.11 code this fails in 4 of the 6.
+    """
+    state = BoardState(_tied_board())
+    assert state.best_by_vor(set(permutation)).player_id == "a-wr"
+    assert state.best_by_rank(set(permutation)).player_id == "a-wr"
+
+
+@pytest.mark.parametrize("permutation", [
+    ("RB", "WR", "TE"), ("WR", "TE", "RB"), ("TE", "RB", "WR"),
+])
+def test_window_by_rank_orders_a_cross_position_rank_tie_totally(permutation):
+    """The same hazard in the engine's own candidate gather.
+
+    ``window_by_rank`` sorted on ``espn_overall_rank`` alone and then TRUNCATED
+    to ``w``, so a rank tie at the cut line decided which candidate the engine
+    scored at all — by set order.
+    """
+    state = BoardState(_tied_board())
+    got = [e.player_id for e in state.window_by_rank(set(permutation), 3)]
+    assert got == ["a-wr", "m-te", "z-rb"]
+    # And the truncation is stable: the top-1 of a 3-way tie is always the same.
+    assert [e.player_id for e in state.window_by_rank(set(permutation), 1)] == ["a-wr"]
+
+
+def test_the_tie_break_ladder_matches_the_engines_own(make_draft_board):
+    """The order here is the engine's, not a second dialect of it.
+
+    ``engine.recommend`` sorts its scored candidates by
+    ``(-pick_score, -vor, espn_overall_rank, player_id)``. These helpers answer a
+    different question (no pick_score exists yet), so they lead on their own axis
+    — but every tier below it must be the engine's, or the cockpit can rank two
+    players one way in the candidate gather and the other way in the display.
+    """
+    state = BoardState(_tied_board())
+    assert BoardState._vor_key(state.front_vor("RB")) == (-7.5, 50, "z-rb")
+    assert BoardState._rank_key(state.front_rank("WR")) == (50, -7.5, "a-wr")
+    # Distinct VOR still decides first, ties or no ties.
+    assert state.best_by_vor({"RB"}).player_id == "z-rb"
+
+
+def test_a_draft_is_reproducible_across_hash_seeds(make_draft_board):
+    """End-to-end: the property the journal replay actually depends on.
+
+    ``FollowVor`` is the picker that reads ``best_by_vor``, and a real board's
+    unpriced tail is one enormous VOR tie. Six permutations of the allowed set,
+    one answer.
+    """
+    board = make_draft_board()
+    tail = [
+        BoardEntry(f"tail-{i}", f"tail-{i}", pos, 500 + i, 0.0, -1.0)
+        for i, pos in enumerate(("RB", "WR", "TE", "QB", "RB", "WR"))
+    ]
+    state = BoardState(list(board) + tail)
+    for e in board:
+        state.take(e.player_id)
+    picks = {
+        state.best_by_vor(set(p)).player_id
+        for p in (("RB", "WR", "TE", "QB"), ("QB", "TE", "WR", "RB"),
+                  ("WR", "QB", "RB", "TE"), ("TE", "RB", "QB", "WR"))
+    }
+    assert len(picks) == 1, f"the same tied board answered {picks} — set order leaked"

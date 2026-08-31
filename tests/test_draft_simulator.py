@@ -368,3 +368,246 @@ def test_espn_display_names_serves_the_other_sides_vocabulary(tmp_path):
     # Rule 1: the map is as-of-gated exactly like the board.
     assert espn_display_names(conn, board, as_of="2026-07-31", season=2026) == {}
     conn.close()
+
+
+# ------------------------------------------------- the draft-night input bundle
+#
+# Item 3.11. ``load_draft_board`` is the one read the cockpit makes: the board,
+# the week-by-week objective the composed engine re-ranks with, and the kicker
+# correction — all at ONE ``as_of``, because a decision board and the objective
+# that re-ranks it must agree about who a player is.
+
+
+def test_load_draft_board_reads_the_board_and_the_objective_at_one_as_of(tmp_path):
+    from ziggurat.draft.simulator import load_draft_board
+
+    conn = _build_board_db(tmp_path / "bundle.sqlite")
+    inputs = load_draft_board(conn, as_of="2026-08-01", season=2026)
+    conn.close()
+    assert inputs.board
+    assert inputs.weekly is not None
+    # The two id spaces are the SAME one: a diverged map would grade every
+    # candidate as a season of holes and read exactly like a real answer.
+    from ziggurat.draft.grader import assert_board_coverage
+
+    assert_board_coverage(inputs.board, inputs.weekly)
+
+
+def test_load_draft_board_is_the_legacy_cockpit_when_asked(tmp_path):
+    """``--legacy-engine``: no objective, no correction, and it SAYS so.
+
+    An escape hatch that silently differs from the engine it claims to restore
+    is worse than none, so the note is asserted along with the absence.
+    """
+    from ziggurat.draft.simulator import load_draft_board
+
+    conn = _build_board_db(tmp_path / "legacy.sqlite")
+    inputs = load_draft_board(conn, as_of="2026-08-01", season=2026, legacy=True)
+    plain = load_board(conn, as_of="2026-08-01", season=2026)
+    conn.close()
+    assert inputs.weekly is None and inputs.kicker_board is None
+    assert inputs.board == plain, "the legacy board must be the untouched load_board"
+    assert any("--legacy-engine" in n for n in inputs.notes)
+
+
+def test_load_draft_board_degrades_LOUDLY_when_the_kicker_source_is_absent(tmp_path):
+    """The live 2026-08-31 situation, pinned.
+
+    ``espn_projections`` ships empty and has never been pulled on the draft box,
+    so the correction cannot be served. At 18:45 the cost of refusing to start is
+    total and the cost of drafting on the engine that ran four rehearsals is
+    zero — so this degrades rather than raises. But it must degrade in WORDS the
+    operator reads, because the K board he then drafts off is known to be
+    misordered (item 3.10), and a silent degrade is the Rule-1-invisible failure
+    this repo keeps finding.
+    """
+    from ziggurat.draft.simulator import load_draft_board
+
+    conn = _build_board_db(tmp_path / "nokicker.sqlite")
+    inputs = load_draft_board(conn, as_of="2026-08-01", season=2026)
+    conn.close()
+    assert inputs.kicker_board is None
+    assert inputs.board, "an absent correction must never cost us the board"
+    assert inputs.weekly is not None, "nor the objective"
+    note = " ".join(inputs.notes)
+    assert "KICKER BOARD: uncorrected" in note
+    assert "espn_projections" in note, "the note must name what is missing"
+
+
+def test_load_board_splices_a_kicker_board_when_it_is_given_one(tmp_path, monkeypatch):
+    """The seam itself: a board handed in is applied to the valuation rows.
+
+    ``apply_to_valuation``'s own behaviour (re-pricing, re-ranking, moving
+    replacement level) is covered exhaustively in ``tests/test_kicker_board.py``;
+    what is unproven anywhere else is that ``load_board`` actually CALLS it, with
+    the rows, before the ESPN join. A no-op splice is the exact failure the
+    kicker module documents flipping the sign of its own evidence.
+    """
+    import ziggurat.core.kicker_board as kbm
+
+    seen = {}
+
+    def spy(rows, board, **kw):
+        seen["rows"] = len(rows)
+        seen["board"] = board
+        return list(rows)
+
+    monkeypatch.setattr(kbm, "apply_to_valuation", spy)
+    conn = _build_board_db(tmp_path / "splice.sqlite")
+    sentinel = object()
+    load_board(conn, as_of="2026-08-01", season=2026, kicker_board=sentinel)
+    conn.close()
+    assert seen["board"] is sentinel
+    assert seen["rows"] > 0
+
+
+def test_load_board_without_a_kicker_board_is_the_pre_3_11_board(tmp_path, monkeypatch):
+    """The default is unchanged, and provably so: the correction is never even
+    imported. ``load_board`` is also the harness's board loader, and an
+    experiment must be able to load the uncorrected board on purpose."""
+    import ziggurat.core.kicker_board as kbm
+
+    def explode(*a, **k):  # pragma: no cover - the assertion is that this never runs
+        raise AssertionError("load_board applied a kicker correction it was not given")
+
+    monkeypatch.setattr(kbm, "apply_to_valuation", explode)
+    conn = _build_board_db(tmp_path / "plain.sqlite")
+    assert load_board(conn, as_of="2026-08-01", season=2026)
+    conn.close()
+
+
+# =====================================================================
+#  item 3.11 audit fixes: the launch cost, and the OTHER half of the
+#  "degrade, don't crash" promise
+# =====================================================================
+
+
+def test_load_draft_board_reads_the_projections_table_exactly_once(tmp_path, monkeypatch):
+    """The composed launch must not pay for THREE full passes (audit finding 1).
+
+    ``build_kicker_board``, ``build_valuation`` (via ``load_board``) and
+    ``grader.weekly_points_map`` each used to call ``valuation.weekly_lines``
+    themselves. Measured on the live 3,264-row board that pass is 3.55 s, so the
+    composed cockpit printed nothing for ~11.5 s on an idle box and ~23.6 s under
+    load — on every launch AND on every crash-resume, which is the moment
+    ``docs/draft-day-runbook.md`` §6 calls the dangerous one. Counted rather than
+    timed, because a wall clock on CI measures the box.
+    """
+    import ziggurat.core.valuation as val
+    from ziggurat.draft.simulator import load_draft_board
+
+    calls = []
+    real = val.weekly_lines
+
+    def counting(*a, **kw):
+        calls.append(kw.get("weeks"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(val, "weekly_lines", counting)
+    conn = _build_board_db(tmp_path / "once.sqlite")
+    try:
+        inputs = load_draft_board(conn, as_of="2026-08-01", season=2026)
+    finally:
+        conn.close()
+    assert inputs.board and inputs.weekly is not None
+    assert len(calls) == 1, (
+        f"load_draft_board made {len(calls)} passes over the projections table; "
+        "the whole launch shares ONE (see the `lines=` hand-over)"
+    )
+
+
+def test_load_draft_board_degrades_LOUDLY_when_the_OBJECTIVE_cannot_be_built(
+    tmp_path, monkeypatch
+):
+    """Audit finding 2: the docstring's promise, applied to the week-by-week half.
+
+    ``load_draft_board`` promises an unavailable improvement 'degrades to the
+    legacy path — but LOUDLY, in notes' because 'a crash would be worse than the
+    thing it is protecting against'. That was implemented for the kicker board
+    only: a ``GradeInputError`` out of ``weekly_points_map`` propagated through
+    ``cli._resolve_draft_launch`` as a bare traceback that killed the launch at
+    18:45 and named no fallback — while ``EngineProfileMismatch``, the OTHER
+    launch-time refusal, gets one clean sentence naming the flag.
+    """
+    from ziggurat.draft import grader
+    from ziggurat.draft.simulator import load_draft_board
+
+    def boom(*a, **kw):
+        raise grader.GradeInputError("injected id-space divergence")
+
+    monkeypatch.setattr(grader, "weekly_points_map", boom)
+    conn = _build_board_db(tmp_path / "nograde.sqlite")
+    try:
+        inputs = load_draft_board(conn, as_of="2026-08-01", season=2026)
+    finally:
+        conn.close()
+    assert inputs.board, "a failed objective must never cost us the board"
+    assert inputs.weekly is None, "and must leave the session on the legacy engine"
+    note = " ".join(inputs.notes)
+    assert "week-by-week re-rank UNAVAILABLE" in note
+    assert "injected id-space divergence" in note, "the note must name the cause"
+
+
+def test_a_non_default_week_window_does_not_crash_the_default_engine(tmp_path):
+    """``--weeks`` is a documented flag that is NOT on the runbook's forbidden list.
+
+    It used to hard-crash the default engine at launch: ``load_draft_board``
+    forwarded ``weeks`` to ``weekly_points_map(weeks=)`` but not to
+    ``rank_weeks=``, so the board's ``<POS>:<rank>`` id space was derived over
+    weeks 1-17 while the map's was derived over the requested span — and
+    ``assert_board_coverage`` (correctly) refused. Now both halves are built over
+    the SAME span, which is also what makes the single ``weekly_lines`` pass sound.
+    """
+    from ziggurat.draft.simulator import load_draft_board
+
+    conn = _build_board_db(tmp_path / "weeks.sqlite")
+    try:
+        inputs = load_draft_board(
+            conn, as_of="2026-08-01", season=2026, weeks=range(1, 15)
+        )
+    finally:
+        conn.close()
+    assert inputs.board
+    assert inputs.weekly is not None, (
+        "a narrower --weeks window must still produce an objective, not a "
+        "traceback (or a silent fall back to legacy)"
+    )
+    assert not any("UNAVAILABLE" in n for n in inputs.notes)
+
+
+def test_the_launch_notes_say_which_engine_is_on_the_clock(tmp_path):
+    """The DEFAULT engine never announced itself; only --legacy-engine printed a line.
+
+    The operator cannot confirm at 18:45 which engine is about to draft for him if
+    the only positive signal is the one he gets by passing the escape-hatch flag
+    (audit minor). Both paths now say so, in the notes both front-ends print and
+    the web cockpit renders on the page.
+    """
+    from ziggurat.draft.simulator import load_draft_board
+
+    conn = _build_board_db(tmp_path / "engnote.sqlite")
+    try:
+        default = load_draft_board(conn, as_of="2026-08-01", season=2026)
+        legacy = load_draft_board(conn, as_of="2026-08-01", season=2026, legacy=True)
+    finally:
+        conn.close()
+    assert any(n.startswith("ENGINE: default") for n in default.notes)
+    assert any("--legacy-engine" in n for n in legacy.notes)
+
+
+def test_draft_inputs_report_whether_the_kicker_board_was_corrected(tmp_path):
+    """``kicker_corrected`` is what puts the item-3.10 caveat on the K PANEL.
+
+    Rule 6 puts the burden on the recommendation, not on a terminal line printed
+    three hours before the round-10 kicker pick (audit finding 5). The launcher
+    reads this flag to register ``DraftSession.rec_caveats['K']``.
+    """
+    from ziggurat.draft.simulator import load_draft_board
+
+    conn = _build_board_db(tmp_path / "kflag.sqlite")
+    try:
+        inputs = load_draft_board(conn, as_of="2026-08-01", season=2026)
+    finally:
+        conn.close()
+    assert inputs.kicker_board is None
+    assert inputs.kicker_corrected is False

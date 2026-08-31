@@ -53,7 +53,11 @@ from ziggurat.draft.board_view import (
 from ziggurat.draft.bots import BoardEntry
 from ziggurat.draft.posture import PostureMonitor
 from ziggurat.draft.resolver import NameResolver
-from ziggurat.draft.session import DraftSession, JournalExistsError
+from ziggurat.draft.session import (
+    DraftSession,
+    EngineProfileMismatch,
+    JournalExistsError,
+)
 
 HELP = (
     "type a name+Enter to record a pick (numbers 1-3 choose in the confirm panel) · "
@@ -428,15 +432,21 @@ def launch(
     seed: int = 42,
     roster: RosterStructure = DEFAULT_ROSTER,
     console: Console | None = None,
+    weekly=None,
+    kicker_corrected: bool = True,
 ) -> None:
     """Wire the headless controller, resolver, posture monitor, and console, then
     run the loop. The thin ``draft-board`` CLI command calls this after loading the
-    board (Rule 3 keeps the command itself logic-free)."""
+    board (Rule 3 keeps the command itself logic-free).
+
+    ``weekly`` is the item-3.11 week-by-week house-points map that selects the
+    composed engine; ``None`` is ``--legacy-engine``. It is read at the same DB
+    seam and the same ``as_of`` as the board (``simulator.load_draft_board``)."""
     console = console or Console()
     order = list(pick_order) if pick_order is not None else list(range(roster.teams))
     try:
         if resume:
-            session = DraftSession.resume(journal_path, board)
+            session = DraftSession.resume(journal_path, board, weekly=weekly)
         else:
             session = DraftSession.start(
                 board,
@@ -446,6 +456,7 @@ def launch(
                 as_of=as_of,
                 journal_path=journal_path,
                 roster=roster,
+                weekly=weekly,
                 session_seed=seed,
                 rollouts=rollouts,
             )
@@ -462,11 +473,26 @@ def launch(
             )
         )
         raise SystemExit(1) from exc
+    except EngineProfileMismatch as exc:
+        # A recovery path: the operator is already having a bad minute. One
+        # sentence and the fix, never a traceback with the answer at the bottom.
+        console.print(Text(str(exc), style="red"))
+        raise SystemExit(1) from exc
 
     # A tolerated torn-tail recovery records human sentences the operator must see
     # (recon §crash F2) — print each before the board comes up.
     for line in getattr(session, "resume_warnings", ()) or ():
         console.print(Text(line, style="yellow"))
+    # A degraded engine says so here rather than in a traceback (audit finding 2).
+    for line in getattr(session, "launch_warnings", ()) or ():
+        console.print(Text(line, style="yellow"))
+
+    # Rule 6 on the RECOMMENDATION, not only in the launch banner (audit finding
+    # 5) — see webapp.launch for why. Same registration, same sentence.
+    if not kicker_corrected:
+        from ziggurat.core.kicker_board import UNCORRECTED_KICKER_CAVEAT
+
+        session.rec_caveats["K"] = (UNCORRECTED_KICKER_CAVEAT,)
 
     resolver = NameResolver(board)
     posture = PostureMonitor(margin=8.0, consecutive=2, cooldown=3)

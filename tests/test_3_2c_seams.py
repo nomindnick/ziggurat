@@ -57,6 +57,8 @@ from ziggurat.data.nfl import (
     injuries,
     news,
     ngs,
+    espn_projections,
+    fpecr,
     players,
     projections,
     refresh,
@@ -114,6 +116,16 @@ _ACCESSORS = {
     # (links follow the gated article) in test_news_wire.py, and is listed in
     # `ignored` below rather than here.
     "player_news": (news.recent_news, {}),
+    # Item 3.9 ESPN projections. `source` is in the identity (migration 010
+    # corrects 009's key), so the accessor must resolve on all four of
+    # (source, season, week, espn_key) — resolving on three would let a second
+    # opinion shadow the incumbent, which is the very failure 010 exists to fix.
+    "espn_projections": (espn_projections.get_espn_projections, {}),
+    # Item 4.1 db_fpecr panel (migration 011). `fp_page` is IN the identity: one
+    # `ecr_type` spans several ranking pages on one `scrape_date` (the frozen
+    # preseason cheatsheet and the live rest-of-season board are both `ro`), so
+    # an accessor resolving on three columns would let one shadow the other.
+    "fpecr_panel": (fpecr.get_fpecr, {}),
 }
 
 #: Columns that are in the PK but are NOT part of the identity a read resolves
@@ -139,7 +151,8 @@ def captured_keys(db, monkeypatch):
 
     for module in (players, schedules, weekly_stats, snap_counts, ngs, injuries,
                    team_defense, game_odds, weather, adp_rankings, espn_ranks,
-                   projections, depth_charts_weekly, depth_charts, news):
+                   projections, depth_charts_weekly, depth_charts, news,
+                   espn_projections, fpecr):
         if hasattr(module, "base"):
             monkeypatch.setattr(module.base, "select_as_of", spy_as_of, raising=False)
             monkeypatch.setattr(module.base, "select_observed_as_of", spy_observed,

@@ -8,11 +8,18 @@ Public surface:
   * priors:    RoomPriors, ROOM_PRIORS_2025
   * bots:      BoardEntry, PickContext, Picker,
                RankNoiseBot, AutodraftBot, FollowEspnRank, FollowVor
-  * simulator: run_draft, run_many, load_board, DraftResult, StrategySummary,
-               snake_sequence, optimal_starting_points, format_strategy_summary
+  * simulator: run_draft, run_many, load_board, load_draft_board, DraftInputs,
+               DraftResult, StrategySummary, snake_sequence,
+               optimal_starting_points, format_strategy_summary
   * engine (item 2.3): PickEngine, PickRec, ARCHETYPE_NEED_SCHEDULES, risk_sign
   * survival (item 2.3): rollout_survival, analytic_survival, SurvivalResult,
                recalibrate_from_pick_log, LiveRecalibration
+
+Item 3.11: ``load_draft_board`` is the DRAFT-NIGHT entry point — the board, the
+week-by-week objective the composed engine re-ranks with, and the kicker
+correction, all read at ONE ``as_of``. ``load_board`` stays the harness's plain
+board loader (an experiment must be able to load the uncorrected board on
+purpose), and its defaults are exactly the pre-3.11 ones.
 """
 
 from ziggurat.draft.bots import (
@@ -32,10 +39,12 @@ from ziggurat.draft.engine import (
 )
 from ziggurat.draft.priors import ROOM_PRIORS_2025, RoomPriors
 from ziggurat.draft.simulator import (
+    DraftInputs,
     DraftResult,
     StrategySummary,
     format_strategy_summary,
     load_board,
+    load_draft_board,
     optimal_starting_points,
     run_draft,
     run_many,
@@ -53,6 +62,7 @@ __all__ = [
     "ARCHETYPE_NEED_SCHEDULES",
     "AutodraftBot",
     "BoardEntry",
+    "DraftInputs",
     "DraftResult",
     "FollowEspnRank",
     "FollowVor",
@@ -69,6 +79,7 @@ __all__ = [
     "analytic_survival",
     "format_strategy_summary",
     "load_board",
+    "load_draft_board",
     "optimal_starting_points",
     "recalibrate_from_pick_log",
     "risk_sign",

@@ -484,6 +484,124 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   (`no push runs recorded yet` ≠ healthy-empty). In-season re-verification
   under Checkpoint 3. Suite green (**1435 passed, 4 skipped**).
 
+- **3.11 draft-engine integration — done 2026-08-31, the morning of the draft.**
+  Two phases of measurement (7 measurement modules, an evaluation harness, 7
+  candidate variants proved on HELD-OUT seeds) landed in the shipped path.
+  **`ziggurat draft-web --season 2026 --slot 9` — the unchanged runbook command —
+  now runs the COMPOSED engine, and `--legacy-engine` restores the pre-3.11
+  engine exactly.** Two re-ranks of the shipped 2.3 engine, composed over
+  **disjoint decision domains**: the pair term (`variant_wheel`) owns the 8
+  first-of-pair picks (overalls 9, 29, 49, 69, 89, 109, 129, 149 — where only two
+  rival picks separate the operator's turns), the week-by-week term
+  (`variant_weekwise`, weight 2) owns the other 8. That nesting is the design
+  decision: it is the only arrangement where each term runs in exactly the regime
+  it was measured in, because `pair_analysis` reconstructs the engine's score
+  rather than calling `recommend` (so neither ever re-ranks the other's output,
+  and the week-by-week weight is never silently halved against a two-pick total).
+  Wired at ONE seam — `DraftSession._engine()` — with the week-by-week points map
+  read beside the board at one `as_of` (`simulator.load_draft_board`).
+  **Measured on the composition as shipped**, not on either part: weekwise vs the
+  engine replicates at **+0.043** through the actual wiring on 4 fresh held-out
+  seeds (1,000 paired drafts, all four intervals excluding zero), and the pair
+  term's increment ON TOP of it is **+0.0182 [+0.0119, +0.0245]** over 8 held-out
+  seeds (2,000 paired drafts, positive in all eight). **Latency +11.1 ms** (legacy
+  212.4 → composed 223.4 ms worst case at R=512 on the real board, paired and
+  interleaved; 243 ms gate). **Determinism verified three ways**: same seed twice,
+  across five `PYTHONHASHSEED` values, and crash + journal replay at pick 100 —
+  all bit-identical. **The K/DST divergence play is untouched** (D/ST 89, K 92
+  under both engines, asserted by name). Suite green (**2,443 passed, 4 skipped** after the 3.11a audit-fix round; 2,424 at integration).
+  **The kicker correction (`core/kicker_board.py`, measured +0.053) is wired but
+  did NOT ship**: its source table `espn_projections` holds 0 rows, has no CLI or
+  registry entry, and `pull_espn_projections` correctly refuses to back-stamp — so
+  its rows could only be stamped today, invisible at the golden's frozen `as_of`,
+  i.e. the board deciding the picks could not be one any test had seen. The seam
+  and its tests ship; the cockpit PRINTS that the K board is uncorrected and that
+  it is not actionable tonight. **`bots.py` determinism hazard fixed**:
+  `best_by_vor` / `best_by_rank` / `window_by_rank` resolved exact cross-position
+  ties by SET iteration order, i.e. by `PYTHONHASHSEED` (measured: three different
+  answers on a three-way tie). All three now carry the engine's own tie-break
+  ladder as a total order — though the recorded justification was WRONG about the
+  live board and is corrected here: `load_board` floors **35** unpriced rows at
+  one identical `vor`, not 1,215 (that is the `<POS>:<rank>` ID-fallback count, a
+  different quantity), and those 35 sit at ESPN rank 410+, i.e. out of reach in a
+  160-pick draft. The fix buys nothing on tonight's board; it is kept because a
+  total order costs nothing and the replay promise runs in a fresh process.
+  Details: `IMPLEMENTATION_PLAN.md` 3.11.
+
+  **Two disclosures the ship summary led without, both from the variant's own
+  module docstring:** the week-by-week term does NOT fix the 3-QB/3-TE
+  concentration (it prices a bench QB3 at zero for the same reason the 2.2 metric
+  did), and with holes priced at a waiver-corrected rate the variant **stops
+  removing them** and no longer clears its own +10-RB mechanism control. The
+  +0.043 is measured against the objective as shipped, which likes removed holes.
+
+- **3.11a audit-fix round — done 2026-08-31, before the 12:00 freeze.** Six
+  adversarial auditors returned five confirmed majors on the integrated engine;
+  all five are fixed and re-measured, with no change to any recommendation the
+  engine makes (both goldens' players, scores and rosters are byte-identical;
+  only reason TEXT moved, 43 rows across two deliberate re-blesses).
+  **The headline is a cost bug the integration created and nothing measured:**
+  `load_draft_board` read the projections table THREE times — `build_kicker_board`,
+  `build_valuation` (via `load_board`) and `grader.weekly_points_map` each made
+  their own `weekly_lines` pass at 3.55 s — so the composed cockpit printed
+  nothing for 11.8 s idle / 23.6 s loaded on every launch AND every crash-resume,
+  against a runbook that documents "Resume in 4 s" for the moment it calls the
+  dangerous one. All three now share ONE read (`lines=` hand-over on
+  `build_valuation` and `weekly_points_map`, which `build_kicker_board` already
+  had): **cold start 3.8 s / serving 4.0 s, identical to `--legacy-engine`, and a
+  100-pick resume 3.8 s** — measured on the real command. The same change fixed
+  the `--weeks` crash (`rank_weeks` was not forwarded, so the board's and the
+  map's id spaces were derived over different spans). Also fixed: **the
+  "degrade LOUDLY, never crash" promise was implemented for the kicker half
+  only** — a `GradeInputError` from the objective, or a `WeekwiseInputError` from
+  `WeekwiseInputs.build`, killed the launch with a bare traceback naming no
+  fallback; both now fall back to the pre-3.11 engine with a sentence that names
+  the cause. **An on-clock composed fault degraded to a SILENTLY empty panel**
+  (and, once the queue cache went cold, an `/api/queue` 500 that stops the writer
+  reconciling — the failure that cost the 2026-08-27 practice draft its second
+  half); `DraftSession._recommend_at` now serves that one recommendation from the
+  shipped engine on a FRESH context (proven equal to `--legacy-engine`'s answer)
+  and records a legible fault line the cockpit renders. **The wheel's first-of-pair
+  sentence promised a partner the tool's own next pick contradicted a third of the
+  time with that partner still on the board** (measured: 32 of 80 promises broken,
+  26 of them that way, median quoted share 100%) — re-phrased as the assumption
+  behind the number, with the break rate stated on the panel. **The kicker
+  recommendation asserted "the best your scoring sees" with no disclosure that the
+  K board is known-misordered**; `DraftSession.rec_caveats` now attaches the
+  item-3.10 caveat to every K row, so it reaches the panel, the queue rows and the
+  journal. Minors fixed alongside: the default engine now announces itself (the
+  cockpit PAGE renders `engine_profile` and the launch notes, not just the
+  terminal); a resume at a different `weekwise_weight` refuses like a profile
+  mismatch; `1e-09` is gone from a novice-facing sentence; the hole sentence names
+  the BYE that reconciles it with the need note two bullets above; and
+  `--legacy-engine`'s help text names the pair re-rank it actually gives up.
+  Latency re-measured paired and interleaved: **legacy 216.5/216.8 ms, composed
+  226.1/227.2 ms worst case at R=512** (gate 243 ms). Determinism re-verified
+  three ways including five `PYTHONHASHSEED` values in separate processes —
+  identical digest. **NOT fixed, deliberately, and recorded instead:** the literal
+  Rule-8 violation in `backtest/draft_backtest.py` (the boundary scanner rglobs
+  only `ziggurat/`, so it cannot see it) and the operator's ESPN league id
+  hard-coded at `tests/test_espn_ranks.py:226` since commit `dd0fcb9` — both real,
+  neither draft-critical, and both post-draft work rather than a test-file edit
+  eight hours before the draft.
+
+**The golden master now freezes BOTH engines** (`tests/test_draft_golden.py`), and
+that is the point: `--legacy-engine` is not a code path that resembles the engine
+four rehearsals ran on, it is that engine, proven against a fixture that did not
+move. The composed engine takes a different player at 7 of the 16 picks (overalls
+32, 49, 52, 129, 132, 149, 152), pinned as an EQUALITY — "at most N" would stay
+green while a small variant quietly stopped doing anything. A third fixture
+freezes the objective input (`weekly-points-2026-08-30.json`) so the DEFAULT path
+is testable with no database; without it the engine that drafts tonight would have
+been the only one the module could not check on a fresh clone.
+
+**Standing lesson this item paid for: a cost gate only sees the function it
+wraps.** The golden's rollout counter wrapped `survival.rollout_survival` alone,
+so the composed drive read 8 calls / 61,440 simulated picks against legacy's 16 /
+69,632 — a search that appeared to have SHRUNK BY HALF, when half of it had simply
+moved to `rollout_pair_batch`. A cost instrument that reads a relocation as an
+improvement is worse than none.
+
 Calendar anchors (draft SCHEDULED 2026-08-10; all confirmed against ESPN's own
 `draftSettings`, not operator transcription):
 - **2026-08-24, 12:00** — draft order drawn from a hat, then entered in ESPN by
@@ -538,8 +656,11 @@ it.
 
 **The executable procedure for draft night — and for every practice run before
 it — is [`docs/draft-day-runbook.md`](./docs/draft-day-runbook.md)**: setup,
-preflight, launch order, the three flags never to pass, the badge and Autopick
-checks, and the four-rung fallback ladder. **Both remaining acceptance tests
+preflight, launch order, the three flags never to pass, the ONE flag that is a
+tool (`--legacy-engine`, rung 0 of the ladder — the first thing to try if the
+cockpit looks wrong, and a RE-LAUNCH decision, never a mid-draft one: a resume
+across engines is refused by design), the badge and Autopick checks, and the
+fallback ladder. **Both remaining acceptance tests
 were run 2026-08-29 and PASSED** (§8.3 mid-draft kill; §8.4 refusal, whose push
 half a practice draft structurally cannot reach and which was therefore driven
 directly — the first live firing of the draft cockpit's ntfy path). The kill

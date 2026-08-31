@@ -434,6 +434,7 @@ def build_valuation(
     rules: scoring.ScoringRules = scoring.HOUSE_RULES,
     view: base.AsOfView = "historical",
     denoise_kdst: bool = True,
+    lines: Mapping[tuple, WeeklyLine] | None = None,
 ) -> list[ValuationRow]:
     """Global static VOR board, read at ``as_of`` (keyword-only; no implicit now).
 
@@ -445,11 +446,34 @@ def build_valuation(
     that wrong), groups skill by gsis_id (source_player_id fallback when the
     crosswalk is unresolved, so distinct rookies/DEF never merge) and DST by
     normalized team, then prices VOR off ``replacement_levels``.
+
+    ``lines`` lets a caller hand over a :func:`weekly_lines` map it has ALREADY
+    built rather than pay a second full pass over the projections table. Measured
+    on the live 2026 board that pass is 3.55 s, and the draft-night launch used to
+    make THREE of them (item 3.11 audit finding 1: ``load_draft_board`` ->
+    ``build_kicker_board`` + ``load_board`` + ``grader.weekly_points_map``).
+    See the ``lines is None`` branch below for the contract.
     """
-    lines = weekly_lines(
-        conn, as_of=as_of, season=season, weeks=weeks, source=source,
-        rules=rules, view=view,
-    )
+    if lines is None:
+        lines = weekly_lines(
+            conn, as_of=as_of, season=season, weeks=weeks, source=source,
+            rules=rules, view=view,
+        )
+    else:
+        # THE CALLER OWNS THE CONTRACT for as_of/season/source/view (this
+        # function cannot re-check a gate it did not run), exactly as in
+        # kicker_board.build_kicker_board. The one half that IS checkable is the
+        # week window: season_points is a plain sum over `points`, so a map built
+        # over a wider span would silently inflate every projection on this board.
+        want = frozenset(int(w) for w in (DEFAULT_WEEKS if weeks is None else weeks))
+        stray = {w for ln in lines.values() for w in ln.points} - want
+        if stray:
+            raise ValueError(
+                "the weekly_lines map handed to build_valuation covers weeks "
+                f"{sorted(stray)} outside weeks={sorted(want)}; it was built over a "
+                "different window, and season_points sums whatever it is given. "
+                "Build both with the same weeks="
+            )
     if not lines:
         return []
 

@@ -222,8 +222,12 @@ def test_pull_uses_patched_seam(db):
     # pull_espn_ranks must route through fetch_player_universe (the one seam);
     # patching it proves no live call and wires end-to-end into the accessor.
     with patch.object(espn_source, "fetch_player_universe", return_value=_raw_players()) as m:
+        # Rule 5: a PLACEHOLDER id, like every other test in this file. The
+        # operator's real 10-digit ESPN league id lived here from commit dd0fcb9
+        # until 2026-08-31 — in a public repo, read straight out of `.env`, while
+        # the seam it is passed to is patched and the value is never asserted on.
         n = espn_ranks.pull_espn_ranks(
-            db, league_id=1160156465, season=2026,
+            db, league_id=1, season=2026,
             espn_s2="x", swid="y", retrieved_as_of="2026-07-20", today="2026-07-20",
         )
     m.assert_called_once()

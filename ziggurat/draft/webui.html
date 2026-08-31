@@ -82,6 +82,23 @@
     background: var(--warn); color: #0b1017; font-weight: 700; font-size: 15px;
   }
 
+  /* Engine fault banner: the composed re-rank raised and this recommendation
+     came from the shipped 2.3 engine instead (or nothing came at all). Amber,
+     not the pulsing red — the cockpit is still recommending. */
+  #enginewarn {
+    display: none; margin: 0 0 10px; padding: 10px 14px; border-radius: 6px;
+    background: var(--warn); color: #0b1017; font-weight: 700; font-size: 14px;
+    white-space: pre-wrap;
+  }
+  /* The launch notes, kept ON THE PAGE. They used to be one terminal line at
+     18:45 that the runbook told the operator to forget — which is where the
+     "which engine is on the clock?" and "this K board is uncorrected" answers
+     both lived. Quiet by design: this is standing context, not an alarm. */
+  #notes {
+    color: var(--dim); font-size: 12px; margin: 0 0 10px; line-height: 1.5;
+  }
+  #notes .n { display: block; }
+
   /* quick-pick strip: the likely next picks as one-press buttons */
   #quick { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
   #quick button.qp {
@@ -149,6 +166,8 @@
 </header>
 <div id="scriptwarn"></div>
 <div id="tabwarn"></div>
+<div id="enginewarn"></div>
+<div id="notes"></div>
 <main>
   <section>
     <h2>Enter pick</h2>
@@ -252,6 +271,7 @@ function renderState(s) {
   }
   $("recal").textContent = s.recal || "";
   $("journal").textContent = s.journal;
+  renderNotes(s);
 
   // pick log (latest first)
   const log = $("log"); log.innerHTML = "";
@@ -271,7 +291,12 @@ function renderState(s) {
   } else if (!s.is_operator_turn) {
     rec.innerHTML = `<div class="notmyturn">Clock is on ${seatLabel(s.current_seat)} — enter their pick on the left (or use Autodraft). Your recommendation appears the moment the clock reaches you.</div>`;
   } else if (!s.recs.length) {
-    rec.innerHTML = `<div class="notmyturn">No recommendation available.</div>`;
+    // NEVER a bare "No recommendation available" (audit finding 3): if the
+    // engine failed, say so here, where the operator is looking, and name the
+    // way out. s.engine_error is set by the server when both engines raised.
+    rec.innerHTML = s.engine_error
+      ? `<div class="notmyturn" style="color:var(--bad);font-weight:700;white-space:pre-wrap">${esc(s.engine_error)}</div>`
+      : `<div class="notmyturn">No recommendation available.</div>`;
   } else {
     const r = s.recs[0];
     const head = `<div class="top">${esc(r.name)} <span style="color:var(--accent)">${esc(r.position)}</span> ${esc(r.team || "")}</div>`;
@@ -311,6 +336,24 @@ function renderState(s) {
   renderScripts(s);
   renderAvail();
   renderRoster(s);
+}
+// Standing launch context + any engine fault, both on the PAGE.
+function renderNotes(s) {
+  const faults = (s.engine_faults || []).slice();
+  if (s.engine_error) faults.push(s.engine_error);
+  const w = $("enginewarn");
+  w.style.display = faults.length ? "block" : "none";
+  w.textContent = faults.join("\n\n");
+
+  const n = $("notes");
+  const lines = (s.notes || []).slice();
+  if (s.engine_profile) {
+    lines.unshift("Engine on the clock: " + s.engine_profile
+      + (s.engine_profile === "legacy"
+          ? " (--legacy-engine: the pre-2026-08-31 cockpit)"
+          : " (default: week-by-week re-rank at every pick, pair re-rank at the first pick of each of your pairs)"));
+  }
+  n.innerHTML = lines.map(x => `<span class="n">${esc(x)}</span>`).join("");
 }
 function renderWriter(s) {
   // Writer telemetry (POST /api/queue/status -> state.queue) + the alarm.

@@ -29,6 +29,11 @@ is ON**. Rounds 1–3 in person, then it runs itself.
 **Never pass `--pick-order`, `--port`, or `--journal`.** Section 3 explains why
 each one silently breaks something.
 
+**The one flag that IS a tool: `--legacy-engine`.** It restores the engine
+exactly as it drafted the four rehearsals, and it is rung 0 of the fallback
+ladder in §6 — the first thing to try if the cockpit looks wrong. It costs one
+re-launch and nothing else.
+
 ---
 
 ## 1. What must already be true
@@ -125,7 +130,19 @@ What you need to see:
 ```
 
 **[practice only]** Once, before Monday, also confirm the suite is green:
-`.venv/bin/pytest` — 1473 passed / 4 skipped as of 2026-08-27.
+`.venv/bin/pytest` — **2443 passed / 4 skipped as of 2026-08-31** (it was 1473 on
+2026-08-27; two phases of measurement work, the item-3.11 integration and its
+audit-fix round landed in between). It takes about 5½ minutes.
+
+**Two failures here are EXPECTED on draft day and are not a reason to stop.**
+Both are the same cause: the golden master is frozen at `as_of 2026-08-30`, and
+the 07:20 ingest re-pulls `espn_ranks` / `projections` every morning. When the
+board moves, `test_the_live_board_still_matches_the_frozen_board` and
+`test_the_live_weekly_points_map_still_matches_the_frozen_one` fail *by design* —
+they are drift detectors for the fixture, not correctness checks on the engine.
+Anything ELSE failing is real. Do not re-bless a fixture on draft day: the frozen
+board is what every measurement was made on, and the draft itself reads the live
+board either way.
 
 ---
 
@@ -141,14 +158,43 @@ cd ~/Projects/ziggurat
 .venv/bin/ziggurat draft-web --season 2026 --slot 9
 ```
 
-It prints three lines. The first is the page; keep the terminal open — closing
-it ends the session.
+It prints one line about the kicker board and one naming the engine, then three
+lines about the cockpit. The cockpit URL is the page; keep the terminal open —
+closing it ends the session.
 
 ```
+KICKER BOARD: uncorrected (every kicker understated ~25-43 pts, ...). Nothing to do about it tonight; ...
+ENGINE: default (composed) — the week-by-week re-rank is on at every pick, ...
 Draft cockpit: http://127.0.0.1:8811/  (Ctrl-C to quit; journal: data/draft/session-YYYYMMDD-HHMMSS.jsonl)
 ESPN sync userscript (install once in Tampermonkey): http://127.0.0.1:8811/sync.user.js
 ESPN queue writer (install once in Tampermonkey): http://127.0.0.1:8811/queue.user.js
 ```
+
+**It takes about 4 seconds and then it is up** (measured 2026-08-31 on this box:
+3.8 s to the first line, 4.0 s to serving — and the same on `--legacy-engine`,
+which is the point: the default engine no longer costs anything at launch). If
+the terminal is still silent after ten, something is wrong; do not Ctrl-C before
+then.
+
+**Both lines also appear ON THE COCKPIT PAGE**, under the header, so "which
+engine is on the clock?" is answerable at 18:45 from the browser rather than
+from terminal scrollback. `ENGINE: default (composed)` is what you want tonight;
+`ENGINE: --legacy-engine` means you passed the escape hatch.
+
+**The kicker line is the item-3.10 disclosure** — the K board is known to be
+misordered because the projections feed drops every 50+ made field goal. It is
+NOT actionable tonight (the correction's source table has never been pulled on
+this box, and pulling it hours before the draft would move the board out from
+under the frozen golden master) and it affects WHICH kicker goes at round 10,
+not whether to take one. You no longer have to remember it: **the same caveat is
+attached to the kicker recommendation itself**, so it is on the panel at ~21:00
+when the pick is actually made. See §9.
+
+**One more line can appear, and it is the one to read carefully:** a sentence
+beginning `ENGINE: week-by-week re-rank UNAVAILABLE`. That means an improvement
+could not be built and the session fell back to the engine that drafted four
+rehearsals — deliberately, rather than refusing to start. Nothing to do; draft
+normally, and note it in the journal afterwards.
 
 **The three flags not to pass, and what each one silently breaks:**
 
@@ -307,6 +353,8 @@ Everything in one place. On draft night, be here by **18:45**.
 - [ ] ESPN **Autopick toggle ON** — and see §3.5 on trusting that reading
 - [ ] the queue writer has populated a non-empty ESPN Pick Queue
 - [ ] cockpit shows a full board and your seat as **9**
+- [ ] you know that `--legacy-engine` is the one-flag undo (§6 rung 0), and that
+      it is a **re-launch decision, not a mid-draft one**
 
 ---
 
@@ -346,18 +394,92 @@ usually why — it expects to still have him at 12.
 - **D/ST around pick 89 and a kicker around 92 or 109.** The room takes theirs
   around 141–152. This is the divergence play — our scoring values distance
   kickers and both D/ST brackets in ways ESPN's default board does not — and it
-  is the single clearest edge the system has. Let it happen.
+  is the single clearest edge the system has. Let it happen. It is **unchanged**
+  by the 2026-08-31 engine change: both engines take the D/ST at 89 and the
+  kicker at 92 on the frozen board, and a test asserts exactly that by name
+  (`test_the_kdst_divergence_play_survives_the_rerank`), because a re-rank
+  quietly eating this edge would otherwise be buried among 160 other numbers.
 - **A third quarterback late.** In a 1-QB league that is one misallocated bench
   slot, a known and accepted residual (§9). It is a droppable backup, not a
   problem to solve at the table.
+
+**At the FIRST pick of each pair (9, 29, 49, 69, 89, 109, 129, 149) the panel
+names a second player.** It reads "The pairing this score assumes: him now, then
+X at #12 — X is what the room most often leaves (…%)". Read it as what it says:
+the doubled score is the value of holding a PAIR, and X is the pairing that
+arithmetic assumed. **It is not a promise about your next pick.** Three picks
+later the tool re-decides from scratch against the roster you then have, and it
+lands on somebody other than X about a third of the time *even with X still
+available* — measured over 10 simulated drafts. The panel says this itself, in
+the bullet right underneath. That is normal, and it is not the cockpit
+contradicting itself.
+
+**And one thing that is genuinely new this year.** From 2026-08-31 the
+recommendation reasons can include a sentence about *weeks* — something like "he
+plays in the weeks your other backs are off". That is the week-by-week term
+explaining itself, and it always arrives with its own limitation attached ("this
+week-by-week score has NO injury model: a bench player is worth nothing in it
+unless he covers a bye"). Read both halves. It appears only on a pick whose place
+in the order that term actually changed.
 
 ---
 
 ## 6. When something goes wrong
 
-The ladder, worst-realistic-case first. Each rung degrades to the one below it
-rather than to nothing — that is the design, and it is why the queue is the
-safety layer and the script is not.
+The ladder. **Rung 0 is a flag; every rung below it is a failure mode.** Each of
+those degrades to the one below rather than to nothing — that is the design, and
+it is why the queue is the safety layer and the script is not.
+
+### Rung 0 — the recommendations look wrong: `--legacy-engine`
+
+```bash
+.venv/bin/ziggurat draft-web --season 2026 --slot 9 --legacy-engine
+```
+
+**Try this first, before diagnosing anything.** As of 2026-08-31 the default
+engine adds two re-ranks to the shipped one, over separate picks (item 3.11):
+at the FIRST pick of each of your pairs (overall 9, 29, 49, 69, 89, 109, 129,
+149) it asks which *pair* of players you end up holding rather than who is best
+right now; everywhere else it asks what each candidate does to a *seated lineup
+in every week of the season* — the term that can see a bye collision. Both are
+measured better and they are what should run. But they are also the newest thing
+in the system on the newest day, and `--legacy-engine` is the engine that drafted
+four rehearsals, proven bit-for-bit against its own frozen golden master
+(`tests/test_draft_golden.py`) rather than merely believed to be equivalent.
+
+What you would notice: on the frozen board the default takes a different player
+at **7 of the 16 picks** (overall 32, 49, 52, 129, 132, 149, 152). On the
+frozen board the ROSTER SHAPE is identical either way — both engines finish
+3 QB / 3 RB / 5 WR / 3 TE / 1 D/ST / 1 K — so this is not "more running backs";
+it is different *names* in those seven slots, chosen so that fewer weeks of the
+season have an unfillable starting slot (measured 0.47 → 0.27 holes a season;
+re-measured 0.45 → 0.29 over 300 fresh simulated rooms on 2026-08-31, where the
+shape came out identical in two thirds of rooms and differed by about one RB/WR
+in the rest — so shape is not a reliable tell for which engine is running; the
+cockpit page names it, §3.1). It does **not** move the D/ST or the kicker
+(§5 above). One number will look wrong and is not: at the
+eight pair picks the displayed **pick score is a TWO-PICK TOTAL**, so it reads
+about double what the same player would score on the legacy engine. The reasons
+say so in the panel, right under the number.
+
+**You should not need this flag for a mere wobble.** If the week-by-week or pair
+re-rank ever throws mid-draft, the cockpit does not go blank: it serves that one
+recommendation from the shipped engine instead and says so in an amber banner
+naming the cause. Take the pick and carry on. Rung 0 is for recommendations that
+look *absurd*, not for a banner.
+
+If a recommendation looks absurd rather than merely surprising, take the two
+seconds and re-launch on the legacy engine; you give up about 0.06 expected wins
+a season and nothing else.
+
+**If you are already mid-draft, you cannot switch.** The journal records which
+engine made the picks and a resume on the other one REFUSES, by design: the picks
+already made would stand while every remaining pick was decided differently, with
+nothing to show for it. Finish on the engine you started on. The refusal message
+names the flag to add or drop, so you cannot get this wrong by accident — but
+that only helps at a restart, not at pick 40.
+
+### The failure ladder proper
 
 **The queue writer halts (red badge).** ESPN's queue still holds whatever was
 last written, so autopick still drafts from our board. Recover by clicking the
@@ -466,6 +588,12 @@ clock.
 `SIGKILL` at overall 45; ESPN drafted picks 49 and 52 from the last-written
 queue with no cockpit alive. Resume in 4 s, 0 conflicts.
 
+**That 4 s was re-measured on 2026-08-31 and still holds on the default engine**
+— 3.8 s to the first line, 4.0 s to serving, on a real 100-pick journal. It
+briefly did not: the composed launch read the projections table three separate
+times (once for the kicker attempt, once for the board, once for the objective)
+and a resume took 11 s idle and 22 s under load. All three now share one read.
+
 **What it taught, and the reason depth matters:** rivals took the top FOUR rows
 of our queue in the four picks between the kill and our turn. ESPN reached row 4
 for pick 49 and row 5 for 52. **A queue sitting at the `K_MIN=3` floor would
@@ -541,9 +669,39 @@ discovery, which only ever looks one directory deep.
 
 ## 9. Known, accepted, and not worth fixing at the table
 
+- **The kicker board is UNCORRECTED, and the cockpit says so at launch.** The
+  Sleeper projections feed publishes made-FG distance buckets that do not add up
+  to its own made-FG total: it never serves the 50+ bucket, so every long field
+  goal scores zero while every miss still charges −1. Measured on the live board:
+  all 32 starting kickers understated by 25–43 points on a ~120-point season, and
+  the shortfall is **not** a constant fraction (8.8%–25.8%), so it REORDERS the K
+  board rather than scaling it. `ziggurat/core/kicker_board.py` is the fix and it
+  is wired in — but its source table (`espn_projections`) has never been pulled
+  on this box, so the correction reports OFF. **The caveat rides the kicker
+  recommendation itself**, not just the launch banner: the panel at round 10 says
+  in so many words that this K board is uncorrected, that the shortfall reorders
+  it rather than scaling it, and that WHICH kicker is therefore close to a
+  coin-flip among the top few. **Deliberately not fixed tonight**:
+  filling it needs a live ESPN pull whose rows can only be stamped *today*, which
+  is invisible at the golden master's frozen `as_of` — i.e. the board that
+  decided the picks could not be the board any test had ever seen. Post-draft
+  work, with a source spec and a re-blessed golden. The consequence is confined
+  to WHICH kicker goes at round 10.
 - **A third QB in the last rounds.** One misallocated bench slot in a 1-QB
   league; the tail runs into the QB cap. The starting-lineup metric that grades
-  the engine scores bench picks zero, so it cannot see this either way.
+  the engine scores bench picks zero, so it cannot see this either way. The
+  week-by-week engine does not fix it and was never expected to: it prices a
+  bench QB3 at zero for the same reason.
+- **Every margin the default engine claims is against a MODEL of the room.** The
+  +0.04 expected wins is measured against the calibrated 2.2 simulation of nine
+  rivals, on our own projections, graded by our own week-by-week objective. The
+  one external validation this project has (2021–2025 FantasyPros ECR boards,
+  graded on realized weekly points) could **not** demonstrate that the engine
+  beats drafting the preseason consensus straight down — mean +0.066 wins and not
+  one of 16 cells excluding zero. That result is about roster CONSTRUCTION only
+  (no historical point-in-time projections exist, so every strategy shares the
+  within-position ordering), and it is the right amount of humility to hold about
+  tonight.
 - **`autodraft_fraction = 0.2`** is a 2025 fit. All 10 seats are owned for
   2026, so the sim's ~2 random autodraft seats are now an assumption rather
   than an observation — the softest input to every survival estimate.
@@ -577,6 +735,7 @@ discovery, which only ever looks one directory deep.
 | Our slot | **9** |
 | Our picks | 9, 12, 29, 32, 49, 52, 69, 72, 89, 92, 109, 112, 129, 132, 149, 152 |
 | Command | `.venv/bin/ziggurat draft-web --season 2026 --slot 9` |
+| If it looks wrong | same command `--legacy-engine` (§6 rung 0) |
 | Cockpit | `http://127.0.0.1:8811/` |
 | Userscripts | `/sync.user.js` (v1.2), `/queue.user.js` (v1.9) |
 | Journal | `data/draft/session-<timestamp>.jsonl` |

@@ -277,6 +277,12 @@ class WebCockpit:
     # the operator ran --no-push or the channel failed to build (the cockpit
     # still evaluates and RECORDS decisions, so 'would have pushed' is visible).
     pusher: Any = None
+    # The launch notes simulator.load_draft_board built (which engine is running,
+    # whether the K board is corrected). The CLI echoes these to the terminal at
+    # 18:45; serving them here is what lets the PAGE say which engine is on the
+    # clock — a question the operator previously could not answer from the cockpit
+    # at all, because only --legacy-engine printed a line (audit minors).
+    notes: tuple[str, ...] = ()
     _clock: Any = field(default=time.monotonic, init=False)
     _push_log: list[dict[str, Any]] = field(default_factory=list, init=False)
     _pushes_sent: int = field(default=0, init=False)
@@ -291,6 +297,9 @@ class WebCockpit:
     _stall_pushed: bool = field(default=False, init=False)
     _last_head_seen: int = field(default=0, init=False)
     _last_head_change_at: float = field(default=0.0, init=False)
+    # Set when the recommendation surface raised through BOTH engines; rendered
+    # on the page and cleared on the next successful recompute.
+    _engine_error: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.resolver = NameResolver(self.session.board)
@@ -318,8 +327,21 @@ class WebCockpit:
             return
         try:
             self._recs = tuple(self.session.recommend())
-        except Exception:
+            self._engine_error = None
+        except Exception as exc:  # noqa: BLE001
+            # An empty panel is survivable; an empty panel that says NOTHING is
+            # not (audit finding 3). session.recommend() already falls back to the
+            # shipped 2.3 engine on a composed-engine fault, so reaching here means
+            # BOTH engines failed — which the operator must be told, on the page,
+            # with the flag that gets him out of it.
             self._recs = ()
+            self._engine_error = (
+                f"RECOMMENDATION UNAVAILABLE at pick {self.session.overall_pick}: "
+                f"{type(exc).__name__}: {exc}. Draft from the board on the left, or "
+                "restart on the shipped engine: ziggurat draft-web --season "
+                "<season> --slot <slot> --legacy-engine --resume --journal "
+                f"{self.session.journal_path}"
+            )
         try:
             fired = self.posture.evaluate(self.session)
         except Exception:
@@ -364,6 +386,13 @@ class WebCockpit:
                 ],
                 "recs": [] if s.complete else [_rec_json(r) for r in self._recs],
                 "recal": self._recal.message if self._recal is not None else None,
+                "engine_profile": getattr(s, "engine_profile", None),
+                "notes": list(self.notes),
+                # Non-empty ONLY when the composed engine raised and one
+                # recommendation was served by the legacy engine instead. An
+                # empty panel with no explanation was the pre-fix behaviour.
+                "engine_faults": list(getattr(s, "engine_faults", ()) or ()),
+                "engine_error": self._engine_error,
                 "posture": self._advice.message if self._advice is not None else None,
                 "contingencies": [b.message for b in branches],
                 "sync": self._sync_state(),
@@ -1187,6 +1216,7 @@ def serve(
     port: int = 8811,
     espn_names: dict[str, str] | None = None,
     pusher: Any = None,
+    notes: tuple[str, ...] = (),
 ) -> ThreadingHTTPServer:
     """Build the cockpit server on 127.0.0.1:``port`` (not started).
 
@@ -1198,7 +1228,7 @@ def serve(
     (``push_bridge.make_draft_pusher``); None disables sends but decisions are
     still evaluated and recorded."""
     cockpit = WebCockpit(session=session, espn_names=dict(espn_names or {}),
-                         pusher=pusher)
+                         pusher=pusher, notes=tuple(notes))
     return ThreadingHTTPServer(("127.0.0.1", port), _make_handler(cockpit))
 
 
@@ -1218,18 +1248,25 @@ def launch(
     espn_names: dict[str, str] | None = None,
     db_path: Path | None = None,
     push: bool = True,
+    weekly=None,
+    kicker_corrected: bool = True,
+    notes: tuple[str, ...] = (),
 ) -> None:
     """Build the session (start or resume — the exact ``app.launch`` semantics,
     including the O_EXCL no-clobber guard) and serve until Ctrl-C. The thin
-    ``draft-web`` CLI calls this after loading the board (Rule 3)."""
+    ``draft-web`` CLI calls this after loading the board (Rule 3).
+
+    ``weekly`` is the item-3.11 week-by-week house-points map that selects the
+    composed engine; ``None`` is ``--legacy-engine``. It is read at the same DB
+    seam and the same ``as_of`` as the board (``simulator.load_draft_board``)."""
     from ziggurat.core.valuation import DEFAULT_ROSTER
-    from ziggurat.draft.session import JournalExistsError
+    from ziggurat.draft.session import EngineProfileMismatch, JournalExistsError
 
     roster = roster if roster is not None else DEFAULT_ROSTER
     order = list(pick_order) if pick_order is not None else list(range(roster.teams))
     try:
         if resume:
-            session = DraftSession.resume(journal_path, board)
+            session = DraftSession.resume(journal_path, board, weekly=weekly)
         else:
             session = DraftSession.start(
                 board,
@@ -1241,6 +1278,7 @@ def launch(
                 roster=roster,
                 session_seed=seed,
                 rollouts=rollouts,
+                weekly=weekly,
             )
     except JournalExistsError as exc:
         print(str(exc))
@@ -1249,9 +1287,27 @@ def launch(
             "one, pass a different --journal path."
         )
         raise SystemExit(1) from exc
+    except EngineProfileMismatch as exc:
+        # A recovery path: the operator is already having a bad minute. One
+        # sentence and the fix, never a traceback with the answer at the bottom.
+        print(str(exc))
+        raise SystemExit(1) from exc
 
     for line in getattr(session, "resume_warnings", ()) or ():
         print(line)
+    # A degraded engine says so here rather than in a traceback (audit finding 2).
+    for line in getattr(session, "launch_warnings", ()) or ():
+        print(line)
+
+    # Rule 6, on the RECOMMENDATION rather than on the terminal (audit finding 5).
+    # The launch note above is read at 18:45; the kicker is taken at ~21:00 off a
+    # panel that otherwise says "this is the best your scoring sees" with no
+    # provenance. Registering the caveat here puts it in `reasons`, so it reaches
+    # the cockpit panel, the /api/queue rows and the journal alike.
+    if not kicker_corrected:
+        from ziggurat.core.kicker_board import UNCORRECTED_KICKER_CAVEAT
+
+        session.rec_caveats["K"] = (UNCORRECTED_KICKER_CAVEAT,)
 
     # The §7 push channel: built loudly at launch (a draft-night
     # misconfiguration must surface at 18:00, not silently at 19:40) but a
@@ -1272,11 +1328,19 @@ def launch(
     elif not push:
         print("Push escalation: disabled (--no-push).")
 
-    server = serve(session, port=port, espn_names=espn_names, pusher=pusher)
+    server = serve(session, port=port, espn_names=espn_names, pusher=pusher,
+                   notes=notes)
     host, bound_port = server.server_address[:2]
-    print(f"Draft cockpit: http://{host}:{bound_port}/  (Ctrl-C to quit; journal: {session.journal_path})")
-    print(f"ESPN sync userscript (install once in Tampermonkey): http://{host}:{bound_port}/sync.user.js")
-    print(f"ESPN queue writer (install once in Tampermonkey): http://{host}:{bound_port}/queue.user.js")
+    # FLUSH, because the next statement blocks forever. At a terminal stdout is
+    # line-buffered and these appear at once; REDIRECTED (nohup, a log file, the
+    # runbook §8.0 remote/unattended run) it is BLOCK-buffered, and ~950 bytes
+    # never reach 8 KiB — so the cockpit URL, the two userscript routes and the
+    # push-channel status sat in the buffer until the process died. The operator
+    # of a remote run saw the two `typer.echo` notes (click flushes) and then
+    # silence, which is indistinguishable from a hang. Measured 2026-08-31.
+    print(f"Draft cockpit: http://{host}:{bound_port}/  (Ctrl-C to quit; journal: {session.journal_path})", flush=True)
+    print(f"ESPN sync userscript (install once in Tampermonkey): http://{host}:{bound_port}/sync.user.js", flush=True)
+    print(f"ESPN queue writer (install once in Tampermonkey): http://{host}:{bound_port}/queue.user.js", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

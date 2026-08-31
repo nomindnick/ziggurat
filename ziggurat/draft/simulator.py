@@ -19,7 +19,7 @@ takes an explicit keyword ``as_of`` (no implicit now — Rule 1).
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -378,8 +378,26 @@ def load_board(
     season,
     source: str = "sleeper_rotowire",
     weeks=None,
+    kicker_board=None,
+    lines=None,
 ) -> tuple[BoardEntry, ...]:
     """Build the sim board from the DB: house VOR joined to the ESPN board rank.
+
+    ``kicker_board`` (item 3.11) is an optional
+    :class:`~ziggurat.core.kicker_board.KickerBoard`. When given, the K rows are
+    re-priced and the whole board re-ranked through
+    :func:`ziggurat.core.kicker_board.apply_to_valuation` BEFORE the ESPN join,
+    so every downstream consumer — VOR, the candidate gather, survival, the
+    reasons — sees one consistent board. It is a parameter rather than a default
+    because this function is also the harness's board loader and an experiment
+    must be able to load the uncorrected board on purpose;
+    :func:`load_draft_board` is the draft-night entry point that turns it ON.
+    Passing ``None`` is exactly the pre-3.11 board.
+
+    ``lines`` is the optional ``weekly_lines`` hand-over described on
+    :func:`~ziggurat.core.valuation.build_valuation` — the caller owns the
+    as_of/season/source/view contract. :func:`load_draft_board` uses it so the
+    launch reads the projections table ONCE instead of three times.
 
     The ONLY DB seam. ``as_of`` is REQUIRED and threaded into both
     ``build_valuation`` and ``get_espn_draft_ranks`` (Rule 1 — no implicit now).
@@ -392,7 +410,17 @@ def load_board(
     from ziggurat.data.nfl import base
     from ziggurat.data.nfl.espn_ranks import get_espn_draft_ranks
 
-    val_rows = build_valuation(conn, as_of=as_of, season=season, source=source, weeks=weeks)
+    val_rows = build_valuation(
+        conn, as_of=as_of, season=season, source=source, weeks=weeks, lines=lines
+    )
+    if kicker_board is not None:
+        from ziggurat.core.kicker_board import apply_to_valuation
+
+        # Re-prices the K rows and rebuilds replacement level / VOR / ranks.
+        # Raises KickerBoardMismatch when the board was built over a different
+        # season or week window than these rows — never a 60% overstatement
+        # wearing the correction's confident reasons.
+        val_rows = apply_to_valuation(val_rows, kicker_board)
     espn_rows = get_espn_draft_ranks(conn, as_of=as_of, season=season)
 
     rank_by_espn: dict[str, int] = {}
@@ -480,6 +508,173 @@ def load_board(
         )
         used_ids.add(str(eid))
     return tuple(board)
+
+
+@dataclass(frozen=True)
+class DraftInputs:
+    """Everything the draft-night cockpit reads from the database, in one read.
+
+    Item 3.11. The cockpit used to need exactly one thing from the DB (the
+    board); the composed engine needs three, and they must all be read at the
+    SAME ``as_of``/season/source or the decision board and the objective that
+    re-ranks it disagree about who a player is. So they are built together, once,
+    here at the single DB seam (Rule 1: ``as_of`` is threaded, never assumed).
+
+    * ``board``    — the priced board, kicker-corrected when ``kicker_board``
+                     is not None.
+    * ``weekly``   — the per-week house points map the week-by-week re-rank
+                     grades rosters with, spliced with the SAME kicker
+                     correction. ``None`` under ``--legacy-engine``.
+    * ``kicker_board`` — the correction itself, kept so a caller can say what
+                     it did. ``None`` when off or unavailable.
+    * ``notes``    — plain-language lines the front-end PRINTS at launch
+                     (Rule 6). Never empty: the operator is told what engine he
+                     is drafting with, including when a correction was asked
+                     for and could not be served.
+    * ``kicker_corrected`` — whether the K rows on ``board`` carry the item-3.10
+                     correction. FALSE means every kicker is understated ~25-43
+                     points and the K board is MISORDERED, which the cockpit
+                     must re-state on the kicker recommendation itself (item
+                     3.11 audit finding 5): a launch-time line printed three
+                     hours earlier is not a reason attached to a recommendation,
+                     and Rule 6 asks for the latter.
+    """
+
+    board: tuple[BoardEntry, ...]
+    espn_names: Mapping[str, str]
+    weekly: object | None = None
+    kicker_board: object | None = None
+    notes: tuple[str, ...] = ()
+    kicker_corrected: bool = False
+
+
+def load_draft_board(
+    conn,
+    *,
+    as_of,
+    season,
+    source: str = "sleeper_rotowire",
+    weeks=None,
+    legacy: bool = False,
+) -> DraftInputs:
+    """The DRAFT-NIGHT board and objective (item 3.11) — one read, one ``as_of``.
+
+    ``legacy=True`` reproduces the pre-3.11 cockpit exactly: the uncorrected
+    board, no week-by-week objective, and a note saying so. That is what
+    ``--legacy-engine`` passes, and it is the ladder's rung 0 in
+    ``docs/draft-day-runbook.md``.
+
+    WHY A FAILURE HERE IS A FALLBACK AND NOT A CRASH. Both additions are
+    IMPROVEMENTS to a cockpit that already works. At 18:45 on draft night the
+    cost of refusing to start is total and the cost of drafting on the engine
+    that ran four rehearsals is zero, so an unavailable correction degrades to
+    the legacy path — but LOUDLY, in ``notes``, which both front-ends print. A
+    silent degrade would be the Rule-1-invisible failure this repo keeps
+    finding; a crash would be worse than the thing it is protecting against.
+    """
+    from ziggurat.core import kicker_board as kbm
+    from ziggurat.core.valuation import weekly_lines
+
+    notes: list[str] = []
+    kboard = None
+    kicker_ok = False
+
+    # ONE pass over the projections table, shared by all three consumers below
+    # (item 3.11 audit finding 1). Each of build_kicker_board / build_valuation /
+    # weekly_points_map used to make its own — 3 x 3.55 s measured on the live
+    # 2026 board, so the composed cockpit printed nothing for ~11.8 s on an idle
+    # box and ~23.6 s under load, on every launch AND every crash-resume. All
+    # three want the SAME span (``weeks`` or valuation.DEFAULT_WEEKS) and the same
+    # as_of/season/source/view, which is precisely the hand-over contract each of
+    # them documents; the span half is re-checked inside each callee.
+    lines = weekly_lines(conn, as_of=as_of, season=season, weeks=weeks, source=source)
+
+    if legacy:
+        notes.append(
+            "ENGINE: --legacy-engine — the pre-2026-08-31 cockpit exactly. "
+            "No kicker correction, no week-by-week re-rank."
+        )
+    else:
+        try:
+            kboard = kbm.build_kicker_board(
+                conn, as_of=as_of, season=season, weeks=weeks,
+                projection_source=source, lines=lines,
+            )
+        except kbm.KickerBoardUnavailable as exc:
+            # Say it in one line and say it is not tonight's problem. This
+            # message is read at 18:45 on a 90-second clock; an alarm the
+            # operator cannot act on is how he learns to skip the banner.
+            notes.append(
+                "KICKER BOARD: uncorrected (every kicker understated ~25-43 pts, "
+                "and the K board is misordered — item 3.10). Nothing to do about "
+                "it tonight; the K pick is round 10 and its ORDER is what is "
+                f"affected, not whether to make it. Reason: {exc}"
+            )
+        else:
+            kicker_ok = True
+            notes.append(
+                f"KICKER BOARD: corrected — {kboard.corrected_count} of "
+                f"{kboard.line_count} kickers re-priced from ESPN's own projected "
+                f"stat line, re-scored through core/scoring.py. {kbm.CORRECTION_LABEL}"
+            )
+
+    board = load_board(
+        conn, as_of=as_of, season=season, source=source, weeks=weeks,
+        kicker_board=kboard, lines=lines,
+    )
+    names = espn_display_names(conn, board, as_of=as_of, season=season)
+    if legacy or not board:
+        return DraftInputs(
+            board=board, espn_names=names, notes=tuple(notes),
+            kicker_corrected=kicker_ok,
+        )
+
+    from ziggurat.draft import grader
+
+    # THE DOCSTRING'S PROMISE, IMPLEMENTED FOR BOTH HALVES (item 3.11 audit
+    # finding 2). Until this catch existed only the kicker half degraded; a
+    # GradeInputError / BoardKeyCollision out of weekly_points_map propagated
+    # through _resolve_draft_launch as a bare traceback that killed the launch and
+    # never named --legacy-engine — at 18:45, on the one evening with no slack.
+    # `Exception` is deliberately broad: at launch time the cost of refusing to
+    # start is TOTAL and the cost of drafting on the engine that ran four
+    # rehearsals is ~0.06 expected wins. It is not silent — the fallback is a
+    # note, and both front-ends print notes.
+    try:
+        weekly = grader.weekly_points_map(
+            conn, as_of=as_of, season=season, source=source,
+            weeks=weeks, rank_weeks=weeks, board=board, lines=lines,
+        )
+        if kboard is not None:
+            # The grading twin MUST carry the same correction as the board, or the
+            # re-rank measures the disagreement instead of the roster (kicker_board
+            # docstring: the silent no-op flips the sign of the evidence).
+            weekly = kbm.apply_to_weekly_points(weekly, kboard)
+    except Exception as exc:  # noqa: BLE001 — see the paragraph above
+        notes.append(
+            "ENGINE: week-by-week re-rank UNAVAILABLE — falling back to the "
+            "pre-2026-08-31 engine for this session, which is the engine that "
+            "drafted four rehearsals. Nothing else is affected and no action is "
+            f"needed; draft normally. Reason: {type(exc).__name__}: {exc}"
+        )
+        return DraftInputs(
+            board=board, espn_names=names, notes=tuple(notes),
+            kicker_corrected=kicker_ok,
+        )
+
+    notes.append(
+        "ENGINE: default (composed) — the week-by-week re-rank is on at every "
+        "pick, and the pair re-rank at the first pick of each of your pairs. "
+        "Re-launch with --legacy-engine to undo both (runbook §6 rung 0)."
+    )
+    return DraftInputs(
+        board=board,
+        espn_names=names,
+        weekly=weekly,
+        kicker_board=kboard,
+        notes=tuple(notes),
+        kicker_corrected=kicker_ok,
+    )
 
 
 def espn_display_names(conn, board, *, as_of, season) -> dict[str, str]:
