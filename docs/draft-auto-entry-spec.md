@@ -4,8 +4,9 @@
 **Deadline:** draft is **Mon 2026-08-31 19:00 PT** (room opens 18:00). Draft
 order is drawn 2026-08-24 12:00. 16 rounds, SNAKE, **90 s per pick**.
 **Machine:** the desktop (`framework-desktop`) — see `runbook-strix-halo.md` §4.1.
-**Rule 8:** everything here lives in `ziggurat/draft/` and is deleted after
-draft day. Nothing outside may import it.
+**Rule 8:** everything here lives in `ziggurat/draft/`. Nothing outside may
+import it. *(Amended 2026-08-31: the package is retained after draft day —
+the deletion clause is retired; see CLAUDE.md Rule 8.)*
 
 This document is the reference for building the thing. The feasibility
 evidence behind it is in `IMPLEMENTATION_PLAN.md` (Checkpoint 2 notes,

@@ -716,8 +716,24 @@ Update this section whenever a phase or checkpoint closes.
    block in IMPLEMENTATION_PLAN.md. Spikes close by writing a findings note in
    `intel/research/`. Any amendment to the plan gets written down — the plan
    on disk is always the real plan.
-8. **Draft package is deletable.** Nothing outside `ziggurat/draft/` may
-   import from it; it gets deleted after draft day.
+8. **Draft package is quarantined — and retained.** Nothing in `ziggurat/`
+   outside `ziggurat/draft/` may import from it, lazily or otherwise
+   (enforced by `tests/test_draft_boundary.py`; the CLI's lazy in-body
+   imports keep their exemption). **Amended 2026-08-31 (pre-draft, operator
+   decision): the package is KEPT after draft day for reuse next season** —
+   the original rule's deletion clause is retired; the import quarantine was
+   always the load-bearing half (it is what let draft/ ship fast without
+   polluting the permanent core, and it stays). Two consequences, recorded
+   so they are not re-derived: (a) `backtest/` importing `draft/` is legal —
+   it grades draft decisions; the violation recorded in 3.11a for
+   `backtest/draft_backtest.py` dissolves under this amendment (the sin was
+   depending on code slated for deletion, and nothing is). (b) Retention is
+   NOT next-August readiness: the userscripts pin ESPN's 2026 draft-room
+   DOM, the opponent priors are 2025-room fits, and the goldens freeze the
+   2026-08-30 board — next season's draft prep starts with recalibration
+   and DOM re-verification, never with "the suite is green." If a permanent
+   module ever needs something living in `draft/` (e.g. `resolver.py`'s
+   curated alias maps), it is PORTED out, never imported.
 
 ## Repo map
 
@@ -726,7 +742,7 @@ ziggurat/            the Python package (deterministic tools)
   data/              ingestion clients + as-of data access (asof.py, store.py)
   core/              scoring.py (single source of truth), valuation, signals
   league/            league state sync (source/state/sync), opponent layer, Monte Carlo
-  draft/             DELETABLE draft tool (Phase 2, deleted after draft day)
+  draft/             draft tool (Phase 2) — retained across seasons, import-quarantined (Rule 8, amended 2026-08-31)
   push/              scheduled briefing/alert delivery (item 3.6): outbound.py is
                      the ntfy egress choke point + Rule-5 scrub; runs.py = run-log +
                      dedup ledger; run.py orchestrates (imports core, never vice versa)

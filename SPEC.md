@@ -74,8 +74,8 @@ Weekly starter recommendations that maximize **win probability against the speci
 ### 7. Waiver / Free-Agent Module
 Scans available players against roster marginal values; recommends claims and drops with reasoning. Speed-oriented **push layer**: a scheduled morning briefing (overnight injuries, candidates crossing thresholds, lineup flags — a two-minute read) and event-triggered alerts for time-critical moves (e.g., starter injured, handcuff sitting in free agency). Scheduled runs execute headlessly via `claude -p` against the repo. **Roster legality precheck:** ESPN blocks all transactions while a roster is illegal — notably when Tuesday's league-wide status reset flips an IR-slot occupant from Out back to Questionable — so the Tuesday workflow validates IR eligibility and computes any forced drop before generating claim plans. Timing: waiver *claims* are queued and need no speed, so submit them liberally; ESPN processes claims in overnight batches (~3:00–4:30 AM ET Wednesday), so the post-waiver scan is scheduled immediately after that window and the morning briefing surfaces first-come-first-served grabs at breakfast, not after the pool has been picked over. Priority-reset waiver rules imply claiming freely is always correct and speed on post-waiver free agents matters most.
 
-### 8. Draft Tool (deletable by design)
-A standalone directory that imports the permanent valuation core and is deleted after draft day. Components:
+### 8. Draft Tool (quarantined by design)
+A standalone directory that imports the permanent valuation core; nothing outside it may import back. *(Amended 2026-08-31, operator decision: originally "deletable by design" and deleted after draft day — now retained across seasons for reuse. The import quarantine is the enforced boundary; deletion was only its enforcement. Canonical statement and consequences: CLAUDE.md Rule 8.)* Components:
 - **Pick engine:** dynamic-programming pick logic in the Fry–Lundberg–Ohlmann tradition — pick value as a function of player value, remaining board, and positional need — extended with **survival probabilities** (odds each player remains at the next snake pick, from ADP distributions) and opponent-need modeling (nine rosters' hunger sharpens board-decay predictions; Gibson–Ohlmann–Fry sequential-competition framing). Survival probabilities key primarily on **ESPN's default rankings**: a room of casuals drafts off the list on their screens, and ESPN's list lags true market ADP — so market/ESPN divergences are directly exploitable (a player at market ADP 30 but ESPN rank 70 can safely be taken around pick 55).
 - **Live board:** terminal-first (rich CLI/TUI), optimized for fast pick entry under a 60-second clock. The tool recomputes continuously between the operator's picks; the operator's turn is confirmation, not deliberation. Pre-computed tiers and contingency plans cover the snake turns where windows are tightest. Pick entry uses fuzzy/alias matching (RapidFuzz-style: 'cmc' or a mangled partial resolves instantly to the intended player) — sixty seconds leaves no room for spelling Chigoziem Okonkwo under pressure — and the board shows ESPN-rank ordering alongside value, since that list predicts the room's behavior.
 - **Mock-draft simulator:** ADP-plus-noise bot opponents for strategy rehearsal from the actual draft slot; doubles as the pick engine's test harness and the apparatus for validating practitioner strategies (Zero-RB etc.) under house scoring.
@@ -117,7 +117,7 @@ ziggurat/
 │   ├── data/                # ingestion clients (espn, nfl, projections, odds, podcasts)
 │   ├── core/                # scoring.py (single source of truth), valuation, marginal, signals
 │   ├── league/              # state, monte-carlo simulate
-│   ├── draft/               # deletable: engine, board, mock  (imports core/)
+│   ├── draft/               # quarantined: engine, board, mock  (imports core/; retained across seasons)
 │   └── cli/                 # thin commands — no logic lives here
 ├── backtest/                # experiments; imports ziggurat/ directly
 ├── db/                      # schema.sql in git; .sqlite file gitignored
@@ -155,7 +155,7 @@ ziggurat/
 9. **Win probability over raw points** in lineup logic, expressed as variance posture; points-for tiebreaker keeps expected points the tiebreaking default.
 10. **Grade process, not outcomes;** promotion ladder + backtest priors guard against overlearning single-week noise.
 11. **Human-in-the-loop execution:** the system recommends; the operator executes all roster transactions in the ESPN app. No automated writes to the ESPN account (reliability, ToS, and blast-radius reasons).
-12. **Draft tool is a deletable wrapper** over the permanent valuation engine; intelligence is pre-computed because a 60-second clock forbids in-loop deliberation.
+12. **Draft tool is a quarantined wrapper** over the permanent valuation engine (retained across seasons — amended 2026-08-31; nothing outside `ziggurat/draft/` may import from it); intelligence is pre-computed because a 60-second clock forbids in-loop deliberation.
 13. **Model-tier routing with local optionality from day one:** LLM calls are abstracted behind a single interface, tagged by task stakes; backends (Claude Code headless / Claude API / Ollama) are configuration, not code. Cheap now, painful to retrofit — the same logic as the `as_of` rule. An early bake-off pre-qualifies local models (the podcast backtest's resolved claims double as a labeled eval set for extraction quality), so the swap is validated before a pricing change forces it.
 
 ## Constraints & Considerations

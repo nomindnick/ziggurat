@@ -245,6 +245,8 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 
 **Goal:** Global valuation under house rules, and a draft-day system rehearsed to the point of boredom. **Hard deadline: the draft.** The draft tool is a deletable wrapper; everything else here is permanent.
 
+**Amendment 2026-08-31 (pre-draft, operator decision): the draft tool is RETAINED after draft day** for reuse next season — Rule 8 is now an import quarantine, not a deletion (canonical statement + consequences in CLAUDE.md Rule 8; SPEC §8 and design principle 12 amended the same day). Rationale, in brief: the quarantine — not the deletion — was what protected the permanent core; `draft/` imports *from* core, so keeping it in-tree with tests running means every later core refactor keeps it compiling for free, while delete-and-resurrect would mean reintegrating against a core that moved for a year; and Phase 4 already consumes it (`backtest/draft_backtest.py` grades draft decisions through the engine). The 3.2 pre-deletion checklist (in 3.2's audit-round Update, "Pre-deletion checklist") is mooted — nothing is deleted, and `draft/resolver.py` stays put; 3.3/3.6 shipped joining on ids and never needed it. Known follow-up for the post-draft consolidation pass, deliberately not done during the 08-31 freeze: code comments and test docstrings still describing the package as "deletable" (`tests/test_draft_boundary.py:1`, `tests/test_kicker_board.py` skip note, `ziggurat/cli/main.py` lazy-import comments, `docs/`), and widening the Rule-8 boundary scanner's scope to match the amended rule.
+
 ### 2.1 [Build] Global valuation (VOR)
 **Goal:** Re-score consensus projections through `scoring.py`; compute replacement levels from league size/roster structure; produce ranked global values with the house-rules delta vs. ESPN default rankings surfaced explicitly (the "what the room can't see" report).
 **Done when:** valuation runs end-to-end from ingested data; spot-checks on known league quirks behave (e.g., pass-catching RBs and league-scored D/STs move the right direction vs. default ranks).
@@ -1704,7 +1706,9 @@ populatable today.
 >   single most dangerous thing this item could have shipped. The weeks-15-17 SUBTOTAL is
 >   reported; `playoff_weight=1.0` is the seam for real playoff odds from 5.1.
 > - **Pre-deletion checklist for `ziggurat/draft/` (do this BEFORE the package is deleted
->   after draft day):** port `draft/resolver.py` (620 lines of fuzzy name resolution,
+>   after draft day)** — **[mooted 2026-08-31: the package is RETAINED (Rule 8 amendment;
+>   see the Phase 2 goal note). 3.3/3.6 shipped joining on ids and never needed the
+>   resolver; if a permanent module ever does, it is ported out, never imported]**: port `draft/resolver.py` (620 lines of fuzzy name resolution,
 >   curated alias + diminutive maps, measured zero silent wrong autos) into the permanent
 >   tree. 3.2 does not need it — it joins on `gsis_id`/`espn_player_id` — but 3.3 and 3.6
 >   will, its only non-draft dependency is `base.TEAM_ALIASES`, and the curated maps cannot
