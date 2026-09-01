@@ -1,6 +1,6 @@
 """Variant ``survivalfit`` — the survival model corrected against REAL rooms.
 
-DELETABLE package (Rule 8). **Additive and opt-in: this module changes no shipped
+Import-quarantined package (Rule 8). **Additive and opt-in: this module changes no shipped
 behaviour.** Nothing here is imported by ``engine.py``, ``survival.py``,
 ``session.py`` or ``webapp.py``; every constant it publishes is a labelled
 alternative, and the only way any of it runs is a caller passing

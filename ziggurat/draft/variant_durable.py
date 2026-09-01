@@ -1,6 +1,6 @@
 """The "durable" draft variant — the engine, re-ranked for AVAILABILITY.
 
-DELETABLE package (Rule 8): lives under ``ziggurat/draft/``, nothing outside the
+Import-quarantined package (Rule 8): lives under ``ziggurat/draft/``, nothing outside the
 package imports it, and it is deleted with the rest of the draft tool. It imports
 ``ziggurat.core.availability`` and ``ziggurat.core.marginal`` (draft -> core is the
 allowed direction) and it does not edit, monkey-patch or subclass a single

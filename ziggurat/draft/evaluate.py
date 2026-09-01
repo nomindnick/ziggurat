@@ -1,6 +1,6 @@
 """Paired-comparison evaluation harness for draft strategies (Phase-2 keystone).
 
-DELETABLE package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this.
+Import-quarantined package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this.
 
 WHAT THIS IS
 ------------

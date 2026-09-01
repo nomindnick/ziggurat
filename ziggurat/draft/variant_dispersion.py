@@ -1,6 +1,6 @@
 """VARIANT: per-player market dispersion in the engine's risk term.
 
-DELETABLE package (Rule 8), ADDITIVE and OPT-IN. Nothing here is imported by
+Import-quarantined package (Rule 8), ADDITIVE and OPT-IN. Nothing here is imported by
 ``engine.py``, ``session.py``, ``webapp.py`` or the CLI; the shipped default path
 is untouched, and :class:`DispersionRiskPicker` is a WRAPPING
 :class:`~ziggurat.draft.bots.Picker` that a Phase-3 integrator wires in behind a

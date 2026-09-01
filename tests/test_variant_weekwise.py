@@ -972,8 +972,8 @@ def test_this_module_only_reaches_into_core_and_its_own_package():
     """Rule 8's other direction, which no other test covers.
 
     ``tests/test_draft_boundary.py`` already proves that no PERMANENT package
-    imports ``ziggurat.draft`` — that is the half that keeps the package
-    deletable, and it covers this module for free. The half left over is what
+    imports ``ziggurat.draft`` — that is the half that keeps the quarantine
+    intact, and it covers this module for free. The half left over is what
     THIS module is allowed to reach for: ``core`` (the permanent valuation and
     lineup spine) and its own package. A dependency on ``league``, ``data``,
     ``llm`` or ``push`` would drag a draft-day experiment into the in-season

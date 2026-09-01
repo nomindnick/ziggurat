@@ -1,6 +1,6 @@
 """Item 2.4 — the draft-board TUI edge: the ONLY module with terminal I/O.
 
-DELETABLE package (Rule 8). This is a blocking ``input()`` read/render loop over
+Import-quarantined package (Rule 8). This is a blocking ``input()`` read/render loop over
 a **headless** :class:`~ziggurat.draft.session.DraftSession` (all state, scoring,
 survival, journaling live there) and the pure renderers in ``board_view``. app.py
 holds no draft state and does no football math — it translates keystrokes into

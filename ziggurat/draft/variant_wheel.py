@@ -1,6 +1,6 @@
 """Phase-2 VARIANT: make the engine think in PAIRS at the wheel (opt-in, additive).
 
-DELETABLE package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this, and
+Import-quarantined package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this, and
 nothing inside the shipped path imports it either — it is a NEW module that WRAPS
 :class:`~ziggurat.draft.engine.PickEngine` without editing a byte of it. A Phase-3
 integrator wires it in behind a flag or does not wire it in at all.
@@ -1168,7 +1168,7 @@ class WheelPicker:
                 for other in decision.candidates[i + 1 : i + 4]
             )
             # The engine's own reason renderer, called rather than re-implemented
-            # (same deletable package): the operator must read the SAME need /
+            # (same quarantined package): the operator must read the SAME need /
             # risk / survival sentences he would read from the shipped engine,
             # with the pair lines prepended, not a second dialect of them.
             base_rec = self.engine._build_rec(

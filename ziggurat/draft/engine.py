@@ -1,6 +1,6 @@
 """Item 2.3 — the on-clock draft pick engine (Fry–Lundberg–Ohlmann one-ply).
 
-DELETABLE package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
+Import-quarantined package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
 that package imports it. Pure in-memory logic over a plain board — the only
 randomness is the survival rollout, drawn from a child of ``ctx.rng`` (Rule 1: no
 implicit "now"; determinism preserved bit-for-bit per design D2).

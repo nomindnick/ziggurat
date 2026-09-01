@@ -34,7 +34,7 @@ proxy, with the note "when ``adp_rankings`` is later populated this upgrades to
 per-player ``(worst - best)/4`` behind a populated-table check". ``adp_rankings``
 is now populated (168,356 rows for season 2026, six weekly scrapes 2026-07-24 ..
 2026-08-28, ``sd``/``best``/``worst`` non-null on every row). This module is the
-permanent home of that upgrade. It NEVER imports the deletable draft package
+permanent home of that upgrade. It NEVER imports the quarantined draft package
 (Rule 8) and it changes no existing behaviour: it is a new, additive surface.
 
 WHICH ``ecr_type`` IS THIS LEAGUE'S BOARD — decided by evidence, not by name.

@@ -6,7 +6,7 @@ ON"). This runs the real function source out of the shipped file under node,
 against a DOM shaped like the live one, so a misreading fails here instead of
 on the clock.
 
-Deletable with ``ziggurat/draft/`` after draft day (Rule 8).
+Part of the import-quarantined ``ziggurat/draft/`` surface (Rule 8; retained across seasons).
 """
 
 import shutil

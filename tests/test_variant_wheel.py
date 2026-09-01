@@ -1,6 +1,6 @@
 """Tests for the PAIR-AT-THE-WHEEL variant (``ziggurat/draft/variant_wheel.py``).
 
-Deletable with ``ziggurat/draft/`` after draft day (Rule 8), like every other
+Part of the import-quarantined ``ziggurat/draft/`` surface (Rule 8; retained across seasons), like every other
 ``test_draft_*`` / draft-variant module.
 
 WHAT THESE TESTS ARE FOR. The variant is opt-in and additive: it changes nothing

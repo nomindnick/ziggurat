@@ -1,6 +1,6 @@
 """External validation of the 2.3 survival model against REAL completed drafts.
 
-DELETABLE package (Rule 8). This module MEASURES; it changes no shipped
+Import-quarantined package (Rule 8). This module MEASURES; it changes no shipped
 behaviour. Nothing in ``survival.py``, ``engine.py``, ``priors.py`` or
 ``simulator.py`` is touched, and every alternative parameter bag this module
 produces is a clearly labelled constant for a later A/B — never a new default.

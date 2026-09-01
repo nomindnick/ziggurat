@@ -1,6 +1,6 @@
 """Phase-2 variant: re-rank the engine's shortlist by the WEEK-BY-WEEK consequence.
 
-DELETABLE package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this, and
+Import-quarantined package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this, and
 this module imports no production draft file it could change: it WRAPS
 :class:`~ziggurat.draft.engine.PickEngine` rather than editing it, so the shipped
 engine, survival model, candidate generation and reason text are untouched and

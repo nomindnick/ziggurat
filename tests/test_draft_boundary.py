@@ -1,10 +1,12 @@
-"""Rule 8: the draft package is deletable — nothing OUTSIDE ziggurat/draft/ may
-statically import it. The mock-draft CLI command imports it lazily (inside the
-function body), so the enforcement scans IMPORT-TIME statements: everything that
-executes when the module loads (including imports nested in module-level if/try/
-with/loop blocks and class bodies), while exempting function bodies (the
-sanctioned lazy pattern) and ``if TYPE_CHECKING:`` blocks (never executed at
-runtime, so they cannot break ``import ziggurat`` after draft/ is deleted).
+"""Rule 8: the draft package is import-quarantined — nothing OUTSIDE
+ziggurat/draft/ may statically import it (the package is RETAINED across
+seasons — Rule 8 amended 2026-08-31 — but the quarantine is what keeps it from
+polluting the permanent core). The mock-draft CLI command imports it lazily
+(inside the function body), so the enforcement scans IMPORT-TIME statements:
+everything that executes when the module loads (including imports nested in
+module-level if/try/with/loop blocks and class bodies), while exempting
+function bodies (the sanctioned lazy pattern) and ``if TYPE_CHECKING:`` blocks
+(never executed at runtime, so they create no runtime coupling).
 """
 
 import ast
@@ -119,7 +121,7 @@ def test_permanent_packages_never_reach_into_draft_even_lazily():
         if _imports_draft_anywhere(py):
             offenders.append(str(rel))
     assert offenders == [], (
-        "these permanent modules import the deletable draft package: "
+        "these permanent modules import the quarantined draft package: "
         f"{offenders}. Copy what you need (see ziggurat/core/lineup.py's lineage note)."
     )
 

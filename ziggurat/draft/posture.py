@@ -1,6 +1,6 @@
 """Item 2.4 — draft-day posture check with hysteresis (the mandated guard).
 
-DELETABLE package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
+Import-quarantined package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
 that package imports it. Pure in-memory logic over a duck-typed draft session;
 there is **no runtime import of ``session.py``** (that module is built in
 parallel and would create an import cycle) — the session surface this monitor

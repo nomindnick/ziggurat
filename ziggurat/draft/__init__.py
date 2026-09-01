@@ -1,8 +1,14 @@
-"""Draft tool — DELETABLE BY DESIGN (SPEC Feature 8).
+"""Draft tool — IMPORT-QUARANTINED BY DESIGN (SPEC Feature 8; Rule 8).
 
 Pick engine, live board TUI, and mock-draft simulator. Imports the permanent
-valuation core; this whole package is deleted after draft day. Nothing outside
-this package may import from it (enforced by tests/test_draft_boundary.py).
+valuation core; nothing outside this package may import from it (enforced by
+tests/test_draft_boundary.py). Retained across seasons for reuse (Rule 8,
+amended 2026-08-31 — originally deletable; the quarantine was always the
+load-bearing half). Retention is NOT next-August readiness: the userscripts
+pin ESPN's 2026 draft-room DOM, the opponent priors are 2025-room fits, and
+the goldens freeze the 2026-08-30 board — next season starts with
+recalibration and DOM re-verification. If a permanent module ever needs
+something living here, it is PORTED out, never imported.
 
 Public surface:
   * priors:    RoomPriors, ROOM_PRIORS_2025

@@ -202,7 +202,7 @@ def test_mock_draft_runs_with_a_monkeypatched_loader(tmp_path, monkeypatch):
     """The mock-draft command parses, loads a board (patched), runs, and prints.
 
     Patches the DB-edge loader so no facts DB is required — exercises the thin
-    CLI wiring around the deletable draft package.
+    CLI wiring around the quarantined draft package.
     """
     from ziggurat.draft import simulator
     from ziggurat.draft.bots import BoardEntry

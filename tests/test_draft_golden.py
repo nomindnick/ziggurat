@@ -159,7 +159,7 @@ projections through ``ziggurat/core/scoring.py``. No league member names, no
 rival rosters, no league-private data. The nine rival seats here are the
 CALIBRATED SIMULATION, not real managers.
 
-Deletable with ``ziggurat/draft/`` after draft day (Rule 8), like every other
+Part of the import-quarantined ``ziggurat/draft/`` surface (Rule 8; retained across seasons), like every other
 ``test_draft_*`` module.
 """
 

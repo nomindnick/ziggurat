@@ -942,7 +942,7 @@ def test_this_module_reads_no_database(board):
     A DB read would need a connection and an ``as_of``; this module's public
     surface takes neither, and the fitters take caller-supplied observations. The
     test pins that so a later convenience "just load the journals for me" helper
-    cannot slip a defaulted, ungated read into the deletable package.
+    cannot slip a defaulted, ungated read into the quarantined package.
     """
     tree = ast.parse(Path(vs.__file__).read_text(encoding="utf-8"))
     identifiers = {

@@ -1,6 +1,6 @@
 """Headless draft-session controller for the item-2.4 board TUI.
 
-DELETABLE package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
+Import-quarantined package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
 that package imports it. This is the pure, terminal-I/O-free state machine the
 Rich render loop (``app.py``) drives: it owns snake bookkeeping, the crash-safe
 JSONL journal, the recommendation call into the 2.3 engine, snake-turn

@@ -788,9 +788,8 @@ def test_apply_to_weekly_points_keeps_a_metadata_carrying_map_whole(world):
 def test_apply_to_weekly_points_works_against_the_real_grader_map(world):
     """The seam the documented recipe actually names, exercised end to end.
 
-    Skipped once ``ziggurat/draft/`` is deleted after draft day (rule 8: this
-    core module imports nothing from there — the test reaches ACROSS, the code
-    does not).
+    Guarded by ``importorskip`` (rule 8: this core module imports nothing from
+    ``draft/`` — the test reaches ACROSS the quarantine, the code does not).
     """
     grader = pytest.importorskip("ziggurat.draft.grader")
     board = _board(world)

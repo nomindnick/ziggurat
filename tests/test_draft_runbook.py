@@ -9,7 +9,7 @@ still describe the code. A renamed flag or a bumped userscript version rots
 this file silently, and the failure lands during the one hour of the year that
 cannot absorb it.
 
-Deletable with `ziggurat/draft/` after draft day (Rule 8), like every other
+Part of the import-quarantined `ziggurat/draft/` surface (Rule 8; retained across seasons), like every other
 `test_draft_*` module.
 """
 

@@ -1,6 +1,6 @@
 """Snake mock-draft simulator + strategy summaries (item 2.2).
 
-DELETABLE package (Rule 8). Runs a full 10-team / 16-round snake draft in pure
+Import-quarantined package (Rule 8). Runs a full 10-team / 16-round snake draft in pure
 memory, then runs it many times to profile an operator strategy: the projected
 starting-lineup-points distribution (mean / p10 / p50 / p90) and average roster
 shape across N mock drafts. This IS the item-2.3 draft engine's test harness — a

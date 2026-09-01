@@ -1,6 +1,6 @@
 """ESPN draft-room DOM-sync: parse harvested picks and resolve them onto the board.
 
-DELETABLE package (Rule 8). The 2026-07-24 spike proved the draft-room PAGE
+Import-quarantined package (Rule 8). The 2026-07-24 spike proved the draft-room PAGE
 renders picks live (the REST API does not): a userscript watching the Pick
 History panel pushes each pick to the cockpit's ``/api/sync``. This module is
 the PURE half of that pipeline — no HTTP, no DOM, no session: given the raw

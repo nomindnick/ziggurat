@@ -1,6 +1,6 @@
 """Item 2.4 — the structured tiered name/alias resolver for TUI pick entry.
 
-DELETABLE package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
+Import-quarantined package (Rule 8): lives under ``ziggurat/draft/`` and nothing outside
 that package imports it. Pure over the in-memory board — no DB handle, no I/O, no
 terminal — so every unit test runs offline on a synthetic board (Rule 5).
 

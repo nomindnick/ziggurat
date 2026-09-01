@@ -1,6 +1,6 @@
 """Item 2.4 — pure Rich renderables for the draft-board TUI.
 
-DELETABLE package (Rule 8). This module is the render layer: **data in ->
+Import-quarantined package (Rule 8). This module is the render layer: **data in ->
 Rich renderable out**. It constructs NO ``Console`` and prints NOTHING — the
 edge module ``app.py`` owns all terminal I/O. Every function here is snapshot-
 testable by pointing a ``Console(file=StringIO())`` at its output.

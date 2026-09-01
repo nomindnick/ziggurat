@@ -78,7 +78,7 @@ Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins 
   audit; leakage/scoring/VOR clean, 4 value-view findings fixed). Suite green (243).
   Design + deferrals in `IMPLEMENTATION_PLAN.md` 2.1 and `intel/research/valuation-2.1-design.md`.
 
-- **2.2 mock draft simulator — done 2026-07-21.** Deletable `ziggurat/draft/`
+- **2.2 mock draft simulator — done 2026-07-21.** Rule-8-quarantined `ziggurat/draft/`
   package: snake sim + calibrated opponent model + `ziggurat mock-draft` CLI.
   `leagueHistory` recon found exactly ONE prior draft (league founded 2025; 2 of
   10 seats fully autodrafted), so ESPN-rank+noise is the PRIMARY bot model,
@@ -108,7 +108,7 @@ Phase 4 blocks draft day — Phase 2 is the sole draft-critical path and begins 
   fixed/recorded. Suite green (334). Details: `IMPLEMENTATION_PLAN.md` 2.3 +
   gitignored `intel/research/pick-engine-2.3-design.md` & `draft-strategy.md`.
 
-- **2.4 draft board TUI — done 2026-07-22.** Draft-day cockpit in deletable
+- **2.4 draft board TUI — done 2026-07-22.** Draft-day cockpit in Rule-8-quarantined
   `ziggurat/draft/`: `resolver.py` (stdlib tiered fuzzy entry, confirm-on-tie,
   elite-safety — silent wrong-pick autos measured 0), `session.py` (headless
   controller; fsync-before-ack JSONL journal, resume-by-replay bit-identical,
@@ -211,7 +211,7 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
 
 - **3.2 marginal valuation — built & tested 2026-07-24.** Roster-context value:
   `core/lineup.py` (the permanent per-week starting-lineup seater, written FRESH
-  — `ziggurat/draft/` is untouched and deletes its own copies; brute force ships
+  — `ziggurat/draft/` is untouched and keeps its own quarantined copies; brute force ships
   as a test oracle) and `core/marginal.py` (`V(K) = Σ_w E_S[lineup(K,w,S)]`;
   `marginal(p|R) = V(R) − best legal free-agent replacement`), plus a thin
   `ziggurat marginal` CLI. **The recon finding that shaped it: the weekly

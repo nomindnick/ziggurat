@@ -674,7 +674,7 @@ def test_the_league_series_is_named_by_the_page_it_was_scraped_from():
 # ----------------------------------------------------- Rule 8 + determinism
 
 
-def test_this_module_never_imports_the_deletable_draft_package():
+def test_this_module_never_imports_the_quarantined_draft_package():
     """Rule 8, checked here as well as in test_draft_boundary.py: this module has
     a legitimate reason to want the engine's prior and must never take it."""
     src = Path(dispersion.__file__).read_text()
@@ -690,7 +690,7 @@ def test_this_module_never_imports_the_deletable_draft_package():
 
 def test_the_legacy_prior_copy_still_matches_the_engine_it_was_copied_from():
     """While ``ziggurat/draft/`` exists, the reference copy must not drift from
-    the original. Skips (rather than fails) once the package is deleted."""
+    the original. Skips (rather than fails) in a checkout without the package."""
     engine = pytest.importorskip("ziggurat.draft.engine")
     assert dict(LEGACY_POSITIONAL_DISPERSION_PRIOR) == dict(
         engine.POSITIONAL_DISPERSION_PRIOR

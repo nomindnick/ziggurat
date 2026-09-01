@@ -1,6 +1,6 @@
 """Room-behavior priors for the mock-draft opponent model (item 2.2).
 
-DELETABLE package (Rule 8). ``RoomPriors`` is the single frozen knob-bag the
+Import-quarantined package (Rule 8). ``RoomPriors`` is the single frozen knob-bag the
 bots read: the reach-noise spread, how tightly the room hugs the ESPN board, the
 autodraft share, the K/DST round window, the round->position run curves, and an
 (off-by-default) per-bot positional lean.

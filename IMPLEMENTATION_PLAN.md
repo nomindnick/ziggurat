@@ -243,9 +243,9 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 
 ## Phase 2: Valuation Core & Draft Weapon
 
-**Goal:** Global valuation under house rules, and a draft-day system rehearsed to the point of boredom. **Hard deadline: the draft.** The draft tool is a deletable wrapper; everything else here is permanent.
+**Goal:** Global valuation under house rules, and a draft-day system rehearsed to the point of boredom. **Hard deadline: the draft.** The draft tool is a quarantined wrapper (originally deletable — amended below); everything else here is permanent.
 
-**Amendment 2026-08-31 (pre-draft, operator decision): the draft tool is RETAINED after draft day** for reuse next season — Rule 8 is now an import quarantine, not a deletion (canonical statement + consequences in CLAUDE.md Rule 8; SPEC §8 and design principle 12 amended the same day). Rationale, in brief: the quarantine — not the deletion — was what protected the permanent core; `draft/` imports *from* core, so keeping it in-tree with tests running means every later core refactor keeps it compiling for free, while delete-and-resurrect would mean reintegrating against a core that moved for a year; and Phase 4 already consumes it (`backtest/draft_backtest.py` grades draft decisions through the engine). The 3.2 pre-deletion checklist (in 3.2's audit-round Update, "Pre-deletion checklist") is mooted — nothing is deleted, and `draft/resolver.py` stays put; 3.3/3.6 shipped joining on ids and never needed it. Known follow-up for the post-draft consolidation pass, deliberately not done during the 08-31 freeze: code comments and test docstrings still describing the package as "deletable" (`tests/test_draft_boundary.py:1`, `tests/test_kicker_board.py` skip note, `ziggurat/cli/main.py` lazy-import comments, `docs/`), and widening the Rule-8 boundary scanner's scope to match the amended rule.
+**Amendment 2026-08-31 (pre-draft, operator decision): the draft tool is RETAINED after draft day** for reuse next season — Rule 8 is now an import quarantine, not a deletion (canonical statement + consequences in CLAUDE.md Rule 8; SPEC §8 and design principle 12 amended the same day). Rationale, in brief: the quarantine — not the deletion — was what protected the permanent core; `draft/` imports *from* core, so keeping it in-tree with tests running means every later core refactor keeps it compiling for free, while delete-and-resurrect would mean reintegrating against a core that moved for a year; and Phase 4 already consumes it (`backtest/draft_backtest.py` grades draft decisions through the engine). The 3.2 pre-deletion checklist (in 3.2's audit-round Update, "Pre-deletion checklist") is mooted — nothing is deleted, and `draft/resolver.py` stays put; 3.3/3.6 shipped joining on ids and never needed it. Known follow-up for the post-draft consolidation pass, deliberately not done during the 08-31 freeze: code comments and test docstrings still describing the package as "deletable", and widening the Rule-8 boundary scanner's scope to match the amended rule. **Follow-up closed 2026-09-01:** the "deletable" wording is swept from every committed file (~45 sites across `ziggurat/draft/` module docstrings, `cli/main.py`, `core/dispersion.py`, tests, CLAUDE.md status entries, and this plan's historical Updates — the amendment notes themselves keep "originally deletable" as history); the operator's standing intent is recorded in `ziggurat/draft/__init__.py`'s header so no future session re-derives deletion from stale prose. The scanner widening is judged MOOT, not done: the amended rule's scope — nothing in `ziggurat/` outside `ziggurat/draft/` may import it, `backtest/` explicitly legal — is exactly the `ziggurat/`-only tree the scanner already walks, so there is nothing to widen.
 
 ### 2.1 [Build] Global valuation (VOR)
 **Goal:** Re-score consensus projections through `scoring.py`; compute replacement levels from league size/roster structure; produce ranked global values with the house-rules delta vs. ESPN default rankings surfaced explicitly (the "what the room can't see" report).
@@ -349,7 +349,7 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Checkpoint-1 amendment (2026-07-20):** the bot opponent model can be **calibrated on the room's ACTUAL past behavior** — pull prior-season draft results via the ESPN `leagueHistory` endpoint (1.1) and fit reach/ADP-adherence tendencies, rather than assuming pure ESPN-rank+noise. Keep ESPN-rank+noise as the fallback when history is thin. Draft is SNAKE @ 60s/pick (1.1); date still unset — the 60s clock is the Checkpoint-2 rehearsal target.
 **Update:**
 > **Done 2026-07-21.** Snake mock-draft simulator with a 2025-calibrated
-> opponent model, entirely in the deletable `ziggurat/draft/` package (Rule 8):
+> opponent model, entirely in the `ziggurat/draft/` package (Rule 8):
 > `priors.py` (frozen `RoomPriors`, fitted 2025 values with per-number artifact
 > citations), `bots.py` (`Picker` seam — the 2.3 engine's plug-in point;
 > `RankNoiseBot` ESPN-rank+Gaussian-reach backbone honoring roster legality,
@@ -414,7 +414,7 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Done when:** the engine beats ESPN-rank-following bots in sim by a stable margin across slots, and its recommendations come with legible reasons.
 **Checkpoint-1 amendment (2026-07-20):** survival probabilities key primarily on ESPN default rank (1.1 confirms it drives the room); opponent-roster-need modeling can **seed from prior-season `leagueHistory` rosters** where available. The market/ESPN divergence the engine exploits is exactly the 1.5 divergence signal (via 2.1).
 **Update:**
-> **Done 2026-07-22.** Fry–Ohlmann pick engine in the deletable `ziggurat/draft/`
+> **Done 2026-07-22.** Fry–Ohlmann pick engine in the `ziggurat/draft/`
 > package: `engine.py` (`PickEngine`, a `Picker`; additive one-ply score
 > `vor + b_need·need_fill + b_vona·urgency + b_risk·risk_sign(round)·dispersion`,
 > with `urgency = max(0,VONA)·(1−S_next)` — survival-timed scarcity) and
@@ -468,7 +468,7 @@ Re-plan with spike results in hand: scope the Phase 4 backtest program per 1.2's
 **Update:**
 > **Done 2026-07-22.** Standard three-workflow pattern (recon → 4-builder+
 > integrator build → 5-skeptic × 5-refuter audit) plus a 3-fixer+verifier fix
-> round; all agents Opus/xhigh. New modules, all in deletable `ziggurat/draft/`
+> round; all agents Opus/xhigh. New modules, all in `ziggurat/draft/`
 > (Rule 8): `resolver.py` (stdlib tiered fuzzy name resolver + alias/DST maps,
 > confirm-on-tie), `session.py` (headless `DraftSession` controller: snake
 > bookkeeping, append-only fsync-before-ack JSONL journal + resume-by-replay,
@@ -734,7 +734,7 @@ At least two full-speed rehearsals against the sim under a real 60-second clock 
 > **Draft-day auto-entry — FEASIBILITY PROBED 2026-08-12, NOT BUILT.** The
 > operator asked whether the last mile could be automated (7pm on 08-31 is
 > toddler bedtime). Probed with a throwaway diagnostic userscript,
-> `ziggurat/draft/espn_probe.user.js` (Rule 8: lives in the deletable package;
+> `ziggurat/draft/espn_probe.user.js` (Rule 8: lives in the quarantined package;
 > nothing auto-runs, every test is operator-triggered from its own badge).
 >
 > **Finding: ESPN's draft room accepts UNTRUSTED synthetic clicks.** A bare

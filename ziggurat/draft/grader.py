@@ -1,6 +1,6 @@
 """Week-by-week roster grader and win-probability objective (Phase-2 keystone).
 
-DELETABLE package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this;
+Import-quarantined package (Rule 8). Nothing outside ``ziggurat/draft/`` imports this;
 it imports ``ziggurat/core/`` freely (the dependency runs one way only).
 
 WHAT THIS IS, AND WHAT IT REPLACES
@@ -140,7 +140,7 @@ widens the gate. Ships a leakage test. Rule 2 — no scoring constant lives here
 every point is a house point priced by ``scoring.py`` upstream, and sigma is a
 dispersion prior, never a scoring number. Rule 6 — every number a human sees
 ships with plain-language reasons, and every prior is labelled with its source
-and cohort. Rule 8 — deletable; nothing outside ``draft/`` imports it.
+and cohort. Rule 8 — import-quarantined; nothing outside ``draft/`` imports it.
 
 DETERMINISM. There is no randomness in this module at all: no sampling, no
 wall clock, no dict-order dependence (every ordering is an explicit sort key).

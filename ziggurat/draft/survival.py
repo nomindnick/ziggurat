@@ -1,6 +1,6 @@
 """Survival model for the 2.3 draft pick engine — Monte-Carlo rollouts + fallback.
 
-DELETABLE package (Rule 8). Pure in-memory logic: it takes a :class:`PickContext`
+Import-quarantined package (Rule 8). Pure in-memory logic: it takes a :class:`PickContext`
 (already holding a loaded board via ``ctx.state``) and a caller-seeded ``Random``,
 and answers the two quantities the engine's board-state term needs, from ONE batch
 of rollouts per on-clock decision (never per-candidate re-rolls):

@@ -26,7 +26,7 @@ Design rules honored here:
     2025-fit and 2026-live boards are commensurable) and the 2025 ESPN editorial
     PPR board (cross-check).
 
-Rule 8: this module lives under ``ziggurat/draft/`` (deletable); nothing outside
+Rule 8: this module lives under ``ziggurat/draft/`` (import-quarantined); nothing outside
 ``draft/`` imports it. It MAY read ``ziggurat/data`` helpers (team aliasing).
 Rule 5: no colleague names / owner GUIDs / real team abbrevs are emitted — the
 fitted output keys players by public name and reports only aggregate room stats.

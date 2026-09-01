@@ -1,6 +1,6 @@
 """Draft bots, the operator-strategy seam, and the roster-legality core (item 2.2).
 
-DELETABLE package (Rule 8). This module is pure in-memory logic — it takes a
+Import-quarantined package (Rule 8). This module is pure in-memory logic — it takes a
 plain ``board`` (a tuple of :class:`BoardEntry`) and never touches the DB, so
 every unit test runs offline. The DB wiring (``build_valuation`` +
 ``get_espn_draft_ranks``) lives at the ``simulator.load_board`` edge.

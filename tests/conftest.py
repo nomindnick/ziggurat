@@ -300,7 +300,7 @@ def make_draft_board():
     (as the real ESPN editorial board ranks them). Counts default to a deep board;
     pass ``dst=10, k=10`` for the K/DST-scarce legality stress test. All synthetic
     — no real player/team identity (Rule 5). Imported lazily so this shared
-    conftest still loads after the deletable draft package is removed (Rule 8).
+    conftest never couples the whole suite to the quarantined draft package (Rule 8).
     """
     from ziggurat.draft.bots import BoardEntry
 

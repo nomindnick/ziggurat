@@ -1,4 +1,4 @@
-"""Bridge from the DELETABLE draft cockpit to the permanent push egress.
+"""Bridge from the import-quarantined draft cockpit to the permanent push egress.
 
 ``draft/`` -> ``push/`` is the legal import direction (Rule 8 forbids only the
 reverse), and every draft-night phone push leaves through the same Rule-5

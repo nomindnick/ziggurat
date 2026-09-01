@@ -1,7 +1,7 @@
 """Checkpoint 2 — the web draft cockpit: a local live-search view over the
 headless session.
 
-DELETABLE package (Rule 8). Rehearsal 2 (an ESPN mock lobby, 2026-07-24) showed
+Import-quarantined package (Rule 8). Rehearsal 2 (an ESPN mock lobby, 2026-07-24) showed
 the scroll-on-enter REPL cannot keep up with BURST pick entry: seven CPU picks
 landed in seconds and each one cost a full type→Enter→confirm round trip. This
 module is the 2.4-anticipated "framework flip" — the same headless

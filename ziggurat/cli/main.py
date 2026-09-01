@@ -508,12 +508,12 @@ def mock_draft(
 ) -> None:
     """Run headless mock drafts and print a strategy's outcome distribution (item 2.2).
 
-    All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8), imported
+    All logic lives in the import-quarantined ``ziggurat.draft`` package (Rule 8), imported
     lazily here so nothing outside it couples statically. Parse, load the board,
     run, print (Rule 3).
     """
-    # Lazy (in-body) import: keeps the deletable draft package off every other
-    # module's import graph — Rule 8. Deleting ziggurat/draft/ only breaks this
+    # Lazy (in-body) import: keeps the quarantined draft package off every other
+    # module's import graph — Rule 8: a fault confined to draft/ breaks only this
     # one command, not the rest of the CLI.
     from ziggurat.draft.bots import FollowEspnRank, FollowVor
     from ziggurat.draft.engine import PickEngine
@@ -678,12 +678,12 @@ def draft_board(
 ) -> None:
     """Launch the live draft-board TUI (item 2.4).
 
-    All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8), imported
+    All logic lives in the import-quarantined ``ziggurat.draft`` package (Rule 8), imported
     lazily here so nothing outside it couples statically. Parse, resolve the journal
     (discovering the newest on --resume), load the board at the right as_of, hand off
     to the app loop (Rule 3 — the discovery/header helpers live in session.py).
     """
-    # Lazy (in-body) import: keeps the deletable draft package off every other
+    # Lazy (in-body) import: keeps the quarantined draft package off every other
     # module's import graph — Rule 8 (same pattern as mock-draft above).
     from ziggurat.draft import app as draft_app
     from ziggurat.draft.simulator import DEFAULT_ROSTER
@@ -754,7 +754,7 @@ def draft_web(
 
     Same headless session, journal, and engine as ``draft-board`` — rendered as a
     local web page (127.0.0.1 only) with per-keystroke autocomplete for burst pick
-    entry. All logic lives in the DELETABLE ``ziggurat.draft`` package (Rule 8),
+    entry. All logic lives in the import-quarantined ``ziggurat.draft`` package (Rule 8),
     imported lazily; this command parses, loads the board, and hands off (Rule 3).
     """
     from ziggurat.draft import webapp
