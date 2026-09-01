@@ -41,7 +41,9 @@ from ziggurat.data.nfl import base
 # is_fixed_dome is True ONLY for permanently-enclosed roofs (no external weather
 # ever); retractable-roof venues are False (treated as outdoor for forecasts).
 # Covers every distinct stadium_id in load_schedules for 2020-2025 (incl. the
-# international venues LON/GER/MEX/FRA/SAO). Public reference data — rule 5.
+# international venues LON/GER/MEX/FRA/SAO) plus 2026's MEL00 (the Melbourne
+# game, added by item 4.0 Fix B after its absence dropped the 2026_01_SF_LA row
+# on every live pull). Public reference data — rule 5.
 _STADIUM_COORDS: dict[str, tuple[float, float, str, bool]] = {
     "ATL97": (33.7554, -84.4009, "America/New_York", False),        # Mercedes-Benz (retractable)
     "BAL00": (39.2780, -76.6227, "America/New_York", False),        # M&T Bank
@@ -64,6 +66,7 @@ _STADIUM_COORDS: dict[str, tuple[float, float, str, bool]] = {
     "LAX01": (33.9535, -118.3392, "America/Los_Angeles", True),     # SoFi (fixed canopy roof)
     "LON00": (51.5560, -0.2795, "Europe/London", False),           # Wembley (London)
     "LON02": (51.6043, -0.0665, "Europe/London", False),           # Tottenham Hotspur (London)
+    "MEL00": (-37.8200, 144.9834, "Australia/Melbourne", False),   # Melbourne Cricket Ground
     "MEX00": (19.3029, -99.1505, "America/Mexico_City", False),    # Estadio Azteca (Mexico City)
     "MIA00": (25.9580, -80.2389, "America/New_York", False),        # Hard Rock
     "MIN01": (44.9736, -93.2575, "America/Chicago", True),          # U.S. Bank (fixed dome)
@@ -283,12 +286,20 @@ def ingest_game_weather(conn, games, *, retrieved_as_of: str, mode: str) -> int:
 
     games = list(games)
     rows = []
+    missing_stadiums: set[str] = set()
     for game in games:
         row = _build_row(game, mode=mode, retrieved_as_of=retrieved_as_of)
         if row is not None:
             rows.append(row)
-    base.note_drops("game_weather", len(games) - len(rows), len(games),
-                    why="unresolvable stadium or missing gameday")
+        elif game.get("stadium_id") not in _STADIUM_COORDS:
+            missing_stadiums.add(str(game.get("stadium_id")))
+    # Name the venue so the drop is actionable (item 4.0 Fix B: MEL00 dropped
+    # the Melbourne game on every pull for a week under a generic message).
+    why = "unresolvable stadium or missing gameday"
+    if missing_stadiums:
+        why = (f"stadium_id(s) absent from _STADIUM_COORDS: "
+               f"{sorted(missing_stadiums)} — add the venue to the reference table")
+    base.note_drops("game_weather", len(games) - len(rows), len(games), why=why)
     return base.upsert(conn, "game_weather", rows, key_cols=_PK_COLS)
 
 
@@ -297,12 +308,25 @@ def pull_game_weather(conn, season, week, *, retrieved_as_of: str, mode: str) ->
 
     Schedules must be ingested first (the game context + gameday come from the
     schedules table). Delegates to ``ingest_game_weather`` (which owns the
-    ``fetch_open_meteo`` seam)."""
+    ``fetch_open_meteo`` seam).
+
+    OPERATIONAL READ — no as-of gate, ONE row per game: the latest schedules
+    snapshot for each game_id. The gate would silently exclude playoff games
+    before their bracket is knowable; the dedup is the load-bearing half
+    (item 4.0 Fix B). schedules stores a full snapshot per pull day, and the
+    original un-deduped read returned one row PER SNAPSHOT — 624 rows for 16
+    games of 2026 week 1 by Sept 1, ``_build_row`` fetching Open-Meteo once per
+    ROW: a burst of ~430 TLS connections where ≤16 would do, five-minute runs,
+    intermittent handshake timeouts, and drop/write denominators inflated
+    across snapshot days (measured: the same missing venue counted 8 times,
+    33% "loss", over the 20% ceiling — a failed run every night). The burden
+    also grew by one snapshot per game per day."""
     games = [
         dict(r)
         for r in conn.execute(
             "SELECT game_id, season, week, home_team, stadium_id, gameday, gametime "
-            "FROM schedules WHERE season = ? AND week = ?",
+            "FROM schedules s WHERE season = ? AND week = ? AND retrieved_as_of = "
+            "(SELECT MAX(retrieved_as_of) FROM schedules s2 WHERE s2.game_id = s.game_id)",
             (season, week),
         )
     ]

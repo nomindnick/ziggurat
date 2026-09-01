@@ -207,21 +207,24 @@ def test_every_schedule_stadium_resolves(db, nfl_fixture):
 
 
 # The full set of distinct stadium_ids across load_schedules 2020-2025 (36),
-# enumerated at build time. Frozen here so dropping/renaming ANY venue — including
-# the non-2023 international ones (GER00/MEX00/SAO00) the single-season schedules
-# fixture never exercises — fails loud, not just the ones present in a fixture.
+# enumerated at build time, plus MEL00 (Melbourne Cricket Ground), which 2026
+# schedules introduced on 2026-08-24 and whose absence dropped the 2026_01_SF_LA
+# row on every live pull for a week (item 4.0 Fix B). Frozen here so
+# dropping/renaming ANY venue — including the non-2023 international ones
+# (GER00/MEX00/SAO00) the single-season schedules fixture never exercises —
+# fails loud, not just the ones present in a fixture.
 _EXPECTED_STADIUM_IDS = frozenset({
     "ATL97", "BAL00", "BOS00", "BUF00", "CAR00", "CHI98", "CIN00", "CLE00",
     "DAL00", "DEN00", "DET00", "FRA00", "GER00", "GNB00", "HOU00", "IND00",
-    "JAX00", "KAN00", "LAX01", "LON00", "LON02", "MEX00", "MIA00", "MIN01",
-    "NAS00", "NOR00", "NYC01", "PHI00", "PHO00", "PIT00", "SAO00", "SEA00",
-    "SFO01", "TAM00", "VEG00", "WAS00",
+    "JAX00", "KAN00", "LAX01", "LON00", "LON02", "MEL00", "MEX00", "MIA00",
+    "MIN01", "NAS00", "NOR00", "NYC01", "PHI00", "PHO00", "PIT00", "SAO00",
+    "SEA00", "SFO01", "TAM00", "VEG00", "WAS00",
 })
 
 
-def test_stadium_reference_covers_all_2020_2025_venues():
-    """The committed reference table must carry exactly the known 2020-2025 venue
-    set (guards the international venues absent from the single-season fixture)."""
+def test_stadium_reference_covers_all_known_venues():
+    """The committed reference table must carry exactly the known venue set
+    (guards the international venues absent from the single-season fixture)."""
     assert set(weather._STADIUM_COORDS) == _EXPECTED_STADIUM_IDS
 
 
@@ -236,3 +239,34 @@ def test_pull_reads_schedules_and_stores(db, nfl_fixture, patch_fetch):
     # Domes among week 1 (MIN01, NOR00, LAX01) stored weather_relevant=0, no fetch.
     dome_rows = [r for r in rows if r["weather_relevant"] == 0]
     assert dome_rows, "week 1 includes fixed-dome venues"
+
+
+def test_pull_dedupes_snapshot_rows_one_fetch_per_game(db, nfl_fixture, patch_fetch):
+    """Item 4.0 Fix B — the defect that kept game_weather from EVER landing.
+
+    schedules stores one full snapshot per pull day (as-of design), and the
+    original pull read one row PER SNAPSHOT, fetching Open-Meteo once per row:
+    on the live box that was 624 rows / ~430 TLS connections for the 16 games
+    of 2026 week 1 (growing daily), five-minute runs, intermittent handshake
+    timeouts, and one missing venue counted once per snapshot day — 33% "loss",
+    over the 20% ceiling, a failed run every night. The pull must read the
+    LATEST snapshot per game: one fetch per outdoor game, one row per game."""
+    rec = patch_fetch()
+    for day in ("2023-08-01", "2023-08-02", "2023-08-03"):
+        schedules.ingest_schedules(db, nfl_fixture("schedules"), retrieved_as_of=day)
+    per_game = db.execute(
+        "SELECT COUNT(*) AS raw, COUNT(DISTINCT game_id) AS games "
+        "FROM schedules WHERE season = 2023 AND week = 1"
+    ).fetchone()
+    assert per_game["raw"] == 3 * per_game["games"], "snapshots really do multiply"
+
+    n = weather.pull_game_weather(db, 2023, 1, retrieved_as_of="2023-09-05", mode="forecast")
+    assert n == per_game["games"]  # one stored row per game, not per snapshot
+    outdoor = sum(
+        1 for r in db.execute(
+            "SELECT DISTINCT game_id, stadium_id FROM schedules "
+            "WHERE season = 2023 AND week = 1"
+        )
+        if not weather._STADIUM_COORDS[r["stadium_id"]][3]
+    )
+    assert len(rec.calls) == outdoor, "exactly one HTTP fetch per outdoor GAME"

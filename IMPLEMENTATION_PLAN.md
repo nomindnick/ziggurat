@@ -2831,6 +2831,101 @@ allowlist omitting `push`, which CLAUDE.md's repo map lists as permanent.
 
 **Goal:** Measure the signals before trusting them. Runs in parallel with Phases 2–3 wherever hours allow — nothing here blocks draft day or Week 1, but signal deployments in-season are gated on results here. Standing methodology for every experiment: strict `as_of` cuts, train on 2021–23 / validate on 2024–25, grade decisions not outcomes.
 
+### 4.0 [Fix] Draft-week loose ends — two live-fire defects (added 2026-09-01)
+**Origin:** both surfaced during/around the 2026-08-31 live draft; full incident
+notes in gitignored `intel/weekly/2026-wk00.md` ("Draft night" sections). Added
+as a preliminary Phase-4 item on operator instruction so a fresh session picks
+them up from the plan alone. (Other recorded post-draft follow-ups live where
+they were logged: the kicker-board `espn_projections` source spec + re-blessed
+golden in item 3.11's text, and the `no_control`-vs-`no_effect` add-failure
+diagnostic split in runbook §9 + wk00 — they are NOT part of this item.)
+
+**Fix A — sync gate chokes on injury-suffixed names (recurrence certain).**
+At live pick 72 the DOM-sync resolution gate refused ESPN's Pick History row
+for Josh Jacobs: the row's link text said `Josh Jacobs` but the cell text
+parsed as `Josh JacobsDTD` — ESPN renders the injury designation glued to the
+name, so the gate's two-name self-check disagreed and it refused (correctly;
+the operator/monitor cleared it via "Find him" in ~2 min, feed dammed
+meanwhile). Fix: strip trailing injury-designation suffixes (DTD, Q, O, IR,
+SSPD, PUP…) from the harvested cell text before the name comparison — at
+whichever layer parses the cell (check the sync userscript's harvester vs the
+server-side gate in `ziggurat/draft/`); add a regression test with the literal
+`Josh JacobsDTD` form. **If the fix touches a userscript: bump its version and
+note the Tampermonkey reinstall step** — the installed copy is a snapshot
+(runbook §1), and `tests/test_draft_runbook.py` pins the quoted versions.
+No in-season consumer (draft/ is draft-only) — the deadline is "before next
+draft", but fix it while the incident is fresh.
+
+**Fix B — `game_weather` has NEVER successfully pulled on this box.**
+`ziggurat ingest status`: `NEVER PULLED … PartialPull: game_weather failed on
+week 1 after storing 0 rows … URLError: <urlopen error _ssl.c:993: The
+handshake operation timed out>` (every attempt, e.g. 2026-08-31T23:39Z). It is
+context-only but PERISHABLE in forecast mode — each missed day is a lost
+observation once games near. Hypothesis to check first: the 3.1b
+`net.py` socket bound (3.0 s) may be too tight for Open-Meteo's TLS handshake
+from this host; also check IPv6 vs IPv4. **Deadline: before the Wed 2026-09-09
+opener** (Week 1 weather context feeds `stream`/`lineup` disclosure).
+
+**Done when:** (A) the suffixed-name form resolves in tests and the gate's
+self-check passes on a `NameDTD` fixture; (B) `ziggurat ingest run --source
+game_weather` stores real rows and `ingest status` shows it fresh. Suite green.
+**Update:**
+> **Both fixed 2026-09-01. Suite 2,443 → 2,448 passed, 4 skipped. No
+> userscript was touched (no version bump / reinstall needed): both defects
+> were server-side.**
+>
+> **Fix A — one line, but the root cause was ORDER, not just a missing token.**
+> `_STATUS_FLAGS` in `ziggurat/draft/sync.py` lacked `DTD`/`PUP`, and the strip
+> loop stops at the first flag the text ends with — so even with `DTD` merely
+> appended, bare `"D"` would still have matched `"Josh JacobsDTD"` first,
+> failed the `_ends_a_real_name` guard on `"…DT"`, and kept the whole suffix.
+> The tuple is now longest-first: `("SSPD", "DTD", "PUP", "IR", "NA", "Q",
+> "O", "D", "P")`. Regression tests: the literal live form
+> `"Josh JacobsDTDGBRB"` (plus suffix+DTD and PUP combos) in the
+> `parse_history_cell` table, and an end-to-end replay of live pick 72 on the
+> **espn_id rung** — the rung that actually refused (the href was present; the
+> cell-vs-anchor self-check is what disagreed) — asserting
+> `pick.cell_name == pick.name` and a confident commit.
+>
+> **Fix B — the plan's hypothesis was wrong twice, and the real defect was
+> ours, not the network's.** The `net.py` bound is 60 s (not 3.0 s), and
+> Open-Meteo has no AAAA record, so IPv6 was not in play. What the run log
+> actually showed (it is richer than `ingest status`): the handshake-timeout
+> runs ALTERNATED with runs that reached the API and still `failed` — "wrote
+> 16 rows but lost 8/24 (33% — over the 20% ceiling)". Two real defects:
+>
+> 1. **`pull_game_weather` read schedules with NO snapshot dedup.** The
+>    schedules table stores one full snapshot per pull day (as-of design), so
+>    the raw `WHERE season=? AND week=?` returned one row per game PER DAY —
+>    624 rows for the 16 games of 2026 week 1 by Sept 1, growing daily — and
+>    `_build_row` fetches Open-Meteo once per ROW: a burst of ~430 fresh TLS
+>    connections where ≤16 would do. Five-minute runs, intermittent handshake
+>    timeouts (burst throttling is the likely mechanism; unprovable, but the
+>    exposure is gone), and inflated loss denominators. The read now resolves
+>    the LATEST snapshot per `game_id` (documented as an operational read —
+>    `get_schedule`'s knowable gate would silently exclude playoff games
+>    before their bracket is knowable). One fetch per outdoor game, pinned by
+>    test. The archive backfill path routes through the same function.
+> 2. **The 8 "unstampable" rows were ONE missing venue counted 8 times:**
+>    `MEL00` — the Melbourne Cricket Ground, which 2026 schedules introduced
+>    on 2026-08-24 for the week-1 SF@LA international game. Not in
+>    `_STADIUM_COORDS` (its completeness tests only cover 2020-2025 venues),
+>    so the game was dropped on every pull, once per accumulated snapshot day
+>    — which is what pushed the loss ratio over the ceiling and failed even
+>    the runs that reached the API. Added (`-37.8200, 144.9834,
+>    Australia/Melbourne`, open-air); the frozen `_EXPECTED_STADIUM_IDS` test
+>    updated; and the drop note now NAMES the missing stadium_id(s) instead
+>    of the generic "unresolvable stadium" (the generic message is why this
+>    sat undiagnosed for a week).
+>
+> Live done-when met on this box: `ziggurat ingest run --source game_weather`
+> → `ok`, 16 rows in 8.5 s (previously 2–5 min then `failed`); `ingest
+> status` reads `fresh`. The Melbourne row is honest: kickoff_local
+> `2026-09-11T10:35+10:00`, 64.9 °F, 14.4 mph. Standing lesson: **a run log
+> that records loss RATIOS can turn one missing reference row into a nightly
+> hard failure when the denominator is silently multiplied — dedup the read,
+> and make drop messages name the key they dropped.**
+
 ### 4.1 [Build] Backtest harness & decision grading
 **Pre-work note (2026-08-27):** three ad-hoc analyses already ran against a
 scratch download of the db_fpecr panel (gitignored `data/backtest/`), before

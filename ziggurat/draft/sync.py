@@ -39,8 +39,13 @@ _KNOWN_ABBRS = frozenset(NICKNAME_TO_ABBR.values()) | {
 _POS_TOKENS = ("D/ST", "DST", "QB", "RB", "WR", "TE", "K")
 # Injury/status flags ESPN appends to the player name ("Cam SkatteboQ").
 # Matched ONLY as a whole trailing token after team+pos are stripped, so name
-# suffixes like "III" or initials like "DK" are never eaten.
-_STATUS_FLAGS = ("IR", "SSPD", "NA", "Q", "O", "D", "P")
+# suffixes like "III" or initials like "DK" are never eaten. ORDER MATTERS:
+# longest first, because the strip loop stops at the first flag the text ends
+# with — with bare "D" ahead of "DTD", "Josh JacobsDTD" matched "D", failed the
+# real-name guard on "...DT", and kept the whole suffix. That parse blocked
+# live pick 72 of the 2026-08-31 draft (the gate's two-name self-check refused,
+# correctly, and dammed the feed until a human entered the pick).
+_STATUS_FLAGS = ("SSPD", "DTD", "PUP", "IR", "NA", "Q", "O", "D", "P")
 
 # ESPN player-page hrefs carry the player id: .../id/4362628/... — the same id
 # the board's ``espn_id`` uses, giving an exact match that bypasses name fuzz.

@@ -37,6 +37,14 @@ from ziggurat.draft.sync import (
         ("Luther Burden IIIQCHIWR", "Luther Burden III", "CHI", "WR"),
         ("Patrick Mahomes IIOKCQB", "Patrick Mahomes II", "KC", "QB"),
         ("Marvin Harrison Jr.OARIWR", "Marvin Harrison Jr.", "ARI", "WR"),
+        # MULTI-LETTER flags (item 4.0 Fix A). "Josh JacobsDTD..." is verbatim
+        # from LIVE pick 72 of the 2026-08-31 draft: the flag list had bare "D"
+        # ahead of (a then-missing) "DTD", the strip loop stops at the first
+        # endswith hit, so the parse kept the whole suffix and the commit
+        # gate's two-name self-check dammed the feed for ~2 minutes.
+        ("Josh JacobsDTDGBRB", "Josh Jacobs", "GB", "RB"),
+        ("Kenneth Walker IIIDTDSEARB", "Kenneth Walker III", "SEA", "RB"),
+        ("Tyreek HillPUPMIAWR", "Tyreek Hill", "MIA", "WR"),
         ("DK MetcalfPITWR", "DK Metcalf", "PIT", "WR"),
         ("Amon-Ra St. BrownDETWR", "Amon-Ra St. Brown", "DET", "WR"),
     ],
@@ -93,6 +101,30 @@ def test_suffixed_injured_pick_commits_end_to_end():
         res = resolve_synced_pick(NameResolver(board), board, pick, taken=frozenset())
         assert res.confident, f"{payload['player']} still blocks: {res.reason}"
         assert res.entry.player_id == want
+
+
+def test_dtd_suffixed_pick_commits_on_the_espn_id_rung():
+    """Live pick 72, 2026-08-31 draft (item 4.0 Fix A), replayed end-to-end.
+
+    The harvested row carried the player href, so resolution took the exact
+    espn_id rung — and STILL refused, because the cell text parsed as
+    'Josh JacobsDTD' while the anchor said 'Josh Jacobs', and the gate's
+    cell-vs-anchor self-check saw two different names. With "DTD" stripped as
+    a status flag the two names agree and the pick must commit confidently."""
+    board = (BoardEntry("4047365", "Josh Jacobs", "RB", 93, 210.0, 38.0, "GB"),)
+    pick = parse_payload_pick({
+        "overall": 72,
+        "player": "Josh JacobsDTDGBRB",
+        "player_clean": "Josh Jacobs",
+        "href": "https://www.espn.com/nfl/player/_/id/4047365/josh-jacobs",
+    })
+    assert pick is not None
+    assert pick.espn_id == "4047365"
+    # the self-check precondition: cell name and anchor name now agree
+    assert pick.cell_name == pick.name == "Josh Jacobs"
+    res = resolve_synced_pick(NameResolver(board), board, pick, taken=frozenset())
+    assert res.confident, f"pick 72 still blocks: {res.reason}"
+    assert res.entry.player_id == "4047365"
 
 
 def test_a_refusal_names_the_field_that_disagreed():
