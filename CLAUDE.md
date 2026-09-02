@@ -674,6 +674,68 @@ against the real CLI and checks the userscript versions it names against the
 shipped files, so a renamed flag or a bumped script rots it loudly instead of
 at 18:45 on draft night.
 
+**Phase 4 — Backtest & Signal Program — IN PROGRESS, re-sequenced 2026-09-01
+(operator decision): 4.1 → 4.2 is the critical path and runs this week; then
+5.1 (playoff posture) and 5.2 (the learning loop) are pulled ahead; 4.3–4.5
+are deferred behind more critical work — not struck, not dated.** Item 4.0
+(the two draft-week live-fire defects) closed the same day, both server-side.
+
+- **4.1 backtest harness & decision grading — built, audited & fixed
+  2026-09-01.** A weekly replay harness under `backtest/` (`stats.py`,
+  `decisions.py`, `replay.py`, `scorecards.py`; imports `ziggurat/` directly,
+  never `draft/`): the DECIDE phase calls PRODUCTION
+  `core.candidates.build_candidates` ONCE per week through `base.latest_truth`
+  at `as_of(T)` = the first Tuesday strictly after the week's last REG gameday
+  and freezes byte-deterministic JSONL (sha256 manifest) under gitignored
+  `data/backtest/replay/<hash12>/`; the GRADE phase is pure over the freeze at
+  a strictly-later `grade_as_of`, against the `db_fpecr` weekly-ECR panel (`wp`
+  and `ros`) with Sleeper `/research` ownership deltas as corroboration
+  (new ingester, migration `012`) and `weekly_stats` kicking columns persisted
+  beside it (migration `013`, `schema_version` 13). Three strategies over the
+  generator's pool — `signal_topk`, `random_k`, `volume_topk` (most touches) —
+  and every threshold a labelled hypothesis printed on the card. **Done-when
+  met and re-runnable** (`python -m backtest.replay --seasons 2023 --strategy
+  signal_topk --k 3`: 11.2 s fresh, 2.2 s reusing the freeze). **Five
+  seasons in 74.5 s**, `signal_topk` on `wp`: p@3 **82.6% [77.1, 87.1]** n=219
+  vs a 49.5% null, +34.0pp pooled, +33.1pp season-block [+26.7, +39.5] n=5;
+  TRAIN 83.0% / HOLDOUT 82.1% (block n=2 [−6.4, +73.9] — printed, not hidden);
+  `ros` p@3 65.3% vs 30.2%. **Both amendment seams exist for 4.2**: a holdout
+  lock (2024–25 refused without `--unlock-holdout`, every unlock logged to a
+  ledger publish-then-record) and threshold injection
+  (`build_candidates(thresholds=, emergence_floors=)`; eleven floors, all in
+  the cache key); TRAIN is 54 weeks at ~27 s per setting, so the search is an
+  afternoon. **The audit (7 lenses, 32 agents incl. 21 refute-first verifiers;
+  46 findings, 43 confirmed, all fixed but two recorded) changed two
+  conclusions.** (1) **The instrument grades
+  AGREEMENT with the market, not a lead over it:** 158 of 181 hits are the
+  market's first scrape after the event; only 12 are genuine one-week leads,
+  11 the first draft counted as leads were bye-deferred and unmeasurable, and
+  on the raw lead-2 rate — the one "beat the market" number the panel has —
+  the tool shows no lift over random-from-pool (the CONDITIONAL rate is 4.2's
+  first open item; that is the plan's own T+1/T+2 definition, not a defect).
+  (2) **The null was matched on eligibility, not depth** — the hit rule gets
+  easier with r0 depth (31% at r0 ≤ 36, 70% past 100), `volume_topk` picks
+  shallow, so the raw lift REWARDED picking deeper; "+11pp over the touches
+  heuristic" is struck (depth-matched: signal +36.8 vs volume +35.3,
+  indistinguishable on holdout). Also fixed: no holdout lock at all (the first
+  five-season run read 2024–25 unflagged — recorded); a vacuous leakage test;
+  a 2021 wk15 page that PRECEDED its decision graded as a hit; Sleeper's
+  current-week bucket **aliases the live board** (`SETTLE_DAYS = 7`, settling
+  measurement 09-15 → 09-22); and **COST-1 in 3.3 production code** —
+  `usage_deltas` re-read the whole season-to-date `snap_counts` per position
+  (O(W²) per season), 5.7–5.9 s → 0.2–0.7 s per `build_candidates`, digest
+  identical.
+  Not built, recorded: `ff_opportunity` (→ 4.2's TD-regression source), the
+  paid Odds API cross-check, K/DST grading, an sd-units HIT variant, and any
+  replay of the waiver claim ORDER (projection-priced; no 2021–25
+  point-in-time projections exist — item 1.5). Watch: the `fpecr` registry
+  entry's FIRST pull is the Wed 09-02 07:22 PDT timer (`NEVER PULLED : fpecr`
+  until then is correct). Suite green (**2,647 passed, 4 skipped**). Details:
+  `IMPLEMENTATION_PLAN.md` 4.1 + gitignored
+  `intel/research/backtest-harness-4.1-design.md`. **Standing lesson: a null
+  that is not matched on the thing the strategies vary is a thumb on the
+  scale for whichever strategy varies it most.**
+
 Update this section whenever a phase or checkpoint closes.
 
 ## Standing rules (non-negotiable, from the SPEC)

@@ -504,3 +504,130 @@ def test_network_seam_is_bounded_and_atomic(monkeypatch, tmp_path):
     assert seen["url"] == fpecr.FPECR_URL
     assert dest.read_bytes() == b"parquet-bytes"
     assert not (tmp_path / "db_fpecr.parquet.part").exists()
+
+
+class _ChunkedResponse:
+    """A urlopen response serving ``chunks`` in order; a chunk that is an
+    exception is raised from ``read`` (a mid-transfer reset)."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    def read(self, _n):
+        nxt = self._chunks.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_the_whole_transfer_is_budgeted_and_the_partial_removed(monkeypatch, tmp_path):
+    """OPS-4 / OPS-3: a per-read timeout cannot bound a trickling upstream, so
+    the transfer carries a wall-clock budget; on the budget the error names the
+    seconds and bytes, and the ``.part`` is GONE — a leftover partial is a 38 MB
+    file the next run would silently rename over."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(fpecr.time, "monotonic", lambda: clock["t"])
+
+    def _read_ticks(chunks):
+        resp = _ChunkedResponse(chunks)
+        real_read = resp.read
+
+        def read(n):
+            clock["t"] += 400.0                        # each chunk takes 400 s
+            return real_read(n)
+
+        resp.read = read
+        return resp
+
+    monkeypatch.setattr(fpecr.urllib.request, "urlopen",
+                        lambda request, timeout=None: _read_ticks([b"a" * 10, b"b" * 10, b""]))
+    dest = tmp_path / "db_fpecr-2026-09-01.parquet"
+    with pytest.raises(TimeoutError, match=r"exceeded its 600 s budget") as info:
+        fpecr.fetch_fpecr(dest)
+    assert "800 s elapsed" in str(info.value) and "20 bytes received" in str(info.value)
+    assert not dest.exists() and not (tmp_path / "db_fpecr-2026-09-01.parquet.part").exists()
+    assert list(tmp_path.iterdir()) == []
+
+    # A generous budget lets the same transfer through, final name only.
+    clock["t"] = 0.0
+    monkeypatch.setattr(fpecr.urllib.request, "urlopen",
+                        lambda request, timeout=None: _read_ticks([b"a" * 10, b"b" * 10, b""]))
+    fpecr.fetch_fpecr(dest, budget_s=10_000.0)
+    assert dest.read_bytes() == b"a" * 10 + b"b" * 10
+    assert [p.name for p in tmp_path.iterdir()] == ["db_fpecr-2026-09-01.parquet"]
+
+
+def test_a_read_error_mid_transfer_leaves_no_partial_behind(monkeypatch, tmp_path):
+    """The failure the auditor reproduced: a reset after one chunk used to leave
+    ``<mirror>.part`` on disk. Same exception type surfaces; neither file exists."""
+    import urllib.error
+
+    monkeypatch.setattr(
+        fpecr.urllib.request, "urlopen",
+        lambda request, timeout=None: _ChunkedResponse([b"head", urllib.error.URLError("reset")]),
+    )
+    dest = tmp_path / "db_fpecr-2026-09-01.parquet"
+    with pytest.raises(urllib.error.URLError):
+        fpecr.fetch_fpecr(dest)
+    assert not dest.exists()
+    assert not (tmp_path / "db_fpecr-2026-09-01.parquet.part").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stale_partials_are_swept_and_a_live_one_is_kept(tmp_path, caplog):
+    """A ``SIGKILL`` runs no ``finally``, so the next run sweeps. Age-guarded:
+    a partial written inside the budget window may be another process's
+    download in progress and is left alone; one idle longer than the whole
+    budget is removed, and each removal is logged."""
+    import os
+
+    mirror = tmp_path / "db_fpecr-2026-09-01.parquet"
+    stale = tmp_path / "db_fpecr-2026-08-01.parquet.part"
+    live = tmp_path / "db_fpecr-2026-09-01.parquet.part"
+    other = tmp_path / "unrelated.txt.part"
+    for p in (stale, live, other):
+        p.write_bytes(b"x")
+    now = 1_000_000.0
+    os.utime(stale, (now - 5000.0, now - 5000.0))
+    os.utime(live, (now - 30.0, now - 30.0))
+    os.utime(other, (now - 5000.0, now - 5000.0))
+    with caplog.at_level("WARNING", logger="ziggurat.data.nfl.fpecr"):
+        removed = fpecr.sweep_stale_parts(mirror, now=now)
+    assert removed == [str(stale)]
+    assert not stale.exists() and live.exists() and other.exists()
+    assert any("stale partial download" in m and stale.name in m for m in caplog.messages)
+    # Idempotent and quiet when there is nothing to do.
+    assert fpecr.sweep_stale_parts(mirror, now=now) == []
+    # The pull calls the sweep before it decides whether to fetch.
+    assert fpecr.FETCH_BUDGET_S == 600.0
+
+
+def test_pull_sweeps_stale_partials_before_looking_for_the_mirror(monkeypatch, tmp_path):
+    """Through ``pull_fpecr``: a stale ``.part`` beside the mirror is removed
+    before the exists-check, whatever the run then does."""
+    import os
+    import sqlite3
+
+    mirror = tmp_path / "db_fpecr-2026-09-01.parquet"
+    stale = tmp_path / "db_fpecr-2026-08-01.parquet.part"
+    stale.write_bytes(b"x")
+    old = 1.0
+    os.utime(stale, (old, old))
+    seen = {}
+
+    def fake_fetch(dest, *, budget_s=fpecr.FETCH_BUDGET_S):
+        seen["fetched"] = str(dest)
+        raise RuntimeError("stop here — the sweep already happened")
+
+    monkeypatch.setattr(fpecr, "fetch_fpecr", fake_fetch)
+    with pytest.raises(RuntimeError, match="stop here"):
+        fpecr.pull_fpecr(sqlite3.connect(":memory:"), retrieved_as_of="2026-09-01",
+                         path=mirror)
+    assert seen["fetched"] == str(mirror)
+    assert not stale.exists()

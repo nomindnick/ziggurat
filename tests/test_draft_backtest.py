@@ -852,6 +852,29 @@ def test_the_season_block_interval_is_a_t_on_FIVE_numbers_not_five_hundred(world
     )
 
 
+def test_identical_per_season_deltas_collapse_the_block_interval_and_never_exclude_zero(world):
+    """STAT-6 (draft-backtest analogue): five seasons that all read +0.5 give a
+    zero-dispersion block whose interval collapses to the point [+0.5, +0.5].
+    That is five agreeing draws, not evidence against zero, so it must print
+    ``includes zero`` — the same rule as ``backtest.stats.Interval``."""
+    results = [
+        bt.SeasonResult(
+            season=season, scrape_date="x", board_size=1,
+            outcomes={
+                "A": tuple(_outcome(objective=0.5) for _ in range(10)),
+                "B": tuple(_outcome(objective=0.0) for _ in range(10)),
+            },
+        )
+        for season in (2021, 2022, 2023, 2024, 2025)
+    ]
+    block = bt.season_block_interval(results, challenger="A", baseline="B")
+    assert block.n_blocks == 5 and block.mean == pytest.approx(0.5)
+    assert block.ci_low == block.ci_high == pytest.approx(0.5) and block.sd == 0.0
+    assert not block.excludes_zero
+    assert "includes zero" in bt.format_block(block)
+    assert "EXCLUDES ZERO" not in bt.format_block(block)
+
+
 def _outcome(*, objective: float):
     from ziggurat.draft.evaluate import DraftOutcome
 

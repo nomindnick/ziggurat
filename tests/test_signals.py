@@ -8,6 +8,8 @@ on a synthetic two-day panel; the live league-state injury arm is exercised
 through synthetic snapshots in ``test_league_state.py``.
 """
 
+from types import MappingProxyType
+
 import pandas as pd
 import pytest
 
@@ -618,3 +620,117 @@ def test_pre_season_no_week_raises_no_completed_week(db, nfl_fixture):
     _seed(db, nfl_fixture)
     with pytest.raises(C.NoCompletedWeek):
         _read(db, as_of="2023-08-15", season=2023)  # week=None, before any game
+
+
+# ------------------------------------------------------------------------------
+# Item 4.1 audit — RULES-2: threshold injection (the second seam the 4.2 amendment
+# says 4.1 must provide), and COST-1: the generator's read-cost gate.
+# ------------------------------------------------------------------------------
+
+
+def _seed_with_debut(db, nfl_fixture, *, gsis="00-0099999", carries=22):
+    wk = _append_debut_rb(nfl_fixture("weekly_stats"), gsis=gsis, team="CAR", carries=carries)
+    players.ingest_players(db, nfl_fixture("ids"), retrieved_as_of="2023-08-01")
+    schedules.ingest_schedules(db, nfl_fixture("schedules"), retrieved_as_of="2023-08-01")
+    weekly_stats.ingest_weekly_stats(db, wk, retrieved_as_of=_BULK_RETRIEVED)
+    snap_counts.ingest_snap_counts(db, nfl_fixture("snap_counts"), retrieved_as_of=_BULK_RETRIEVED)
+    injuries.ingest_injuries(db, nfl_fixture("injuries"), retrieved_as_of=_BULK_RETRIEVED)
+
+
+def test_injecting_the_shipped_thresholds_is_the_no_argument_board(db, nfl_fixture):
+    """(a) Passing the shipped objects — or an EQUAL copy of the floors — is
+    row-for-row the production board, reason bytes included (the item-4.1
+    replay freezes reason text, so the default sentence is pinned)."""
+    _seed_with_debut(db, nfl_fixture)
+    default = _read(db, as_of="2023-10-17", season=2023, week=6)
+    explicit = _read(db, as_of="2023-10-17", season=2023, week=6,
+                     thresholds=C.DEFAULT_BREAKOUT, emergence_floors=C.EMERGENCE_FLOORS)
+    copied = _read(db, as_of="2023-10-17", season=2023, week=6,
+                   emergence_floors=dict(C.EMERGENCE_FLOORS))
+    assert explicit.rows == default.rows == copied.rows
+    assert default.by_kind(C.SIGNAL_USAGE), "the comparison must be over a non-empty board"
+    debut = next(r for r in default.by_kind(C.SIGNAL_USAGE) if r.gsis_id == "00-0099999")
+    assert debut.reasons[1] == (
+        "absolute-usage floor is a labelled hypothesis (item 3.3, tuning deferred "
+        f"to Phase 4). ({C.EMERGENCE_LABEL})")
+
+
+def test_a_tightened_threshold_shrinks_the_usage_board_and_quotes_its_own_label(db, nfl_fixture):
+    """(b) A tightened BreakoutThresholds passed in — no importlib.reload —
+    shrinks the DIFFERENCED usage rows, and every surviving row's reason quotes
+    the injected label/source, never the shipped hypothesis's provenance."""
+    _seed(db, nfl_fixture)
+    default = _read(db, as_of="2023-10-17", season=2023, week=6)
+    tight = C.BreakoutThresholds(
+        floors=MappingProxyType({m: f * 2 for m, f in C.DEFAULT_BREAKOUT.floors.items()}),
+        label="hypothesis: TEST floors doubled",
+        source="tests/test_signals.py (item 4.1, RULES-2)")
+    board = _read(db, as_of="2023-10-17", season=2023, week=6, thresholds=tight)
+
+    def differenced(b):
+        return [r for r in b.by_kind(C.SIGNAL_USAGE) if r.prior_week is not None]
+
+    assert 0 < len(differenced(board)) < len(differenced(default))
+    assert {r.gsis_id for r in differenced(board)} < {r.gsis_id for r in differenced(default)}
+    for r in differenced(board):
+        joined = " ".join(r.reasons)
+        assert tight.label in joined and tight.source in joined
+        assert C.DEFAULT_BREAKOUT.label not in joined
+    # the module constant is untouched: the production setting did not move
+    assert C.DEFAULT_BREAKOUT.floors["carries"] == 6.0
+    assert _read(db, as_of="2023-10-17", season=2023, week=6).rows == default.rows
+
+
+def test_a_tightened_emergence_floor_shrinks_the_debut_cohort_and_names_the_floors_in_force(
+        db, nfl_fixture):
+    """(b), emergence half. The floors thread into the hit loop AND both
+    divisors (ranking + magnitude): a 22-carry debut under a carries>=20 floor
+    has magnitude 22/20, not 22/10 with the default's label — and under
+    carries>=30 he is gone. A non-default run names its floors and never quotes
+    EMERGENCE_LABEL as its own."""
+    _seed_with_debut(db, nfl_fixture, carries=22)
+    default = _read(db, as_of="2023-10-17", season=2023, week=6)
+    emergence = lambda b: [r for r in b.by_kind(C.SIGNAL_USAGE) if r.prior_week is None]  # noqa: E731
+    debut_default = next(r for r in emergence(default) if r.gsis_id == "00-0099999")
+    assert debut_default.magnitude == pytest.approx(22 / 10)
+
+    twenty = {**dict(C.EMERGENCE_FLOORS), "carries": 20.0}
+    board = _read(db, as_of="2023-10-17", season=2023, week=6, emergence_floors=twenty)
+    debut = next(r for r in emergence(board) if r.gsis_id == "00-0099999")
+    assert debut.magnitude == pytest.approx(22 / 20)
+    joined = " ".join(debut.reasons)
+    assert "NON-DEFAULT" in joined and "carries >= 20" in joined
+    assert "tuning setting" in joined
+    assert C.EMERGENCE_LABEL not in joined
+    assert "labelled hypothesis (item 3.3" not in joined
+
+    thirty = {**dict(C.EMERGENCE_FLOORS), "carries": 30.0}
+    gone = _read(db, as_of="2023-10-17", season=2023, week=6, emergence_floors=thirty)
+    assert "00-0099999" not in {r.gsis_id for r in emergence(gone)}
+    assert len(emergence(gone)) < len(emergence(default))
+    assert C.EMERGENCE_FLOORS["carries"] == 10.0  # the shipped constant did not move
+
+
+def test_build_candidates_reads_the_snap_table_twice_and_the_stat_table_once(
+        db, nfl_fixture, monkeypatch):
+    """COST-1's gate, instrumented at the SELECT seam (``base.select_as_of``),
+    not at ``get_snap_counts`` — a cost gate only sees the function it wraps.
+    One season-to-date snap read shared across RB/WR/TE plus the target-week
+    share read; one season-to-date stat read the arm slices for the target
+    week. The pre-fix shape was 4 and 4 (three season-to-date snap reads, one
+    per position)."""
+    from collections import Counter
+
+    _seed(db, nfl_fixture)
+    calls = Counter()
+    real = base.select_as_of
+
+    def counting(conn, table, **kw):
+        calls[table] += 1
+        return real(conn, table, **kw)
+
+    monkeypatch.setattr(base, "select_as_of", counting)
+    board = _read(db, as_of="2023-10-17", season=2023, week=6)
+    assert board.by_kind(C.SIGNAL_USAGE)
+    assert calls["snap_counts"] == 2
+    assert calls["weekly_stats"] == 1

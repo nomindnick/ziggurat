@@ -159,8 +159,11 @@ is within 7.27% of the measured tier sigma in 15 of 15 cells (largest miss QB
 quoted in every reason string, and as the reading for a player whose projected
 mean falls outside the range the affine model was fitted on. The old constant
 keeps working because nothing here touches it. Kicker sigma stays what 3.5 called
-it — a pure hypothesis, unmeasurable locally (``weekly_stats`` carries no FG
-make/distance columns).
+it — a flat hypothesis — but the REASON has changed: it is NOT YET FITTED, no
+longer unmeasurable. ``weekly_stats`` gained FG make/distance/miss columns in
+migration ``013`` (item 4.1), so ``score_kicker`` can now be exercised on
+historical K rows; a measured K sigma through the same OLS is a recorded
+follow-up, not part of this module yet.
 
 Standing rules. Rule 1 — every accessor takes a keyword-only ``as_of`` with no
 default, defaults to the ``historical`` view, threads ``view``, and ships a
@@ -437,10 +440,11 @@ class TierSigmaModel:
     top of a tier whose mean is 16.6 — his tier's 8.3 rather than the affine's
     10.6, understating the best player on the board by 28%.
 
-    Kickers are absent by necessity, not oversight: ``weekly_stats`` carries no FG
-    make/distance/miss columns, so ``score_kicker`` cannot be exercised on a
-    historical row at all. K falls through to ``DEFAULT_VARIANCE.k_flat_sigma``,
-    which item 3.5 labels a pure hypothesis.
+    Kickers are absent because the fit has NOT YET BEEN RUN, not because it
+    cannot be: ``weekly_stats`` gained FG make/distance/miss columns in migration
+    ``013`` (item 4.1), so ``score_kicker`` can now be exercised on historical K
+    rows. Until that follow-up lands, K falls through to
+    ``DEFAULT_VARIANCE.k_flat_sigma``, the flat hypothesis item 3.5 shipped.
 
     Rule 2: none of these numbers is a scoring value. A sigma parametrises a
     downstream win-probability / floor-ceiling model; it never re-prices anything.
@@ -481,9 +485,10 @@ class TierSigmaModel:
                 sigma=variance.k_flat_sigma,
                 source="kicker_flat_hypothesis",
                 reason=(
-                    f"weekly swing sigma {variance.k_flat_sigma:.1f} pts — kicker "
-                    "variance is UNMEASURABLE from this database (weekly_stats has no "
-                    f"FG make/distance columns), so this is a pure guess: {variance.label}"
+                    f"weekly swing sigma {variance.k_flat_sigma:.1f} pts — a flat kicker "
+                    "hypothesis NOT YET FITTED: weekly_stats gained FG make/distance/miss "
+                    "columns in migration 013 (item 4.1), and a measured K sigma is a "
+                    f"recorded follow-up; until then this is a guess: {variance.label}"
                 ),
             )
         affine = variance.sigma(pos, mu)

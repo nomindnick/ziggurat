@@ -49,7 +49,7 @@ from ziggurat.paths import MIGRATIONS_DIR, SCHEMA_PATH
 
 #: Bump with every migration. A literal, not a computed value: if this file
 #: derived the number from the directory it would agree with any mistake.
-LATEST_SCHEMA_VERSION = 11
+LATEST_SCHEMA_VERSION = 13
 
 #: sha256 of every shipped migration. Pinned as literals for the reason spelled
 #: out in `test_an_applied_migration_is_never_edited` — this is the guard against
@@ -76,6 +76,10 @@ MIGRATION_DIGESTS: dict[str, str] = {
         "946e79431899c4a8fc944d5856b6f9ad287a5670ad68a9a0d0289db6c3deb882",
     "011_fpecr_panel.sql":
         "5a7fbe9b0c01c1d23a8ab0d9aa29f7644164c2dedf38441de89e54da87511287",
+    "012_sleeper_ownership.sql":
+        "58065eaafef5a1adce6baad14c4c9603a954d7008ed2693b4d5c9f9e37f78ab0",
+    "013_weekly_stats_kicking.sql":
+        "158fe1778ebf88e8b000c86cbfc29085364f7967a1ef8ff00fc3c32bbf1d9d7b",
 }
 
 #: The doctrine, printed by the test that enforces it. Long on purpose: the next
@@ -348,6 +352,34 @@ def test_snap_counts_pk_holds_a_two_team_week(migrated):
     indexes = {r["name"] for r in migrated.execute(
         "SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "idx_snap_counts_lookup" in indexes, "the rebuild must recreate migration 002's index"
+
+
+def test_013_adds_nullable_kicking_columns_to_weekly_stats(migrated):
+    """Item 4.1 §7.1. The eight nflverse kicking buckets exist on weekly_stats,
+    every one NULLABLE — a row retrieved before the migration reads NULL there,
+    and NULL means NOT CAPTURED (never zero) — and the primary key is untouched,
+    so a re-pull versions the uncaptured row instead of editing it."""
+    from ziggurat.data.nfl.weekly_stats import KICKING_COLUMNS
+
+    info = {r["name"]: r for r in migrated.execute("PRAGMA table_info(weekly_stats)")}
+    assert set(KICKING_COLUMNS) <= set(info), sorted(set(KICKING_COLUMNS) - set(info))
+    for col in KICKING_COLUMNS:
+        assert info[col]["type"] == "INTEGER"
+        assert info[col]["notnull"] == 0, f"{col} must be nullable: NULL = not captured"
+        assert info[col]["pk"] == 0
+    assert _pk_columns(migrated, "weekly_stats") == [
+        "player_id", "season", "week", "retrieved_as_of",
+    ]
+
+    # The pre-013 row shape still inserts (the 2021-2025 partitions stamped
+    # 2026-07-25 have exactly this shape) and reads NULL in all eight.
+    migrated.execute(
+        "INSERT INTO weekly_stats (player_id, season, week, season_type, position, "
+        "recent_team, retrieved_as_of, knowable_as_of) VALUES (?,?,?,?,?,?,?,?)",
+        ("00-0025565", 2023, 5, "REG", "K", "TEN", "2026-07-25", "2023-10-08"))
+    row = migrated.execute(
+        "SELECT * FROM weekly_stats WHERE player_id = '00-0025565'").fetchone()
+    assert all(row[col] is None for col in KICKING_COLUMNS)
 
 
 def test_the_old_snap_counts_key_really_did_lose_the_row(tmp_path):

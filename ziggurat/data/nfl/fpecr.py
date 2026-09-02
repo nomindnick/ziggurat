@@ -75,6 +75,11 @@ shadow a complete stored panel at read time while the run logged ``ok``.
 :class:`PanelCollapse` is checked per season BEFORE anything is written.
 """
 
+import contextlib
+import glob
+import logging
+import os
+import time
 import urllib.request
 from collections.abc import Iterable
 
@@ -86,6 +91,19 @@ from ziggurat.data.nfl import base
 #: durable provenance — upstream's git history is truncated (~Dec 2024 back), so
 #: the parquet is the only artifact and it is not versioned anywhere we control.
 FPECR_URL = "https://github.com/dynastyprocess/data/raw/master/files/db_fpecr.parquet"
+
+logger = logging.getLogger("ziggurat.data.nfl.fpecr")
+
+#: WALL-CLOCK BUDGET for the whole ~38 MB download (item 4.1 audit, OPS-3).
+#: ``net.HTTP_TIMEOUT`` bounds each socket READ, not the transfer: an upstream
+#: that keeps trickling bytes just under the timeout holds the daily unit for
+#: as long as it likes, and the three PERISHABLE sources behind this one in the
+#: registry lose their observation for the day. Measured 2026-09-01: the full
+#: download completes in ~11.6 s including the ingest; 600 s is ~50x that and
+#: still well inside the unit's wall-clock cap. Exceeding it raises
+#: ``TimeoutError`` naming the elapsed seconds and bytes, and the ``.part`` is
+#: removed.
+FETCH_BUDGET_S = 600.0
 
 #: Positions this league starts. Everything else (DB/DL/LB/EDGE IDP) is dropped
 #: at ingest, exactly as ``adp_rankings`` does and for the same reason: an IDP
@@ -639,31 +657,91 @@ def ingest_fpecr(
         return base.upsert(conn, "fpecr_panel", kept, key_cols=_PK_COLS, commit=False)
 
 
-def fetch_fpecr(dest) -> str:
+def fetch_fpecr(dest, *, budget_s: float = FETCH_BUDGET_S) -> str:
     """Download the archive to ``dest`` and return the path. THE network seam.
 
-    Bounded through ``net.HTTP_TIMEOUT`` (item 3.1b): an unbounded ``urlopen``
-    under systemd ``Type=oneshot`` parks the whole cadence forever on one
-    black-holed connection. Written to a ``.part`` file and renamed on success,
-    so a truncated download can never be mistaken for a mirror — the parquet
+    Bounded twice (item 3.1b, item 4.1 audit OPS-3): ``net.HTTP_TIMEOUT`` on
+    every socket read, and ``budget_s`` on the WHOLE transfer measured with
+    ``time.monotonic`` per chunk — a per-read timeout alone cannot bound a
+    trickling upstream. Written to a ``.part`` file and renamed on success, so
+    a truncated download can never be mistaken for a mirror — the parquet
     reader would otherwise fail on a half file, or worse, succeed on one.
 
-    Tests patch THIS function; nothing offline touches the network.
+    THE ``.part`` IS REMOVED ON ANY FAILURE the process can see (a read error,
+    the budget, a ``KeyboardInterrupt``): a leftover partial is not merely
+    litter, it is a 38 MB file whose name says what it nearly was, and the
+    next successful run would silently rename over it. What this cannot cover
+    is ``SIGKILL`` (or ``SIGTERM`` with no handler — systemd's stop signal),
+    which no ``finally`` runs under; :func:`pull_fpecr` sweeps stale
+    ``*.parquet.part`` siblings of ``path`` at the start of the next run for
+    exactly that case, logging each removal.
+
+    Tests patch THIS function (or ``urllib.request.urlopen`` on this module);
+    nothing offline touches the network.
     """
     dest = str(dest)
     part = f"{dest}.part"
     request = urllib.request.Request(FPECR_URL, headers={"User-Agent": "ziggurat/4.1"})
-    with urllib.request.urlopen(request, timeout=net.HTTP_TIMEOUT) as response:  # noqa: S310
-        with open(part, "wb") as handle:
-            while True:
-                chunk = response.read(1 << 20)
-                if not chunk:
-                    break
-                handle.write(chunk)
-    import os
-
+    started = time.monotonic()
+    received = 0
+    try:
+        with urllib.request.urlopen(request, timeout=net.HTTP_TIMEOUT) as response:  # noqa: S310
+            with open(part, "wb") as handle:
+                while True:
+                    chunk = response.read(1 << 20)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    received += len(chunk)
+                    elapsed = time.monotonic() - started
+                    if elapsed > budget_s:
+                        raise TimeoutError(
+                            f"fpecr: download of {FPECR_URL} exceeded its {budget_s:.0f} s "
+                            f"budget ({elapsed:.0f} s elapsed, {received} bytes received) — "
+                            "a trickling upstream; the partial file is removed and the "
+                            "perishable sources behind this one in the registry still run"
+                        )
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(part)
+        raise
     os.replace(part, dest)
     return dest
+
+
+def sweep_stale_parts(path, *, older_than_s: float = FETCH_BUDGET_S, now=None) -> list[str]:
+    """Remove ``*.part`` leftovers beside ``path`` from a run that was KILLED.
+
+    ``fetch_fpecr`` cleans up after every failure it can see; a ``SIGKILL`` or
+    an unhandled ``SIGTERM`` (systemd's stop) runs no ``finally``, so the
+    partial of a dated mirror survives under a name that says what it nearly
+    was. Nothing ever reads a ``.part`` — the mirror is looked up by its final
+    name — so removing it loses nothing; each removal is logged so a recurring
+    kill is visible in the journal. Only a partial whose last write is older
+    than ``older_than_s`` is touched: a download IN PROGRESS in another process
+    (an attended backfill beside the timer) rewrites its file every chunk, and
+    a partial nobody has written to for longer than the whole budget is not one
+    anybody is still writing. Returns the paths removed.
+    """
+    directory = os.path.dirname(str(path)) or "."
+    now = time.time() if now is None else now
+    removed: list[str] = []
+    for stale in sorted(glob.glob(os.path.join(directory, "*.parquet.part"))):
+        try:
+            age = now - os.stat(stale).st_mtime
+        except FileNotFoundError:
+            continue
+        if age <= older_than_s:
+            continue
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(stale)
+            removed.append(stale)
+            logger.warning(
+                "fpecr: removed stale partial download %s (last written %.0f s ago — a "
+                "previous run was killed mid-transfer; nothing reads a .part, so "
+                "nothing is lost)", stale, age,
+            )
+    return removed
 
 
 def read_fpecr(path):
@@ -694,8 +772,7 @@ def pull_fpecr(
     a module-level default path is how a file ends up written somewhere nobody
     expected. ``refresh=True`` re-downloads over an existing mirror.
     """
-    import os
-
+    sweep_stale_parts(path)
     if refresh or not os.path.exists(str(path)):
         fetch_fpecr(path)
     return ingest_fpecr(

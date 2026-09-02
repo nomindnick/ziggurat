@@ -1727,9 +1727,10 @@ def _grade_reasons(
     # than left under a cohort string that describes only the measured OLS part.
     out.append(
         f"spread, the two pieces that are NOT measured: kicker sigma is a flat "
-        f"{variance.k_flat_sigma:.1f} house points (weekly_stats carries no field-goal "
-        "make/distance/miss columns, so it cannot be fitted locally — a pure "
-        "hypothesis); and a QB starting alongside a WR/TE from his OWN NFL team is "
+        f"{variance.k_flat_sigma:.1f} house points (a hypothesis not yet fitted — "
+        "weekly_stats gained field-goal make/distance/miss columns in migration 013, "
+        "item 4.1, and a measured K sigma is a recorded follow-up); and a QB "
+        "starting alongside a WR/TE from his OWN NFL team is "
         f"given correlation rho=+{variance.correlation_qb_passcatcher:.2f}, which "
         "RAISES that lineup's variance — an unmeasured 'correlated starts' "
         f"hypothesis, not part of the fit above ({variance.source})"

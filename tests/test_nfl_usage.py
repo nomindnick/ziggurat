@@ -180,3 +180,122 @@ def test_the_ordinary_single_club_week_is_untouched(db, nfl_fixture):
     with_snaps = [d for d in deltas if d["d_offense_snaps"] is not None]
     assert with_snaps
     assert all(isinstance(d["d_offense_pct"], float) for d in with_snaps)
+
+
+# =====================================================================
+# Item 4.1 audit, COST-1: bounded + membership-restricted reads are a no-op
+# =====================================================================
+#
+# `usage_deltas` used to read every knowable week of weekly_stats AND every
+# knowable week of snap_counts for every player, per call — and the candidate
+# generator calls it once per position, so each week re-paid the season-to-date
+# snap table three times (1.8 s a read on the live 2023 table). Nothing in the
+# function consults a week beyond `week` or a player outside the stat read, so
+# the reads are now bounded to `week <= week` and the snap read is restricted to
+# the stat read's players BY GSIS. Never by the snap table's own `position`: that
+# is a PFR label (measured 63 RB->FB, 16 TE->QB, 9 RB->LB, 2 WR->QB rows on 2023)
+# and a position filter would turn those players' known deltas into None.
+
+# The fixture's own such player: weekly_stats says TE, his snap rows say QB, and
+# he has offensive snaps in both weeks (28 -> 49).
+_TE_WITH_QB_SNAP_LABEL = "00-0033357"
+
+
+def _unrestricted_hand_over(db, *, as_of, season):
+    """The OLD data set: every knowable week, every position, every snap row —
+    folded exactly as ``season_snap_lines`` folds. Handed to the same
+    differencing code so the comparison isolates the read bounds."""
+    from ziggurat.data.nfl.usage import _combine_clubs
+
+    stats = base.latest_truth(weekly_stats.get_weekly_stats)(db, as_of=as_of, season=season)
+    by_week = {}
+    for s in base.latest_truth(snap_counts.get_snap_counts)(db, as_of=as_of, season=season):
+        if s["gsis_id"] is not None:
+            by_week.setdefault((s["gsis_id"], s["week"]), []).append(s)
+    return stats, {k: _combine_clubs(v) for k, v in by_week.items()}
+
+
+def _by_player(rows):
+    return {r["player_id"]: r for r in rows}
+
+
+def test_bounded_restricted_reads_equal_the_unbounded_ones_row_for_row(db, nfl_fixture):
+    _seed(db, nfl_fixture)
+    stats_all, snaps_all = _unrestricted_hand_over(db, as_of="2023-10-17", season=2023)
+    read = base.latest_truth(usage_deltas)
+    seen_te = False
+    for position in ("RB", "WR", "TE", "QB"):
+        new = _by_player(read(db, as_of="2023-10-17", season=2023, week=6, position=position))
+        old = _by_player(read(db, as_of="2023-10-17", season=2023, week=6, position=position,
+                              stats=stats_all, snaps=snaps_all))
+        assert new, position
+        assert new == old, position
+        if _TE_WITH_QB_SNAP_LABEL in new:
+            seen_te = True
+            assert position == "TE"
+            assert new[_TE_WITH_QB_SNAP_LABEL]["d_offense_snaps"] == 49.0 - 28.0
+            assert old[_TE_WITH_QB_SNAP_LABEL]["d_offense_snaps"] == 49.0 - 28.0
+    assert seen_te, "the TE whose snap rows are labelled QB must be in the comparison"
+    # position=None (every position at once) is unchanged too
+    new = _by_player(read(db, as_of="2023-10-17", season=2023, week=6, position=None))
+    old = _by_player(read(db, as_of="2023-10-17", season=2023, week=6, position=None,
+                          stats=stats_all, snaps=snaps_all))
+    assert new == old and len(new) > 100
+
+
+def test_a_snap_position_filter_would_have_nulled_a_known_delta(db, nfl_fixture):
+    """The regression the gsis-membership design exists to avoid, shown on the
+    fixture: restrict the snap fold by the snap table's position label and the
+    TE's real +21 becomes an 'unknown'."""
+    _seed(db, nfl_fixture)
+    from ziggurat.data.nfl.usage import _combine_clubs
+
+    stats_all, _ = _unrestricted_hand_over(db, as_of="2023-10-17", season=2023)
+    by_week = {}
+    for s in base.latest_truth(snap_counts.get_snap_counts)(db, as_of="2023-10-17", season=2023):
+        if s["gsis_id"] is not None and s["position"] == "TE":
+            by_week.setdefault((s["gsis_id"], s["week"]), []).append(s)
+    wrong = {k: _combine_clubs(v) for k, v in by_week.items()}
+    rows = _by_player(base.latest_truth(usage_deltas)(
+        db, as_of="2023-10-17", season=2023, week=6, position="TE",
+        stats=stats_all, snaps=wrong))
+    assert rows[_TE_WITH_QB_SNAP_LABEL]["d_offense_snaps"] is None
+    right = _by_player(base.latest_truth(usage_deltas)(
+        db, as_of="2023-10-17", season=2023, week=6, position="TE"))
+    assert right[_TE_WITH_QB_SNAP_LABEL]["d_offense_snaps"] == 21.0
+
+
+def test_get_snap_counts_gsis_ids_joins_on_gsis_never_snap_position(db, nfl_fixture):
+    _seed(db, nfl_fixture)
+    read = base.latest_truth(snap_counts.get_snap_counts)
+    rows = read(db, as_of="2023-10-17", season=2023, gsis_ids={_TE_WITH_QB_SNAP_LABEL})
+    assert {r["position"] for r in rows} == {"QB"}
+    assert sorted(r["week"] for r in rows) == [5, 6]
+    assert [r["week"] for r in read(db, as_of="2023-10-17", season=2023,
+                                    gsis_ids={_TE_WITH_QB_SNAP_LABEL}, through_week=5)] == [5]
+    # an empty membership set reads nothing — through the seam, without raising
+    assert read(db, as_of="2023-10-17", season=2023, gsis_ids=set()) == []
+    # None in the set is dropped, not bound (a NULL gsis_id never matches)
+    assert len(read(db, as_of="2023-10-17", season=2023,
+                    gsis_ids={None, _TE_WITH_QB_SNAP_LABEL})) == 2
+
+
+def test_through_week_bounds_the_stat_read(db, nfl_fixture):
+    _seed(db, nfl_fixture)
+    read = base.latest_truth(weekly_stats.get_weekly_stats)
+    assert {r["week"] for r in read(db, as_of="2023-10-17", season=2023)} == {5, 6}
+    assert {r["week"] for r in read(db, as_of="2023-10-17", season=2023, through_week=5)} == {5}
+
+
+def test_a_wider_hand_over_is_sliced_to_the_target_week(db, nfl_fixture):
+    """A handed-over frame may span weeks past ``week`` (one read shared by
+    several weeks); they are skipped, never differenced — week 5 deltas from a
+    frame that also carries week 6 equal the bounded read's."""
+    _seed(db, nfl_fixture)
+    stats_all, snaps_all = _unrestricted_hand_over(db, as_of="2023-10-17", season=2023)
+    read = base.latest_truth(usage_deltas)
+    wide = _by_player(read(db, as_of="2023-10-17", season=2023, week=5, position="RB",
+                           stats=stats_all, snaps=snaps_all))
+    bounded = _by_player(read(db, as_of="2023-10-17", season=2023, week=5, position="RB"))
+    assert wide == bounded and wide
+    assert all(r["prior_week"] is None for r in wide.values())  # nothing before wk5 in the fixture

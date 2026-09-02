@@ -156,3 +156,28 @@ def test_scanner_allows_sanctioned_patterns(tmp_path):
         good = tmp_path / name
         good.write_text(src)
         assert not _imports_draft_at_import_time(good), f"false positive on {name}"
+
+
+def test_the_init_docstring_ledger_of_private_helpers_matches_the_script():
+    """Item 4.1 audit, KICK-1: ``ziggurat/draft/__init__.py`` records which
+    PRIVATE ``evaluate`` helpers ``backtest/draft_backtest.py`` reaches — the
+    ledger a future refactor trusts. It was written against a state its own
+    refactor destroyed (two of four names false), so it is now checked: every
+    ``evaluate._name`` the docstring lists is referenced as ``ev._name`` in the
+    script, and every ``ev._name`` the script uses is listed."""
+    import re
+
+    import ziggurat.draft as draft
+
+    doc = draft.__doc__ or ""
+    ledger = set(re.findall(r"``evaluate\._(\w+)``", doc))
+    assert ledger, "the docstring no longer lists any evaluate._ helper"
+    script = (ZIGGURAT.parent / "backtest" / "draft_backtest.py").read_text()
+    reached = set(re.findall(r"\bev\._(\w+)", script))
+    # Listed-but-test-only names are excluded from the reached-set check by
+    # being named as such in the docstring; today that is one name.
+    test_only = set(re.findall(r"``evaluate\._(\w+)`` is reached only by", doc))
+    assert reached == ledger - test_only, (reached, ledger, test_only)
+    # And the mirror is a mirror: the script never imports grader._seat_week.
+    assert not re.search(r"\bgrader\._seat_week\s*\(", script)
+    assert "grader._seat_week" in doc

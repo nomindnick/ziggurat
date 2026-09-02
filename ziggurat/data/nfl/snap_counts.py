@@ -120,6 +120,8 @@ def get_snap_counts(
     week=None,
     pfr_player_id=None,
     team=None,
+    through_week: int | None = None,
+    gsis_ids=None,
     view: base.AsOfView = "historical",
 ):
     """Snap-count rows knowable on or before ``as_of`` (keyword-only; no implicit
@@ -130,6 +132,18 @@ def get_snap_counts(
     — one per club. Callers that need a single line per player-week must decide
     whether to sum them or pick the club they care about (``team=``); they must
     not assume uniqueness.
+
+    ``through_week`` bounds the read to ``week <= through_week`` (a season-to-date
+    read that stops at the week being differenced). ``gsis_ids`` restricts it to
+    the players whose stored ``gsis_id`` is in the set — a bound-parameter IN
+    list, joined on the crosswalked id and NEVER on this table's ``position``:
+    that is a PFR label and disagrees with ``weekly_stats.position`` for real
+    players (measured on 2023: 63 RB->FB, 16 TE->QB, 9 RB->LB, 2 WR->QB rows),
+    so a position filter here would turn their known snap deltas into ``None``.
+    Rows with a NULL ``gsis_id`` never match an id set. Both were added by item
+    4.1's audit (COST-1): the unbounded, unrestricted season read cost 1.8 s per
+    call on the live 2023 table because the planner walks a whole week per outer
+    row for the as-of MAX; the restricted read is ~0.4 s at week 17.
     """
     clauses, params = [], {}
     if season is not None:
@@ -144,6 +158,15 @@ def get_snap_counts(
     if team is not None:
         clauses.append("t.team = :team")
         params["team"] = team
+    if through_week is not None:
+        clauses.append("t.week <= :through_week")
+        params["through_week"] = through_week
+    if gsis_ids is not None:
+        ids = sorted({g for g in gsis_ids if g is not None})
+        # SQLite accepts an empty IN list (matches nothing) — no early return, so
+        # a cost gate on the select seam counts this read like any other.
+        clauses.append("t.gsis_id IN (" + ", ".join(f":gsis{i}" for i in range(len(ids))) + ")")
+        params.update({f"gsis{i}": g for i, g in enumerate(ids)})
     return base.select_as_of(
         conn, "snap_counts", as_of=as_of,
         key_cols=_KEY_COLS,

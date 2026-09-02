@@ -13,7 +13,7 @@ def test_schema_bootstraps_migrates_and_is_idempotent(tmp_path):
     apply_schema(conn)
 
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    assert row["value"] == "11"
+    assert row["value"] == "13"
     indexes = {
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
@@ -27,6 +27,7 @@ def test_schema_bootstraps_migrates_and_is_idempotent(tmp_path):
     assert "idx_player_news_knowable" in indexes         # item 3.6
     assert "idx_alert_ledger_lookup" in indexes
     assert "idx_fpecr_panel_lookup" in indexes          # item 4.1 (011)
+    assert "idx_sleeper_ownership_lookup" in indexes   # item 4.1 (012)
     conn.close()
     assert db_path.exists()
 
@@ -42,7 +43,7 @@ def test_existing_v1_database_is_upgraded():
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "11"
+    ).fetchone()["value"] == "13"
     assert conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_schedules_lookup'"
     ).fetchone()

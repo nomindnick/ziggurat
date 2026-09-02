@@ -890,6 +890,11 @@ def test_collision_reasons_name_the_players_a_novice_must_act_on():
     # every labelled prior travels into the reasons
     assert any(DEFAULT_VARIANCE.label in r for r in grade.reasons)
     assert any(grader.PLAYOFF_LABEL in r for r in grade.reasons)
+    # Item 4.1 audit, KICK-2: the K sigma line says NOT YET FITTED (migration 013
+    # landed the FG columns), never that weekly_stats lacks them.
+    spread = next(r for r in grade.reasons if r.startswith("spread, the two pieces"))
+    assert "not yet fitted" in spread and "migration 013" in spread
+    assert "carries no field-goal" not in spread and "cannot be fitted" not in spread
 
 
 def test_format_season_grade_is_readable_and_flags_holes():

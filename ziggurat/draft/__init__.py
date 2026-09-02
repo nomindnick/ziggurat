@@ -1,12 +1,13 @@
 """Draft tool — IMPORT-QUARANTINED BY DESIGN (SPEC Feature 8; Rule 8).
 
 Pick engine, live board TUI, and mock-draft simulator. Imports the permanent
-valuation core; nothing outside this package may import from it (enforced by
-tests/test_draft_boundary.py). Retained across seasons for reuse (Rule 8,
-amended 2026-08-31 — originally deletable; the quarantine was always the
-load-bearing half). Retention is NOT next-August readiness: the userscripts
-pin ESPN's 2026 draft-room DOM, the opponent priors are 2025-room fits, and
-the goldens freeze the 2026-08-30 board — next season starts with
+valuation core; nothing in ``ziggurat/`` outside this package may import from
+it (enforced by tests/test_draft_boundary.py) — top-level ``backtest/`` MAY,
+because it grades draft decisions (Rule 8, amended 2026-08-31). Retained across
+seasons for reuse (same amendment — originally deletable; the quarantine was
+always the load-bearing half). Retention is NOT next-August readiness: the
+userscripts pin ESPN's 2026 draft-room DOM, the opponent priors are 2025-room
+fits, and the goldens freeze the 2026-08-30 board — next season starts with
 recalibration and DOM re-verification. If a permanent module ever needs
 something living here, it is PORTED out, never imported.
 
@@ -20,6 +21,29 @@ Public surface:
   * engine (item 2.3): PickEngine, PickRec, ARCHETYPE_NEED_SCHEDULES, risk_sign
   * survival (item 2.3): rollout_survival, analytic_survival, SurvivalResult,
                recalibrate_from_pick_log, LiveRecalibration
+  * evaluate (Phase-2 keystone; reached as a SUBMODULE —
+               ``from ziggurat.draft import evaluate``): evaluate_strategy,
+               paired_compare, build_paired_result, tournament, DraftOutcome,
+               PairedResult, GradeFn, OPERATOR_SLOT_2026
+  * grader (item 3.11; likewise ``from ziggurat.draft import grader``):
+               grade_roster, WeeklyPointsMap, SeasonGrade,
+               stream_levels_from_board, STREAMED_POSITIONS, capped_out,
+               assert_board_coverage
+
+``evaluate`` and ``grader`` are deliberately NOT re-exported into ``__all__``:
+their consumer, ``backtest/draft_backtest.py``, imports both as modules and,
+beyond the public names (including ``ROOM_PRIORS_2025`` via ``evaluate``),
+reaches two private helpers: ``evaluate._draft_once`` and
+``evaluate._seed_grid``. It MIRRORS ``grader._seat_week`` rather than importing
+it (pinned by ``test_seat_totals_mirror_the_graders_own_weekly_means``), and
+``evaluate._t_interval`` is reached only by ``tests/test_backtest_scorecards.py``,
+which pins ``backtest/stats.py``'s copy against it bit-for-bit. That is
+tolerated for a grading script but it is not a contract — re-exporting the
+public names would advertise a surface the one consumer does not use, while
+saying nothing about the private ones it does. This ledger is checked by
+``tests/test_draft_boundary.py`` (every private evaluate helper it lists must
+be referenced through the script's ``ev.`` alias, and vice versa), so it rots
+loudly, not silently.
 
 Item 3.11: ``load_draft_board`` is the DRAFT-NIGHT entry point — the board, the
 week-by-week objective the composed engine re-ranks with, and the kicker

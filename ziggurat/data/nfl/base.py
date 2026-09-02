@@ -102,14 +102,39 @@ def collect_drops():
     Yields the mutable ``{"dropped": int, "total": int}`` dict, which is filled
     in as the ingest runs. Best-effort by construction: it counts what ingesters
     report, and an ingester that never calls ``note_drops`` contributes nothing.
+
+    Two non-count entries ride beside the counters (item 4.1 audit, SLEEP-8):
+
+    * ``reasons`` — ``{why: dropped}`` for every NOT-by-design drop, so the run
+      log can name the loss instead of hard-coding "unstampable" for every
+      channel (the live log read ``1 unstampable`` for a Sleeper key that was a
+      validation anomaly — the ``why`` went only to the logger).
+    * ``notes`` — free-text lines from :func:`note_run`, for a pull that has
+      something to say about an ``ok`` run (an absent week that will be
+      retried, a ``--force`` verification result). ``nfl_ingest_runs`` has no
+      note column; ``refresh.run_ingest`` appends these to the run's reason.
     """
     tally = {"dropped": 0, "total": 0, "filtered": 0, "incomplete": 0,
-             "collapsed": 0, "duplicated": 0}
+             "collapsed": 0, "duplicated": 0, "reasons": {}, "notes": []}
     token = _drop_tally.set(tally)
     try:
         yield tally
     finally:
         _drop_tally.reset(token)
+
+
+def note_run(source: str, text: str) -> None:
+    """Attach one free-text line to the current run's record (and log it).
+
+    For facts an ``ok`` run must still carry: a week upstream has not published
+    (retried tomorrow, nothing lost), the divergence count a ``--force``
+    verification measured. Silent outside ``collect_drops`` except for the log
+    line, like every other channel here.
+    """
+    tally = _drop_tally.get()
+    if tally is not None:
+        tally.setdefault("notes", []).append(str(text))
+    logger.warning("%s: %s", source, text)
 
 
 def note_drops(
@@ -136,6 +161,9 @@ def note_drops(
     if tally is not None:
         tally["filtered" if by_design else "dropped"] += dropped
         tally["total"] += total
+        if dropped and not by_design:
+            reasons = tally.setdefault("reasons", {})
+            reasons[why] = reasons.get(why, 0) + dropped
     if dropped:
         logger.warning(
             "%s: %s %d/%d rows (%s)",

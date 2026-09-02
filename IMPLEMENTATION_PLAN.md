@@ -2831,6 +2831,32 @@ allowlist omitting `push`, which CLAUDE.md's repo map lists as permanent.
 
 **Goal:** Measure the signals before trusting them. Runs in parallel with Phases 2–3 wherever hours allow — nothing here blocks draft day or Week 1, but signal deployments in-season are gated on results here. Standing methodology for every experiment: strict `as_of` cuts, train on 2021–23 / validate on 2024–25, grade decisions not outcomes.
 
+**Re-sequencing amendment (2026-09-01, operator decision, made while 4.1 was
+building):** the phase has two kinds of item and the plan's order conflated
+them. **4.1 → 4.2 is the critical path** — 4.1 is the instrument and 4.2 is the
+one experiment that changes a number the season is decided by (which of the
+≤3 weekly claims to spend priority on, and how early). **4.3–4.5 are deferred
+behind more critical work** — not struck, not tied to any date, simply not
+next: 4.3/4.4 are ONE experiment (does podcast intel add lift *on top of* the
+stat generator?) whose build cost is the largest in the phase and whose
+injury/news half is already served at zero cost by the 3.6 ESPN wire + 20-min
+alert tick; 4.5 is a cost hedge whose trigger is external ("before pricing
+changes force it") and whose labelled set does not exist without 4.3. The
+"more critical work" they yield to is **5.1 (playoff posture) and 5.2 (the
+learning loop)**, which touch every in-season week and are pulled ahead of
+them — see the Phase 5 header. Checkpoint 4 still owns the deploy/retire
+decision for every arm; it simply no longer waits on the podcast arm to
+convene. Two honest framings recorded with the decision: (a) the largest
+lever on the season — the draft — has already been pulled, so 4.2 tunes the
+largest lever that *remains*, and in a 10-team league that edge is real but
+bounded (replacement level is high; every obvious breakout is claimed by
+someone; the edge is choosing the right claim and being first on Wednesday —
+exactly precision@k and lead-time); (b) the other half of in-season success
+is not making errors, and that is the shipped cadence + sanity checks + 5.2,
+not Phase 4. Week 1 is 2026-09-09: 4.1 closes today, 4.2 runs this week, and
+nothing else in this phase lands before real games — which is fine, because
+the cadence runs Week 1, not Phase 4.
+
 ### 4.0 [Fix] Draft-week loose ends — two live-fire defects (added 2026-09-01)
 **Origin:** both surfaced during/around the 2026-08-31 live draft; full incident
 notes in gitignored `intel/weekly/2026-wk00.md` ("Draft night" sections). Added
@@ -2938,30 +2964,325 @@ Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 **Done when:** a trivial baseline strategy replays through 2023 producing graded weekly decisions.
 **Checkpoint-1 amendment (2026-07-20):** the **first deliverable is the historical market-panel ingester** deferred from 1.5 — DynastyProcess `db_fpecr` weekly PPR ECR (`ecr_type='wp'`, with `ecr/best/worst/sd`) into a new panel table read under **`latest_truth`** (immutable accepted bulk history), NFL week inferred from `scrape_date`, edge week dropped, off-cadence scrapes deduped, **our copy pinned/mirrored**; plus the Sleeper `/research` weekly ownership series (frozen snapshots; use w/w deltas). Scorecards: **lead-time-vs-market** (weeks from a Ziggurat flag at T to the ECR re-rank at T+1/T+2, + hit-rate) and **precision@k, k≤3**. The replay steps week-by-week exercising production code paths, all reads through `latest_truth` accessors (a bulk DB reads empty under the default `historical` view — by design).
 **Update:**
-> _[To be completed]_
+> **Built, audited & fixed 2026-09-01 (three builders in parallel → 7-lens
+> adversarial audit with refute-first verification, 32 agents → two fixers →
+> gate). Done-when met and RE-RUNNABLE; five
+> seasons replayed under the holdout lock. Suite 2,448 → 2,647 passed, 4
+> skipped. Nothing committed yet (this record ships with the build).**
+>
+> **What was built.** A weekly replay harness under `backtest/` (namespace
+> package; imports `ziggurat/` directly, never `draft/` — the t-machinery is
+> COPIED from `draft/evaluate.py` and a test pins the two copies equal):
+> `stats.py` (ONE implementation of the pooled per-pick t-interval, the
+> season-block t-interval df = seasons − 1, and Wilson; `draft_backtest.py`
+> now delegates here, its printed numbers unchanged), `decisions.py` (the
+> records the two phases hand each other + byte-deterministic JSONL freeze
+> with a sha256 manifest + the HOLDOUT lock), `replay.py` (DECIDE: one call to
+> PRODUCTION `core.candidates.build_candidates` per week through
+> `base.latest_truth` at `as_of(T)` = the first Tuesday STRICTLY after the
+> week's last REG gameday, shared by every strategy; `python -m
+> backtest.replay`, Rule-3 shaped) and `scorecards.py` (GRADE: pure over the
+> frozen decisions at a strictly-later `grade_as_of`, never imports the
+> generator). Three strategies over the generator's pool: `signal_topk`,
+> `random_k` (seeded by a STRING per week, `PYTHONHASHSEED`-independent) and
+> `volume_topk` (most week-T carries+targets — the novice heuristic). Two
+> markets from the `db_fpecr` panel (migration 011, which had already landed
+> with 3.11 — this item added its `fpecr` registry entry, `interval_days=28`):
+> `wp` (weekly positional PPR ECR, drops bye teams) and `ros`. Grading reads
+> r0 = the week-T page (scraped the FRIDAY of week T, after Thursday's game —
+> so eligibility is decided at `not_after=as_of(T)` and pinned as a
+> hypothesis), r1 = T+1, r2 = T+2. Two ingestion deliverables beside it:
+> **Sleeper `/research` ownership** (`data/nfl/sleeper_ownership.py`,
+> migration `012`, schema 12; 36,855 rows 2021–25, 18/18 weeks every season,
+> crosswalk 99.65–100%, raw JSON frozen under gitignored
+> `data/backtest/sleeper-research/`; one 2022 wk17 IDP-key anomaly → a 2%
+> allowance and that run logged `partial`) and **`weekly_stats` kicking
+> columns** (migration `013`, schema 13: 8 nflverse FG/XP columns +
+> `kicker_scoring_inputs()` folding onto `score_kicker`'s keys; re-backfill
+> 2021–25 = 94,738 rows in 30.65 s; 543 REG-2023 K lines vs the parquet
+> supplement, 0 mismatches). Every threshold in the scorecard is a labelled
+> hypothesis printed with the card: ELIGIBILITY (RB/WR > 24, TE/QB > 12 on
+> r0), HIT = up ≥ 5 places (sensitivities 3/8/10), CORROBORATION = Sleeper
+> owned-delta ≥ 10 pts (5/20; 1% censor floor), DEPTH_BANDS
+> 36/48/60/80/100/150/>150/unranked, and the generator's own floors
+> (`DEFAULT_BREAKOUT` + `EMERGENCE_FLOORS`, in the cache key).
+>
+> **Done-when, verbatim command, post-fix:** `python -m backtest.replay
+> --seasons 2023 --strategy signal_topk --k 3` — fresh **11.2 s** (decide 9.0 s
+> for 18 weeks), the SAME command again **2.2 s** ("reusing the freeze under
+> …/66c0e83d7da3 … pass --force to re-decide"), JSONL sha256
+> `209f8ddf…065ad`. wp: 54 decisions, 45 gradeable (no_reference 6 — the panel
+> has no wk1/wk18 page; no_rerank 3; truncated_r2 3), p@1 73.3% [48.0, 89.1]
+> n=15, p@3 **73.3% [59.0, 84.0]** n=45 vs base 48.2% (1418/2942): pooled
+> +26.2pp [+13.0, +39.4] \*, depth-matched +34.4pp [+21.6, +47.2] \*;
+> corroboration 31.1% (14/45) vs 4.4%. ros: p@3 53.3% [39.1, 67.1] vs 26.5%,
+> +26.6pp [+11.9, +41.3] \*.
+>
+> **Five seasons** (`--seasons 2021-2025 --strategy
+> signal_topk,random_k,volume_topk --k 3 --unlock-holdout`): fresh **74.5 s**
+> (decide 45.7 s for 270 week records; the first draft took 315.9 s), reuse
+> 28.7 s; 90/90 weeks decided, cache key `ce3e8d005ec5`. `signal_topk` on wp,
+> ALL n=219: p@1 87.7% [78.2, 93.4], p@2 84.2%, p@3 **82.6% [77.1, 87.1]** vs
+> base 49.5% (7045/14226) — pooled **+34.0pp [+29.0, +39.0]** \*, season-block
+> +33.1pp [+26.7, +39.5] n=5 \*, per-season +35.7/+37.1/+25.1/+30.6/+36.9;
+> depth-matched +36.8pp [+31.7, +41.8] \*. **TRAIN 2021–23** p@3 83.0% [75.7,
+> 88.4] n=135, +33.6 / block +32.6 [+16.4, +48.9] n=3 \*; **HOLDOUT 2024–25**
+> p@3 82.1% [72.6, 88.9] n=84, +34.6 [+26.4, +42.9] \* / block +33.7 [−6.4,
+> +73.9] n=2 (two seasons cannot exclude zero — printed, not hidden). Hits by
+> lead: **158 concurrent (lead 1), 12 genuine one-week leads (lead 2), 11
+> bye-deferred (unmeasurable), 16 bye at lead 1, 15 truncated (r2 page absent).**
+> HIT sensitivity H=3/5/8/10: p@3 87.7/82.6/75.8/68.9% vs base
+> 57.2/49.5/39.7/34.0 — the lift is flat, the levels are not. Corroboration
+> 30.1% (66/219) vs 6.0% of null lines. ros (the honest bar, base 30.2%):
+> p@3 65.3% [58.8, 71.3], +35.0 [+28.8, +41.3] / block +35.2 [+25.1, +45.3] \*.
+> Baselines, wp ALL: `random_k` 58.0% (+9.3 [+3.0, +15.7] / block +8.5 [+5.2,
+> +11.8] \* — the POOL's enrichment, i.e. the generator's recall value);
+> `volume_topk` 71.2% (+22.6 / block +21.7 [+13.2, +30.2] \*). Ordering signal
+> 82.6 > volume 71.2 > random 58.0 > null 49.5 holds on both splits.
+>
+> **Headline lesson, in two halves. (1) The instrument grades AGREEMENT with
+> the market, not a lead over it.** 158 of 181 wp hits are lead 1 — the
+> market's first scrape after the event, three days after the Tuesday flag —
+> and only 12 (6.6%) are genuine one-week leads; the first draft's "23 leads"
+> was 12 + 11 bye-deferred picks whose lead is unmeasurable (STAT-1). A 49.5%
+> base rate says "up 5 places" on a weekly page is easy. On the ONE number the
+> panel has that would mean "beat the market" — the raw lead-2 rate — the
+> tool shows no lift at all (LEAD-1, measured pre-fix: signal 10.4%, random
+> 10.4%, null 11.9%, volume 14.0%; post-split, signal's genuine lead-2 is
+> 12/219 = 5.5% against a 9.8% null — a RAW rate that is structurally
+> depressed because a lead-1 hit cannot also be a lead-2 hit, which is why the
+> CONDITIONAL rate is the open 4.2 item). Every point of the +34pp headline is
+> a lead-1 phenomenon. Nothing here says the operator could have claimed
+> before the Wednesday batch; it says the generator's Tuesday flag and the
+> market's Friday move point the same way ~83% of the time, ~34pp more often
+> than chance — which is the plan's own definition of the metric (T+1 IS a
+> lead in the Checkpoint-1 wording; the verifier refuted the plan-fidelity
+> half of LEAD-1 and confirmed the 4.2-readiness half). **(2) The audit's biggest
+> confirmed defect: the null was matched on ELIGIBILITY, not DEPTH (STAT-2),
+> and it had already produced a false conclusion.** The hit rule's null
+> rises monotonically with r0 depth (1–36: 31.1% … 101–150: 69.9%, unranked
+> 70.4%), `volume_topk` picks 146 of 219 inside r0 ≤ 36 (median 33) while
+> signal's median is 50, so against ONE pooled null the raw lift REWARDED
+> picking deeper. The first draft's "+11pp over the touches heuristic" and
+> "on HOLDOUT the gap widens" are STRUCK: depth-matched, signal +36.8 vs
+> volume +35.3 ALL, +37.5 vs +32.7 HOLDOUT — indistinguishable at n=84. Every
+> card now prints both; the comparison table says the raw lifts are not
+> comparable across strategies; **any 4.2 read is on the depth-matched
+> column** (a setting that merely pushes the pool toward unranked players
+> "improves" the raw one).
+>
+> **Audit** (7 lenses — leakage/timing, scorecard statistics, Sleeper
+> ingester + registry, kicking columns, rules/boundary/test rigor, timer
+> safety, plan fidelity + 4.2 readiness — whose finding prefixes are LEAK,
+> STAT, SLEEP, KICK, RULES, RIGOR, RULE6, RULE3, OPS, HOLD, SEAM, COST, LEAD,
+> PLAN, RERUN, DOC, OPEN; 21 refute-first verifiers, one per major and one
+> per batch of five minors): 46 deduped findings,
+> **43 confirmed**, 3 refuted (SLEEP-5, RIGOR-5, OPS-2), all confirmed fixed
+> except two recorded below; every fix carries a test that fails on the
+> mutation the verifier named (six mutants re-run and killed on the final
+> tree). The majors: **LEAK-1/HOLD-1** — the amendment's holdout lock did not
+> exist; the first five-season run (`110ba96ae988`) read 2024–25 with no flag
+> and is recorded as the one pre-ledger holdout read. Now
+> `require_holdout_unlock()` at the CLI, `replay()`, `decide_week()`, `load()`
+> and `build_scorecard()`; a flagless `--seasons 2024` exits 2 in 0.2 s BEFORE
+> the DB opens, naming `TRAIN_SEASONS`; `--unlock-holdout` writes
+> `data/backtest/replay/holdout-unlocks.jsonl` publish-then-record (4 rows
+> today). **LEAK-2** — the seam's leakage test was vacuous (passed with
+> `as_of='2030-01-01'` at the generator call); now a real spy that fails
+> with LEAK-5 (`not_after=d.as_of` dropped from the r0 read). **LEAK-3** —
+> 2021 wk15 (COVID Tuesday game) decided on the wk16 clock, so its r1 page
+> PRECEDED the decision and was graded a hit; now `G_REFERENCE_PRECEDES`,
+> ungradeable — 3 picks per strategy per market out (n 222 → 219), the only
+> place a headline moved (82.4 → 82.6%). **LEAK-4** — the r0 page is scraped
+> the Friday OF week T (304 of 316 pages +1 day, 4 Saturdays), pinned in the
+> ELIGIBILITY wording. **RULES-2/SEAM-1** — no threshold injection existed;
+> `build_candidates(thresholds=, emergence_floors=)` now, `ReplayParams.generator`
+> carries the floors into the cache key (`--breakout-floor` /
+> `--emergence-floor METRIC=VALUE`; an unknown name is refused; a non-default
+> floor carries `OVERRIDDEN_BREAKOUT_LABEL` in every reason). Two first-draft
+> freezes were orphaned by the new key and proven decision-identical.
+> **OPS-1/SLEEP-1** — Sleeper's current-week bucket ALIASES THE LIVE BOARD
+> (`regular/2026/1`, `/0` and `pre/2026/1..4` returned one body, md5
+> `f29e2d2a…`), so an in-season Tuesday pull would have frozen a moving
+> number as a point-in-time fact; now `SETTLE_DAYS = 7` (labelled hypothesis,
+> "settling" in the registry) with the settling measurement scheduled for
+> 2026-09-15 → 09-22. **COST-1** — in item-3.3 PRODUCTION code, not the
+> harness: `usage_deltas` read the whole season-to-date `snap_counts` with no
+> week bound or player restriction, once per position (23,854 rows at 2023
+> wk17, 5,803 of them RB/WR/TE), and the as-of planner is O(week), so a season
+> replay was O(W²). Bounded to `week ≤ target` and the `weekly_stats` gsis ids
+> (a gsis join, never `snap_counts.position` — a PFR label: 63 RB→FB, 16
+> TE→QB, 9 RB→LB, 2 WR→QB in 2023 would have silently become `None`), read
+> ONCE in `_usage_arm` and handed over (`stats=`/`snaps=`, the 3.11a `lines=`
+> pattern); written atomically because the alert/briefing timers import
+> these. `build_candidates` 2023 wk1/5/10/17 **5.74/5.87/5.90/5.90 s →
+> 0.23/0.34/0.49/0.73 s**, board digest byte-identical, freeze sha-identical.
+> **LEAD-1** (split verdict) — the lead-time metric shipped only as raw
+> counts: no per-strategy rate, no interval, no null, no row in the
+> comparison block, so the objective 4.2's amendment names ("precision@≤3
+> AND lead-time") did not exist as a number; the verifier also found
+> `LEAD_LABELS[2]` calling a bye-at-r1 row "a genuine one-week lead" (fixed by
+> the STAT-1 split). The hits-by-lead line now prints on every card; **the
+> conditional bye-corrected lead-2 RATE as one per-strategy number with its
+> null and interval is still open — it is 4.2's, and it is the number 4.2's
+> objective needs.** Also: STAT-3 /
+> RULE6-2 corroboration re-based over GRADED picks with a crosswalked
+> three-way rule (an absence from BOTH Sleeper grids is a real 0.0 delta,
+> not imputed); RULE6-1 a wk16 pick graded on one scrape says so ("lead 2
+> impossible"); RULE3-1/RERUN-1 the done-when was not re-runnable
+> (`FileExistsError` on the freeze dir) — a verifying freeze is reused, a
+> non-verifying one refused by name, `--force` re-decides, `--grade-only` on
+> an empty cache exits 2 with a sentence; STAT-6 a point interval never earns
+> the `*`; PLAN-1 `backtest/README.md` rewritten and every `python -m
+> backtest.replay` line in it is parsed by a test. **One defect the fixer
+> found outside the audit:** `_grade_market` passed the `MarketSpec` object
+> where `grade_one` compared `market.name`, so the "r0 changed under the
+> freeze" refusal could never fire. Numbers moved from the first draft ONLY
+> via LEAK-3 and STAT-1 (23 "lead 2" rows split into 12 + 11 with sums
+> unchanged); everything else is additive columns.
+>
+> **§7 follow-ups (the plan's 08-27 pre-work list): closed — kicking columns
+> persisted (migration 013), the frozen skill fixture extended
+> (575,53)→(575,61) plus a 58-row kicker fixture, the `fpecr` registry entry,
+> `pull_adp_rankings` documented as NOT a db_fpecr backfill (215 `fp_page`
+> collisions). Open, recorded:** retirement of `draft_backtest.kicking_frame`
+> / `_NFLVERSE_FG_BUCKETS` / `_kicker_points` in favour of the persisted
+> columns (OPEN-1; the parquet supplement still agrees 543/543, so it is
+> redundancy, not disagreement); item 3.8's blocked-FG convention; the 4,788
+> per-season crosswalk warnings the generator logs (3.3's crosswalk, counted
+> on every card, not investigated).
+>
+> **Deliberately NOT built, and why:** `ff_opportunity` / expected-points
+> features (→ 4.2 as its TD-regression source; the harness grades the shipped
+> generator, new signals are the generator's business); The Odds API hard-tier
+> cross-check (paid; `game_odds` closing lines are context, not a market
+> graded here); an sd-units HIT variant (the places rule with sensitivities
+> 3/5/8/10 ships instead and the lift is flat across them — a 4.2 option if a
+> page's spread ever makes a place count misleading); K/DST grading (the pool
+> is the usage arm; the panel has no K/DST `wp` page; QB is wired, untested
+> live); a per-position card (n≈45/season is too thin for intervals); a
+> layered "feature freeze" that would let a 4.2 setting re-threshold at grade
+> time (the freeze carries magnitude + rank + reason text, not per-metric
+> deltas — every setting is a NEW decide run, ~27 s on TRAIN); a
+> `/v1/state/nfl` belt on the Sleeper pull; and **a replay of the waiver
+> claim ORDER** — `core/waiver.py` → `marginal.build_board` is
+> projection-priced and 2021–25 has no point-in-time projections (item 1.5),
+> so the harness replays ONE production path, `build_candidates`, and grades
+> the CONTEXT column of a waiver plan, not the plan's order. Any migration
+> beyond 012/013: none — the harness opens the live DB `mode=ro` (a test
+> proves `open_ro` cannot write).
+>
+> **The two 4.2 seams, as they now stand.** (a) The **holdout lock is built**
+> (above) — 4.2 tunes on `TRAIN_SEASONS` and reads holdout ONCE with the flag,
+> and the ledger shows how many times it did. (b) **Threshold injection is
+> built and 4.2's first step is to confirm it**: the knobs are the seven
+> `DEFAULT_BREAKOUT` usage-delta floors (carries 6, targets 4, receptions 3,
+> target_share 0.08, air_yards_share 0.10, offense_pct 0.20, rushing/receiving
+> yards 25) and the four `EMERGENCE_FLOORS` role-emergence floors (carries 10,
+> targets 5, receptions 4, offense_pct 0.55) — eleven numbers, all injectable;
+> the "beneficiary index" is a same-team-same-position usage-uptick
+> MECHANISM, not a floor, and is not a knob today. **Corrected search
+> arithmetic:** TRAIN is **54 weeks (3 × 18), not ~85**; per setting ~0.5
+> s/week ≈ **27 s post-COST-1** (was ~170 s), so a ~100-setting coordinate
+> search is under an hour. The pre-registration rule stands as the amendment
+> wrote it, with one addition from this item: the grid AND the metric it is
+> read on (depth-matched lift, HIT = 5 places) are written down before the
+> first run, because the hit threshold is a hypothesis the optimizer would
+> otherwise choose.
+>
+> **Operational watch item:** the `fpecr` registry entry makes its FIRST pull
+> from the Wed 2026-09-02 07:22 PDT timer (~38 MB `db_fpecr-2026-09-01.parquet`
+> mirror); until then `ingest status` reads `NEVER PULLED : fpecr`, which is
+> correct, not a failure. The Sleeper settling measurement is 09-15 → 09-22
+> (§4 item 12 of the design note). Two orphaned first-draft freezes
+> (`7eb1e0057dc2`, `110ba96ae988`) remain on disk under gitignored
+> `data/backtest/replay/`, identical decision-for-decision — deletable.
+>
+> Files: `backtest/{stats,decisions,replay,scorecards}.py` (new),
+> `backtest/README.md`, `backtest/draft_backtest.py`, `ziggurat/core/candidates.py`
+> (injection seam), `ziggurat/data/nfl/{usage,snap_counts,weekly_stats,sleeper_ownership,fpecr,refresh,adp_rankings}.py`,
+> migrations `012`/`013`, `tests/test_backtest_{replay,scorecards}.py`,
+> `tests/test_nfl_sleeper_ownership.py`. Design, verbatim cards and the audit
+> in gitignored `intel/research/backtest-harness-4.1-design.md`. **Standing
+> lesson: a null that is not matched on the thing the strategies vary is a
+> thumb on the scale for whichever strategy varies it most — and the
+> instrument that seemed to show one strategy beating another was measuring
+> where each one liked to pick.**
 
 ### 4.2 [Experiment] Breakout detection
 **Goal:** Tune the 3.3 candidate generator's thresholds on train seasons; measure lead time and precision@k on holdout. Distinguish preseason breakouts (out of scope) from in-season opportunity shocks (the target). Fade detection as a secondary run if results warrant.
 **Done when:** findings in `intel/research/breakout-backtest.md`: tuned thresholds, honest holdout numbers, deployed defaults updated.
 **Checkpoint-1 amendment (2026-07-20):** tune on the `db_fpecr` lead metric, corroborated by Sleeper ownership deltas; train 2021-23 / hold out 2024-25. **State honestly** that the ECR bar is softer than sharp money and that **K/DST lead grading is weaker** (ECR-only, coarse dispersion). Optional hard-tier cross-check: The Odds API player props for the **2023-05+** window only, reported separately. A projection-driven variant is exploratory (no trustworthy historical stat-line projections — 1.5 decision).
+**Amendment (2026-09-01, with the Phase-4 re-sequencing):** this is an
+**optimization loop, not model fitting**, and it must be run as the former.
+What it tunes is the handful of labelled floors inside the 3.3 generator
+(usage-delta thresholds, role-emergence floors, the beneficiary index) — a
+coordinate/grid search over ~6–10 knobs against precision@≤3 and lead-time
+on the TRAIN seasons, then ONE read of holdout. Run it as a goal-driven
+workflow with a **pre-registered parameter grid** written down before the
+first evaluation, because an autonomous "tune until ideal" loop fools itself
+two ways that are both live here: it leaks holdout into the search, and it
+**Goodharts the hit definition** (the hit threshold is itself a labelled
+hypothesis in the 4.1 scorecard, so an unsupervised optimizer will find the
+setting that makes the *scorer* happy). Two seams 4.1 must provide, and 4.2's
+first step is to confirm they exist: a **holdout lock** in the harness
+(2024–25 is refused without an explicit, logged unlock flag) and **threshold
+injection** into `build_candidates` (the floors are module constants today;
+the search cannot re-import the module per setting). Every setting re-runs the
+generator over ~85 train weeks, so search cost = settings × per-week generator
+runtime — 4.1's recon measured that runtime and it decides whether this is an
+afternoon or an overnight. "Ideal" is bounded from above by the base rate the
+harness prints and by the soft ECR bar; a tuned setting that beats the null
+by less than its season-block interval is reported as no evidence, not as a
+small win. Deployed defaults change only at Checkpoint 4, with the holdout
+numbers beside them.
+**Handover from 4.1 (2026-09-01):** both seams exist — the holdout lock
+(`backtest/decisions.py::require_holdout_unlock`, ledger
+`data/backtest/replay/holdout-unlocks.jsonl`) and threshold injection
+(`build_candidates(thresholds=, emergence_floors=)`, surfaced as
+`--breakout-floor` / `--emergence-floor METRIC=VALUE`, floors in the freeze's
+cache key) — confirm them first, then pre-register. The knobs are the seven
+`DEFAULT_BREAKOUT` floors + four `EMERGENCE_FLOORS` (the beneficiary index is
+a mechanism, not a floor). TRAIN is **54 weeks**, ~27 s per setting (post
+COST-1), so the search is an afternoon. **Read every setting on the
+DEPTH-MATCHED lift** — the raw lift rewards picking deeper (4.1 STAT-2). Two
+4.1 deferrals are this item's: **`ff_opportunity` is 4.2's TD-regression
+source** (backtest-only, `latest_truth`-only, stamped from the nflverse
+asset's `updated_at` — see item 3.2c's "leak wearing a valid timestamp"
+finding above: there is NO in-season file, so it can only ever grade, never
+run live; it is not ingested today) and the conditional bye-corrected lead-2 RATE as one per-strategy
+number with its null (4.1 LEAD-1, partially closed).
 **Update:**
 > _[To be completed]_
 
 ### 4.3 [Build] Podcast pipeline
 **Goal:** RSS archive harvest for a chosen pod slate (must have existed 2021–2025 and still publish), local Whisper with vocabulary biasing + phonetic entity resolution against the player table, claim extraction to the SPEC schema via the routing interface, claim-resolution logic (did the claimed thing happen?).
 **Done when:** one full historical season of a single podcast is transcribed, extracted, entity-resolved, and resolution-graded end-to-end.
+**Deferral (2026-09-01, Phase-4 re-sequencing):** deferred behind 4.2, 5.1
+and 5.2 — see the Phase 4 header. Not struck and not dated: the item stays
+as written, and its case is strongest if 4.2's holdout precision disappoints
+(the stat generator alone is not enough) — the 4.1 lead-time scorecard is
+exactly how a podcast arm would prove it sees role changes before usage does.
 **Update:**
 > _[To be completed]_
 
 ### 4.4 [Experiment] Podcast ablation & source calibration
 **Goal:** The deploy/retire decision: candidate re-ranking with vs. without podcast features on holdout; per-source (and per-claim-type) reliability calibration learned on train seasons only. A null result retires the arm cleanly — that outcome is a success, not a failure.
 **Done when:** findings in `intel/research/podcast-ablation.md` with an explicit deploy / retire / narrow-deploy (e.g., injury-intel claims only) decision.
+**Deferral (2026-09-01):** deferred with 4.3 — it is the same experiment's
+grading half and has no input without it.
 **Update:**
 > _[To be completed]_
 
 ### 4.5 [Experiment] Local-model bake-off
 **Goal:** Pre-qualify the Ollama fallback before pricing changes force it: 2–3 local candidates vs. Claude on the 4.3 labeled extraction set; measure extraction agreement **and** downstream re-ranker lift preservation (the test that matters). Update routing config with qualified assignments per task tier.
 **Done when:** findings in `intel/research/model-bakeoff.md`; routing config carries a validated local assignment for every routine task tag.
+**Deferral (2026-09-01):** deferred behind more critical work. This is a
+cost hedge, not a signal: the only live LLM workload today is the Wednesday
+briefing prose (3.6, `claude_cli` on the subscription), and the labelled
+extraction set it would bake off against exists only if 4.3 is built. Its
+trigger stays what the goal says — pricing changes forcing it — or 4.3
+landing, whichever comes first.
 **Update:**
 > _[To be completed]_
 
@@ -2975,6 +3296,14 @@ Deploy, narrow, or retire each signal arm per 4.2/4.4 results; fold tuned defaul
 ## Phase 5: Season Systems & Maturation (rolling, in-season)
 
 **Goal:** The strategic layer and the self-improvement loop — shipped opportunistically across the season, sequenced by standings context and interest.
+
+**Pull-forward amendment (2026-09-01, with the Phase-4 re-sequencing):**
+**5.1 and 5.2 now come before 4.3–4.5**, i.e. immediately after 4.2. They are
+the two items that touch every in-season week — 5.2 in particular is the
+human half of the learning loop (the Monday retro and the heuristics
+promotion ladder, still a CLAUDE.md placeholder), and the Phase-4 backtest
+priors it anchors on exist once 4.2 closes. 5.3 keeps its opportunistic
+place; 5.4 is unchanged.
 
 ### 5.1 [Build] Playoff Monte Carlo & posture
 **Goal:** Rest-of-season simulation → live playoff odds → strategic posture (bubble/safe) consumed by waiver, lineup, and trade logic; bye-week and punt-week EV evaluated here rather than by rule of thumb.

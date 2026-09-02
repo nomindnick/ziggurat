@@ -87,7 +87,8 @@ import textwrap
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.nfl import (
@@ -96,17 +97,20 @@ from ziggurat.data.nfl import (
     depth_charts,
     depth_charts_weekly,
     espn_ranks,
+    fpecr,
     game_odds,
     injuries,
     ngs,
     players,
     projections,
     schedules,
+    sleeper_ownership,
     snap_counts,
     team_defense,
     weather,
     weekly_stats,
 )
+from ziggurat.paths import REPO_ROOT
 
 logger = logging.getLogger("ziggurat.data.nfl.refresh")
 
@@ -364,6 +368,11 @@ class IngestContext:
     credentials: dict | None = None
     allow_shrink: bool = False
     allow_backfill: bool = False
+    #: The caller passed ``--force``. Carried so an ``applicable`` predicate that
+    #: reports "nothing NEW to pull" can honour a deliberate re-pull (item 4.1,
+    #: sleeper_ownership) — `decide()` checks `applicable` BEFORE the interval
+    #: gate, which is the only gate `force` bypassed until now.
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -378,8 +387,20 @@ class SourceSpec:
     scope: Callable[[IngestContext], str] | None = None
     #: Season phases in which this source has anything new to say.
     phases: frozenset = ALL_PHASES
-    #: Days after the last successful pull before this source is judged stale.
+    #: Days after the last successful pull before this source is RE-PULLED by
+    #: the cadence (``decide``'s interval gate). The staleness ladder in
+    #: ``source_freshness`` uses ``freshness_days`` when that is set, else this.
     interval_days: int = 1
+    #: Days after the last successful pull before ``ingest status`` judges this
+    #: source STALE (``None`` = ``interval_days``, the default for every source
+    #: whose retry cadence and freshness horizon coincide). Set it when a source
+    #: is RETRIED daily but is only ever expected to gain anything weekly —
+    #: ``sleeper_ownership`` is the population: its week lands once the week
+    #: has settled (``SETTLE_DAYS``) and every other day the run is a correct
+    #: skip, so an ``interval_days``-based ladder read a healthy source as STALE
+    #: from Wednesday and EXPIRED by Saturday (item 4.1 audit, SLEEP-7). Never
+    #: below ``interval_days``; the registry contract test enforces it.
+    freshness_days: int | None = None
     #: True when upstream serves only the CURRENT value, so a missed run loses a
     #: point-in-time observation permanently. Everything nflverse is False: those
     #: are whole-season files, re-pullable any time, and a missed day costs
@@ -617,6 +638,155 @@ def _season_scope(ctx) -> str:
     return f"season {ctx.season}"
 
 
+# ---------------------------------------------------------------- item 4.1
+# The two weekly point-in-time MARKET ARCHIVES the Phase-4 backtest grades
+# against (`intel/research/market-archives.md`): what the room was SAYING
+# (`fpecr`, the DynastyProcess db_fpecr weekly-ECR panel, migration 011) and what
+# it was DOING (`sleeper_ownership`, Sleeper's per-week ownership snapshots,
+# migration 012). Both are replayable — a missed run is staleness, not loss —
+# and both are read under `base.latest_truth` (bulk history, one pull day).
+#
+# Their raw archives live under the gitignored top-level ``data/`` tree (Rule 5:
+# harvested rankings/ownership are never committed), in the SAME directory
+# `backtest/draft_backtest.py` pins its dated db_fpecr mirror under, so one
+# `ls data/backtest/` shows every archive the system holds.
+MARKET_ARCHIVE_DIR = REPO_ROOT / "data" / "backtest"
+SLEEPER_RESEARCH_DIR = MARKET_ARCHIVE_DIR / "sleeper-research"
+
+
+def fpecr_mirror_path(retrieved_as_of) -> str:
+    """The DATED db_fpecr mirror one pull reads: ``db_fpecr-<retrieved_as_of>.parquet``.
+
+    Dated, never rolling: the research note asks for a pinned mirror ("upstream
+    git history is truncated ~Dec 2024 back, so pin/mirror your own copy"), and
+    a bare ``db_fpecr.parquet`` silently becomes a different file on the next
+    download. One ~38 MB file per pull day; the registry's 28-day interval keeps
+    that to roughly a file a MONTH in-season (upstream refreshes weekly, but the
+    whole panel is re-downloaded each time, so the cadence is set by the
+    download, not the publish rhythm), and `pull_fpecr` fetches only when the
+    dated file is absent, so five backfill seasons share one download.
+    """
+    return str(MARKET_ARCHIVE_DIR / f"db_fpecr-{base.iso_date(retrieved_as_of)}.parquet")
+
+
+def _pull_fpecr(ctx) -> int:
+    return fpecr.pull_fpecr(
+        ctx.conn, retrieved_as_of=ctx.retrieved_as_of,
+        path=fpecr_mirror_path(ctx.retrieved_as_of), seasons=[ctx.season], refresh=False,
+    )
+
+
+def _scope_fpecr(ctx) -> str:
+    mirror = Path(fpecr_mirror_path(ctx.retrieved_as_of))
+    how = "existing" if mirror.exists() else "fresh (~38 MB download)"
+    return f"season {ctx.season} from {how} mirror {mirror.name}"
+
+
+def sleeper_new_weeks(conn, *, season: int, retrieved_as_of, force: bool = False) -> list[int]:
+    """The REG weeks a pull would load: completed, and (unless ``force``) not yet stored.
+
+    Each frozen week loads once by default — the freeze is immutable and a
+    re-load writes byte-identical rows under a new ``retrieved_as_of``, which
+    costs rows and says nothing. ``force`` re-loads every completed week (the
+    deliberate re-version, e.g. after a ``players`` refresh resolved a rookie
+    the crosswalk could not name last week).
+    """
+    completed = sleeper_ownership.completed_weeks(
+        conn, season, retrieved_as_of=retrieved_as_of
+    )
+    if force:
+        return sorted(completed)
+    stored = {
+        int(r[0]) for r in conn.execute(
+            "SELECT DISTINCT week FROM sleeper_ownership WHERE season = ? "
+            "AND season_type = 'regular'", (int(season),)
+        )
+    }
+    return sorted(w for w in completed if w not in stored)
+
+
+def _sleeper_settling_weeks(ctx) -> dict[int, str]:
+    """``week -> first pull day`` for REG weeks that have FINISHED but not SETTLED.
+
+    The gap between the two is ``sleeper_ownership.SETTLE_DAYS`` — a labelled
+    hypothesis, not a measurement: the current-week bucket upstream aliases the
+    live board, so a week is fetched only once the following week has also
+    finished. Naming these weeks in the skip reason is what keeps a correct
+    daily skip from reading as "the source is dead".
+    """
+    settled = sleeper_ownership.completed_weeks(
+        ctx.conn, ctx.season, retrieved_as_of=ctx.retrieved_as_of
+    )
+    finished = sleeper_ownership.completed_weeks(
+        ctx.conn, ctx.season, retrieved_as_of=ctx.retrieved_as_of, settle_days=0
+    )
+    lag = timedelta(days=sleeper_ownership.SETTLE_DAYS + 1)
+    return {
+        week: (date.fromisoformat(base.iso_date(last)) + lag).isoformat()
+        for week, last in finished.items() if week not in settled
+    }
+
+
+def _sleeper_ownership_applicable(ctx) -> str | None:
+    settled = sleeper_ownership.completed_weeks(
+        ctx.conn, ctx.season, retrieved_as_of=ctx.retrieved_as_of
+    )
+    settling = _sleeper_settling_weeks(ctx)
+    settle_note = ""
+    if settling:
+        first = min(settling)
+        settle_note = (
+            f"; REG week {first} of season {ctx.season} has finished but is still "
+            f"settling (fetched from {settling[first]}: a week is frozen only "
+            f"SETTLE_DAYS={sleeper_ownership.SETTLE_DAYS} days after its last gameday, "
+            "because the current-week bucket upstream is the live board and its "
+            "settlement time is unmeasured — a hypothesis, sleeper_ownership.SETTLE_DAYS)"
+        )
+    if not settled:
+        if settling:
+            return f"nothing to fetch, not a failure{settle_note}"
+        return (f"no REG week of season {ctx.season} has finished before "
+                f"{ctx.retrieved_as_of}; nothing to fetch, not a failure")
+    if not sleeper_new_weeks(ctx.conn, season=ctx.season, retrieved_as_of=ctx.retrieved_as_of,
+                             force=ctx.force):
+        return (f"every settled REG week of season {ctx.season} (1-{max(settled)}) is "
+                "already stored, and a frozen week re-loads byte-identical rows; pass "
+                "--force to re-version them anyway (e.g. after a players refresh) — "
+                f"force also re-fetches each frozen week live and reports any divergence"
+                f"{settle_note}")
+    return None
+
+
+def _scope_sleeper_ownership(ctx) -> str:
+    weeks = sleeper_new_weeks(ctx.conn, season=ctx.season,
+                              retrieved_as_of=ctx.retrieved_as_of, force=ctx.force)
+    if not weeks:
+        return "no new completed week"
+    new = set(sleeper_new_weeks(ctx.conn, season=ctx.season,
+                                retrieved_as_of=ctx.retrieved_as_of, force=False))
+    stored = [w for w in weeks if w not in new]
+    label = f"REG weeks {weeks[0]}-{weeks[-1]} ({len(weeks)})"
+    if not stored:
+        return f"new {label}"
+    # The backfill always runs with force; say what that force actually does
+    # here — a first load re-versions nothing.
+    return f"{label}: {len(stored)} stored re-versioned, {len(weeks) - len(stored)} new"
+
+
+def _pull_sleeper_ownership(ctx) -> int:
+    weeks = sleeper_new_weeks(ctx.conn, season=ctx.season,
+                              retrieved_as_of=ctx.retrieved_as_of, force=ctx.force)
+    # ``--force`` is the freeze's only instrument: beyond re-versioning the rows
+    # it re-fetches every already-frozen week LIVE, diffs it against the file and
+    # puts the divergence count in the run's note (the file is never rewritten).
+    # ``run_backfill`` always passes force, so a fresh-DB backfill with the
+    # archive on disk re-fetches ~90 spaced weeks (~2-3 min) — deliberate.
+    return sleeper_ownership.pull_sleeper_ownership(
+        ctx.conn, ctx.season, retrieved_as_of=ctx.retrieved_as_of,
+        cache_dir=SLEEPER_RESEARCH_DIR, weeks=weeks, verify_frozen=bool(ctx.force),
+    )
+
+
 # THE REGISTRY. Order IS dependency order: players and schedules are the spine
 # everything else stamps or crosswalks against, so they lead. Cadence per source
 # is pinned to the MEASURED upstream publish rhythm (probed 2026-07-24), not to
@@ -703,6 +873,65 @@ SOURCES: tuple[SourceSpec, ...] = (
               "(season_resolver). NOT an injury/availability signal: a starter ruled Out "
               "is not demoted (measured — see IMPLEMENTATION_PLAN 3.2c). The 2021-2024 "
               "WEEKLY regime is a different table and a different, backfill-only spec.",
+    ),
+    # THE TWO ARCHIVE PULLS RUN LAST IN THE DAILY GROUP, BY DESIGN (item 4.1
+    # audit, OPS-3). ``run_ingest`` walks the group in registry order, and the
+    # fpecr pull is a single ~38 MB download under one bounded socket timeout
+    # per READ — a stalled-but-not-dead upstream can hold it for minutes, and
+    # the systemd unit is ``Type=oneshot`` with a wall-clock cap. The three
+    # PERISHABLE sources after this point (projections, adp_rankings,
+    # espn_ranks) lose an observation PERMANENTLY when a run never reaches
+    # them; these two lose nothing (past weeks persist upstream), so nothing
+    # backtest-only may sit in front of anything the cadence cannot re-pull.
+    # ``fpecr.FETCH_BUDGET_S`` bounds the whole download as well. BACKFILL_SOURCES
+    # keeps its own order — one deliberate, attended run — and is untouched.
+    # fpecr before sleeper_ownership: schedules is the only dependency either
+    # has, and both stand behind it.
+    SourceSpec(
+        name="fpecr", group=GROUP_DAILY, pull=_pull_fpecr, scope=_scope_fpecr,
+        interval_days=28, needs_schedules=True, perishable=False,
+        notes="Item 4.1: the DynastyProcess db_fpecr weekly FantasyPros-ECR panel (2021 "
+              "onward), the backtest's 'what the room was SAYING' proxy. One ~38 MB "
+              "parquet, mirrored DATED under data/backtest/ and read in full each pull. "
+              "NOT perishable — the archive is append-only (measured: two mirrors three "
+              "days apart differed by ~45 KB of appended rows and nothing else), so a "
+              "missed month is re-pulled whole and the whole season is captured by "
+              "whichever pull lands after it ends. 28d, not weekly: nothing in-season "
+              "reads this table (it is a backtest input), and every pull re-versions "
+              "the entire current-season block under a new retrieved_as_of (measured "
+              "2026-09-01: 26,259 rows, +9.4 MB, 11.6 s per pull), so weekly would cost "
+              "~170 MB a season to buy insurance against upstream vanishing that a "
+              "monthly mirror already buys. Bulk history: every row carries the pull "
+              "day, so it reads EMPTY under the default view at any past as_of — read it "
+              "through base.latest_truth(get_fpecr). Backfillable 2021-2025.",
+    ),
+    SourceSpec(
+        name="sleeper_ownership", group=GROUP_DAILY, pull=_pull_sleeper_ownership,
+        scope=_scope_sleeper_ownership, phases=frozenset({PHASE_INSEASON, PHASE_OFFSEASON}),
+        interval_days=1, freshness_days=7, needs_schedules=True, perishable=False,
+        applicable=_sleeper_ownership_applicable,
+        notes="Item 4.1: Sleeper's per-week ownership snapshot (owned%/started% across "
+              "its user base), the backtest's 'what the room was DOING' proxy. One small "
+              "request per settled REG week, frozen as raw JSON under "
+              "data/backtest/sleeper-research/ and never overwritten. A week is fetched "
+              "only SETTLE_DAYS (7) after its last gameday: the current-week bucket "
+              "upstream ALIASES the live board (measured 2026-09-01: regular/2026/1 == "
+              "regular/2026/0 == pre/2026/N), so 'the last gameday has passed' is the "
+              "NFL calendar's opinion, not Sleeper's — settlement time is unmeasured and "
+              "SETTLE_DAYS is the labelled hypothesis standing in for it; immutability is "
+              "VERIFIED only for past seasons (90 weeks 2021-2025, live == frozen). Each "
+              "week loads ONCE (the applicable gate says 'already stored' otherwise); "
+              "--force re-versions AND re-fetches every frozen week live, writing the "
+              "live-vs-frozen divergence into the run's note (the file is never "
+              "rewritten — remove it by hand to re-freeze). interval 1d / freshness 7d: "
+              "retried daily so the first day after settlement picks the week up, but a "
+              "correct daily skip is not staleness — the source gains nothing more often "
+              "than weekly. A week upstream has not published (200/null) is left "
+              "unfrozen and named in the note, never a failure. NOT perishable: past "
+              "weeks persist upstream. knowable_as_of = the week's last REG gameday (a "
+              "LABELLED HYPOTHESIS — within-week timing is undocumented; it does NOT "
+              "move with the settlement delay). Bulk history like fpecr: read through "
+              "base.latest_truth(get_sleeper_ownership). Backfillable 2021-2025.",
     ),
     SourceSpec(
         name="weekly_stats", group=GROUP_WEEKLY, pull=_pull_weekly_stats, scope=_season_scope,
@@ -938,7 +1167,7 @@ def decide(conn, spec: SourceSpec, *, season: int, today, have_credentials: bool
                         season=run_season)
 
     ctx = IngestContext(conn=conn, season=run_season,
-                        retrieved_as_of=str(today), today=str(today))
+                        retrieved_as_of=str(today), today=str(today), force=force)
 
     if spec.applicable is not None:
         # Deliberately BEFORE the interval gate: "nothing to do" is not staleness,
@@ -1364,20 +1593,63 @@ def resolve_stamp(retrieved_as_of, today, *, allow_backfill: bool = False) -> tu
     return stamp, day
 
 
-def _loss_detail(dropped: int, collapsed: int) -> str:
-    """Name the two loss channels separately in the operator-facing reason.
+#: ``base.note_drops``' default ``why`` — the one reason that IS "unstampable".
+_DEFAULT_DROP_WHY = "unresolved knowledge time"
+#: A recorded drop reason is a sentence for the log; the run row gets its head.
+_REASON_MAX_CHARS = 96
+
+
+def _short_reason(why: str) -> str:
+    """The first clause of a recorded ``why`` (up to its first ' — '), bounded."""
+    head = str(why).split(" — ", 1)[0].strip()
+    if len(head) > _REASON_MAX_CHARS:
+        head = head[: _REASON_MAX_CHARS - 1].rstrip() + "…"
+    return head
+
+
+def _loss_detail(dropped: int, collapsed: int, reasons: dict | None = None) -> str:
+    """Name the loss channels separately in the operator-facing reason.
 
     Rule 6: "lost 40 rows" is not actionable, but "22 unstampable, 18 collapsed
     on a primary-key collision" tells the operator which of two completely
     different investigations to open — a missing gameday map versus a wrong
-    primary key.
+    primary key. ``reasons`` is ``base.collect_drops``' per-``why`` tally: a
+    drop recorded with its own reason is named by it ("1 dropped: no numeric
+    `owned` in 0..100"), and ONLY a drop recorded under the default ``why`` is
+    called "unstampable" — before this, every dropped row was, so a Sleeper
+    key dropped for a missing ``owned`` sent the operator to check whether
+    schedules was ingested (item 4.1 audit, SLEEP-8).
     """
     parts = []
     if dropped:
-        parts.append(f"{dropped} unstampable")
+        recorded = {
+            why: int(n) for why, n in (reasons or {}).items()
+            if n and why != _DEFAULT_DROP_WHY
+        }
+        named = sum(recorded.values())
+        for why, n in sorted(recorded.items(), key=lambda kv: (-kv[1], kv[0])):
+            parts.append(f"{n} dropped: {_short_reason(why)}")
+        if dropped - named > 0:
+            parts.append(f"{dropped - named} unstampable")
     if collapsed:
         parts.append(f"{collapsed} collapsed on a primary-key collision")
     return ", ".join(parts) if parts else "none"
+
+
+def _with_notes(reason: str | None, notes: Sequence[str]) -> str | None:
+    """Fold the pull's ``base.note_run`` lines into the run's free-text column.
+
+    ``nfl_ingest_runs`` has no note column — ``error`` is the only free text a
+    run carries, and ``format_run`` / ``ingest status`` print it — so a note an
+    ingester wants the operator to see (a week upstream has not published, a
+    ``--force`` verification that found a frozen file diverging) rides there,
+    after the status reason when one exists. An ``ok`` run with notes is still
+    ``ok``; the note is disclosure, not a verdict.
+    """
+    if not notes:
+        return reason
+    text = "note: " + "; ".join(str(n) for n in notes)
+    return f"{reason} | {text}" if reason else text
 
 
 def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
@@ -1425,7 +1697,7 @@ def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
                            started_at=_utc_now())
         ctx = IngestContext(conn=conn, season=run_season, retrieved_as_of=stamp, today=today,
                             credentials=credentials, allow_shrink=allow_shrink,
-                            allow_backfill=allow_backfill)
+                            allow_backfill=allow_backfill, force=force)
         try:
             with base.collect_drops() as tally:
                 written = spec.pull(ctx)
@@ -1492,15 +1764,17 @@ def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
         # Denominator matches the ratio that is actually tested. ``tally['total']``
         # is a SUM over every note_drops call, so for an ingester that reports
         # twice over different populations it exceeds the rows that ever existed.
-        detail = _loss_detail(dropped, collapsed)
+        detail = _loss_detail(dropped, collapsed, tally.get("reasons"))
+        notes = list(tally.get("notes") or ())
         reason = None
         if written == 0 and lost > 0:
             # The silent-zero signature: the pull succeeded, the ingester threw
             # every row away. Never 'ok'.
             status = STATUS_FAILED
             reason = (f"wrote 0 rows and lost {lost}/{seen} ({detail}) — every row was "
-                      "unstampable (is schedules ingested for this season?) or collided "
-                      "with another row in the same batch")
+                      "dropped for the reason(s) named, or unstampable (is schedules "
+                      "ingested for this season?), or collided with another row in the "
+                      "same batch")
         elif written == 0 and spec.quiet_ok:
             # "Upstream published nothing new" is this source's NORMAL outcome on
             # ~2% of days and cannot be predicted without the download, which
@@ -1529,6 +1803,7 @@ def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
             reason = f"wrote {written} rows, lost {lost}/{seen} ({detail})"
         else:
             status = STATUS_OK
+        reason = _with_notes(reason, notes)
         finish_run(conn, run_id, status=status, finished_at=_utc_now(),
                    rows_written=written, rows_dropped=lost, error=reason)
         summaries.append({"source": spec.name, "status": status, "reason": reason,
@@ -1629,6 +1904,11 @@ def source_freshness(conn, *, season: int, today) -> list[dict]:
             except Exception:  # a status report must never fail on a predicate
                 pass
 
+        # The staleness horizon: how long a source is EXPECTED to go without a
+        # new landing. Defaults to the retry interval; a source retried daily
+        # but expected to gain a week at a time (sleeper_ownership) sets
+        # `freshness_days` so its correct daily skips are not read as decay.
+        window = spec.freshness_days or spec.interval_days
         age = None
         if last_ok is not None:
             age = (day - normalize_as_of(last_ok["retrieved_as_of"])).days
@@ -1649,9 +1929,9 @@ def source_freshness(conn, *, season: int, today) -> list[dict]:
             # gap in history, which is a different (and still reportable) fact
             # from a completed season we do hold.
             verdict = VERDICT_ARCHIVED
-        elif age <= spec.interval_days:
+        elif age <= window:
             verdict = VERDICT_FRESH
-        elif age <= spec.interval_days * _EXPIRED_MULTIPLE:
+        elif age <= window * _EXPIRED_MULTIPLE:
             verdict = VERDICT_STALE
         else:
             verdict = VERDICT_EXPIRED
@@ -1662,6 +1942,7 @@ def source_freshness(conn, *, season: int, today) -> list[dict]:
             "verdict": verdict,
             "perishable": spec.perishable,
             "interval_days": spec.interval_days,
+            "freshness_days": window,
             "age_days": age,
             "season": run_season,
             "archived_season": archived_season,
@@ -1694,7 +1975,7 @@ def format_run(summaries: Sequence[dict]) -> str:
         return "ingest: no sources selected"
     lines = []
     for s in summaries:
-        line = f"[{s['status']:>15}] {s['source']:<14} rows={s.get('rows', 0)}"
+        line = f"[{s['status']:>15}] {s['source']:<{NAME_WIDTH}} rows={s.get('rows', 0)}"
         if s.get("scope"):
             line += f"  ({s['scope']})"
         if s.get("reason"):
@@ -1718,7 +1999,7 @@ def format_plan(decisions: Sequence[Decision]) -> str:
     lines = ["ingest plan (dry run — no network, no writes)"]
     for d in decisions:
         verb = "PULL" if d.action == "pull" else d.action.upper()
-        lines.append(f"  {verb:>15}  {d.name:<14} {d.scope or ''}")
+        lines.append(f"  {verb:>15}  {d.name:<{NAME_WIDTH}} {d.scope or ''}")
         if d.action != "pull" or d.reason != "due":
             lines.extend(textwrap.wrap(
                 d.reason, width=92, initial_indent="                   └─ ",
@@ -1776,7 +2057,7 @@ def format_status(conn, *, season: int, today) -> str:
                 + " — see the run log."
             )
     lines.append(
-        f"  {'source':<14} {'verdict':<9} {'last ok':<12} {'age':>4}  {'rows':>7}  "
+        f"  {'source':<{NAME_WIDTH}} {'verdict':<9} {'last ok':<12} {'age':>4}  {'rows':>7}  "
         f"{'last try':<14} notes"
     )
     if not any(r["last_ok"] for r in rows):
@@ -1793,13 +2074,19 @@ def format_status(conn, *, season: int, today) -> str:
         if r["verdict"] == VERDICT_BLOCKED:
             note = "BLOCKED"
         elif r["verdict"] in (VERDICT_STALE, VERDICT_EXPIRED):
-            note = (note + " " if note else "") + f"(interval {r['interval_days']}d)"
+            if r["freshness_days"] != r["interval_days"]:
+                # Retried more often than it can gain anything: say both
+                # numbers, or "interval 1d" beside a 3-day age reads as decay.
+                cadence = f"(cadence {r['freshness_days']}d, retry {r['interval_days']}d)"
+            else:
+                cadence = f"(interval {r['interval_days']}d)"
+            note = (note + " " if note else "") + cadence
         # The last ATTEMPT, so "never succeeded but tried today" is distinguishable
         # from "never ran at all", and a run of failures behind a fresh verdict is
         # visible in the same row.
         tried = r["last_status"] or "—"
         lines.append(
-            f"  {r['source']:<14} {r['verdict']:<9} {str(r['last_ok'] or '—'):<12} "
+            f"  {r['source']:<{NAME_WIDTH}} {r['verdict']:<9} {str(r['last_ok'] or '—'):<12} "
             f"{age:>4}  {str(r['rows'] if r['rows'] is not None else '—'):>7}  "
             f"{tried:<14} {note}"
         )
@@ -1881,6 +2168,20 @@ def format_status(conn, *, season: int, today) -> str:
                       "the run never started")
         lines.append(f"  {label}: {r['source']} ({r['last_status']}, attempted "
                      f"{r['last_attempt']}) — {detail or 'no error recorded'}")
+    # A NOTE a pull attached to a run that did not fail (``base.note_run`` →
+    # ``_with_notes``): a week upstream has not published, or a ``--force``
+    # verification of the frozen archive. The divergence one is the only way
+    # the operator ever learns the settlement hypothesis was wrong, so it is
+    # labelled LOUDLY rather than folded into a status this report calls fine.
+    for r in rows:
+        if r in broken or not r["error"] or "note: " not in r["error"]:
+            continue
+        note = r["error"].split("note: ", 1)[1].replace("\n", " ")
+        if len(note) > 220:
+            note = note[:217] + "..."
+        label = "DIVERGENCE   " if note.startswith("DIVERGENCE") else "NOTE         "
+        lines.append(f"  {label}: {r['source']} ({r['last_status']}, attempted "
+                     f"{r['last_attempt']}) — {note}")
     blocked = [r for r in rows if r["verdict"] == VERDICT_BLOCKED]
     for r in blocked:
         lines.append(f"  BLOCKED      : {r['source']} — {r['blocked']}")
@@ -1910,7 +2211,7 @@ def format_status(conn, *, season: int, today) -> str:
             "rewrites the run log only and touches no data."
         )
         for row in orphans[:5]:
-            lines.append(f"    run {row['run_id']:>5}  {row['source']:<14} "
+            lines.append(f"    run {row['run_id']:>5}  {row['source']:<{NAME_WIDTH}} "
                          f"season {row['season']}  started {row['started_at']}  "
                          f"batch {row['batch_id']}")
         if len(orphans) > 5:
@@ -1939,8 +2240,11 @@ def _source_flags(spec: SourceSpec) -> list[str]:
 
 def _source_row(spec: SourceSpec) -> str:
     phases = "all" if spec.phases == ALL_PHASES else ",".join(sorted(spec.phases))
+    interval = f"{spec.interval_days}d"
+    if spec.freshness_days and spec.freshness_days != spec.interval_days:
+        interval += f"/{spec.freshness_days}d"
     return (f"  {spec.name:<20} {spec.group:<8} {phases:<28} "
-            f"{str(spec.interval_days) + 'd':<6} {', '.join(_source_flags(spec))}")
+            f"{interval:<6} {', '.join(_source_flags(spec))}")
 
 
 def format_sources() -> str:
@@ -2044,6 +2348,8 @@ BACKFILL_ACTIVE_CADENCE_DAYS = 30
 #: gameday map and drop 100% of their rows without it (measured: 19,421/19,421).
 BACKFILL_SOURCES: tuple[str, ...] = (
     "schedules",
+    "fpecr",
+    "sleeper_ownership",
     "weekly_stats",
     "snap_counts",
     "team_defense",
@@ -2194,6 +2500,12 @@ _GAME_WEATHER_ARCHIVE_SPEC = SourceSpec(
 BACKFILL_ONLY_SOURCES = BACKFILL_ONLY_SOURCES + (_GAME_WEATHER_ARCHIVE_SPEC,)
 BACKFILL_ONLY_BY_NAME = {spec.name: spec for spec in BACKFILL_ONLY_SOURCES}
 
+#: The source-name column width every report shares. Derived from the registry
+#: rather than a literal 14: item 4.1's `sleeper_ownership` (17) overflowed the
+#: `ingest status` table on its first render, and the two backfill-only names
+#: had been overflowing the run log since 3.2c.
+NAME_WIDTH = max(len(spec.name) for spec in SOURCES + BACKFILL_ONLY_SOURCES)
+
 #: The order a backfill runs sources in, and the only place that order is stated.
 #: Registry order first (it IS dependency order, and `schedules` must land before
 #: the six sources that stamp against its gameday map), then the backfill-only
@@ -2209,6 +2521,8 @@ _BACKFILL_ORDER: tuple[str, ...] = BACKFILL_SOURCES + tuple(
 #: a healthy source as an empty one.
 _BACKFILL_TABLES: dict[str, str] = {
     "schedules": "schedules",
+    "fpecr": "fpecr_panel",
+    "sleeper_ownership": "sleeper_ownership",
     "weekly_stats": "weekly_stats",
     "snap_counts": "snap_counts",
     "team_defense": "team_defense",

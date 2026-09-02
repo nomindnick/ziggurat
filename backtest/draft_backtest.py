@@ -175,6 +175,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from backtest import stats
 from ziggurat.core import scoring
 from ziggurat.core.lineup import fill_lineup
 from ziggurat.core.valuation import DEFAULT_ROSTER, RosterStructure, replacement_levels
@@ -1628,7 +1629,10 @@ class BlockResult:
 
     @property
     def excludes_zero(self) -> bool:
-        return self.ci_low > 0.0 or self.ci_high < 0.0
+        # the same guard as backtest.stats.Interval.excludes_zero: a collapsed
+        # (lo == hi) interval from identical per-season deltas is not evidence
+        # and never reads EXCLUDES ZERO
+        return self.ci_low < self.ci_high and (self.ci_low > 0.0 or self.ci_high < 0.0)
 
 
 def season_block_interval(
@@ -1639,14 +1643,17 @@ def season_block_interval(
     objective: str = "objective",
     confidence: float = 0.95,
 ) -> BlockResult:
-    """Treat each SEASON as one observation. See :class:`BlockResult`."""
+    """Treat each SEASON as one observation. See :class:`BlockResult`.
+
+    The interval itself is :func:`backtest.stats.season_block_interval` —
+    the one implementation shared with the weekly replay harness (item 4.1).
+    """
     per = _per_season_delta(results, challenger, baseline, objective)
-    deltas = [per[s] for s in sorted(per)]
-    mean, lo, hi, sd = ev._t_interval(deltas, confidence)
+    iv = stats.season_block_interval(per, confidence=confidence)
     return BlockResult(
         challenger=challenger, baseline=baseline, objective=objective,
-        mean=mean, ci_low=lo, ci_high=hi, sd=sd,
-        n_blocks=len(deltas), per_block=per,
+        mean=iv.mean, ci_low=iv.lo, ci_high=iv.hi, sd=iv.sd,
+        n_blocks=iv.n, per_block=per,
     )
 
 

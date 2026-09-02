@@ -15,6 +15,19 @@ prior game, null deltas + ``prior_week=None`` (visible and flagged, never
 silently dropped). Snap deltas are always present as keys, ``None`` when the
 pfr->gsis crosswalk or a week's snap row is missing (so "unknown" is
 distinguishable from a real 0.0 change).
+
+COST (item 4.1 audit, COST-1). The first version read EVERY knowable week of
+``weekly_stats`` (position-filtered) and EVERY knowable week of ``snap_counts``
+for EVERY player on every call, and ``candidates._usage_arm`` calls this once
+per position — so each week re-paid the whole season-to-date snap table three
+times (1.8 s a read on the live 2023 table; 5.4 s of a 5.8 s generator run)
+and a season replay was O(W^2) in snap rows. Nothing in the function ever
+consults a week beyond ``week`` or a snap line for a player outside the stat
+read, so both reads are now bounded to ``week <= week`` and the snap read is
+restricted to the stat read's players — a pure no-op on the output, proven by
+``tests/test_nfl_usage.py``'s row-for-row equality — and ``stats=`` / ``snaps=``
+let one caller read the season-to-date frames ONCE and share them across
+positions (``season_snap_lines`` is that shared fold).
 """
 
 from ziggurat.data.nfl import base
@@ -74,6 +87,32 @@ def _combine_clubs(rows: list) -> dict:
             "offense_pct": (snaps / plays) if plays else 0.0}
 
 
+def season_snap_lines(
+    conn,
+    *,
+    as_of,
+    season: int,
+    week: int,
+    gsis_ids,
+    view: base.AsOfView = "historical",
+) -> dict[tuple[str, int], dict]:
+    """The folded snap line per (gsis_id, week) for weeks ``<= week``, restricted
+    to ``gsis_ids`` — the ``snaps=`` hand-over ``usage_deltas`` accepts.
+
+    A (gsis_id, week) can carry MORE THAN ONE snap line since migration 007
+    (one per club, for a player who moved mid-week), so collect and fold —
+    never index, which would keep whichever row SQL yielded last. Restricting
+    by gsis (never by the snap table's own position label) is what keeps the
+    fold identical to an unrestricted read for every player it is asked about.
+    """
+    by_week: dict[tuple[str, int], list] = {}
+    for s in get_snap_counts(conn, as_of=as_of, season=season, through_week=week,
+                             gsis_ids=gsis_ids, view=view):
+        if s["gsis_id"] is not None:
+            by_week.setdefault((s["gsis_id"], s["week"]), []).append(s)
+    return {k: _combine_clubs(v) for k, v in by_week.items()}
+
+
 def usage_deltas(
     conn,
     *,
@@ -82,6 +121,8 @@ def usage_deltas(
     week: int,
     position: str | None = "RB",
     view: base.AsOfView = "historical",
+    stats=None,
+    snaps=None,
 ) -> list[dict]:
     """Week-over-week usage deltas for `week` vs each player's most recent prior
     knowable week, as of `as_of`.
@@ -92,22 +133,33 @@ def usage_deltas(
     crosswalk bridge doesn't resolve in both weeks). Deltas are None when the
     player has no prior knowable game. Empty when `week` is not yet knowable at
     `as_of` — the leakage property, inherited from the accessors.
+
+    ``stats`` / ``snaps`` are an OPTIONAL pre-read hand-over (the 3.11a ``lines=``
+    pattern) for a caller that differences several positions off one season: the
+    ``get_weekly_stats`` rows for this ``as_of``/``season``/``view`` covering
+    every week ``<= week`` (any positions; filtered to ``position`` here), and
+    ``season_snap_lines(...)`` for those rows' players. Both default to the same
+    reads made here, so the single-position call is unchanged for every existing
+    caller. A hand-over read at a different ``as_of`` or ``view`` would be a
+    leak the accessors cannot see — the caller owns that invariant.
     """
-    # All knowable weeks this season (position-filtered), grouped per player.
+    # All knowable weeks this season through ``week`` (position-filtered),
+    # grouped per player. Later weeks are never consulted, so bounding the read
+    # (or skipping them from a wider hand-over) changes nothing.
+    if stats is None:
+        stats = get_weekly_stats(conn, as_of=as_of, season=season, position=position,
+                                 through_week=week, view=view)
     by_player: dict[str, dict[int, dict]] = {}
-    for r in get_weekly_stats(
-        conn, as_of=as_of, season=season, position=position, view=view
-    ):
+    for r in stats:
+        if position is not None and r["position"] != position:
+            continue
+        if r["week"] > week:
+            continue
         by_player.setdefault(r["player_id"], {})[r["week"]] = r
 
-    # A (gsis_id, week) can carry MORE THAN ONE snap line since migration 007
-    # (one per club, for a player who moved mid-week), so collect and fold —
-    # never index, which would keep whichever row SQL yielded last.
-    by_week: dict[tuple[str, int], list] = {}
-    for s in get_snap_counts(conn, as_of=as_of, season=season, view=view):
-        if s["gsis_id"] is not None:
-            by_week.setdefault((s["gsis_id"], s["week"]), []).append(s)
-    snaps = {k: _combine_clubs(v) for k, v in by_week.items()}
+    if snaps is None:
+        snaps = season_snap_lines(conn, as_of=as_of, season=season, week=week,
+                                  gsis_ids=by_player.keys(), view=view)
 
     out: list[dict] = []
     for pid, weeks in by_player.items():

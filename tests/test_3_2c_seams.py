@@ -63,6 +63,7 @@ from ziggurat.data.nfl import (
     projections,
     refresh,
     schedules,
+    sleeper_ownership,
     snap_counts,
     team_defense,
     weather,
@@ -122,10 +123,17 @@ _ACCESSORS = {
     # opinion shadow the incumbent, which is the very failure 010 exists to fix.
     "espn_projections": (espn_projections.get_espn_projections, {}),
     # Item 4.1 db_fpecr panel (migration 011). `fp_page` is IN the identity: one
-    # `ecr_type` spans several ranking pages on one `scrape_date` (the frozen
-    # preseason cheatsheet and the live rest-of-season board are both `ro`), so
-    # an accessor resolving on three columns would let one shadow the other.
+    # `ecr_type` spans several ranking pages on one `scrape_date` (215 measured
+    # dual-eligibility page collisions on the 2026-08-30 archive, e.g.
+    # ppr-rb-cheatsheets + ppr-wr-cheatsheets), so an accessor resolving on
+    # three columns would let one shadow the other. (An earlier version of this
+    # comment named a preseason-vs-rest-of-season collision inside `ro`; those
+    # pages share zero scrape dates — see the header of migration 012.)
     "fpecr_panel": (fpecr.get_fpecr, {}),
+    # Item 4.1 Sleeper ownership (migration 012). `sleeper_id` is the identity,
+    # not `gsis_id`: DST rows and unresolved crosswalk ids have no gsis, and an
+    # accessor keyed on gsis would fold every one of them into a single NULL row.
+    "sleeper_ownership": (sleeper_ownership.get_sleeper_ownership, {}),
 }
 
 #: Columns that are in the PK but are NOT part of the identity a read resolves
@@ -152,7 +160,7 @@ def captured_keys(db, monkeypatch):
     for module in (players, schedules, weekly_stats, snap_counts, ngs, injuries,
                    team_defense, game_odds, weather, adp_rankings, espn_ranks,
                    projections, depth_charts_weekly, depth_charts, news,
-                   espn_projections, fpecr):
+                   espn_projections, fpecr, sleeper_ownership):
         if hasattr(module, "base"):
             monkeypatch.setattr(module.base, "select_as_of", spy_as_of, raising=False)
             monkeypatch.setattr(module.base, "select_observed_as_of", spy_observed,
@@ -249,6 +257,7 @@ _INGEST_PK_CONSTANTS = {
     "depth_charts_weekly": depth_charts_weekly._PK_COLS,
     "depth_chart_slots": depth_charts._SLOT_PK_COLS,
     "depth_chart_panels": depth_charts._PANEL_PK_COLS,
+    "sleeper_ownership": sleeper_ownership._PK_COLS,
 }
 
 

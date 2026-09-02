@@ -562,12 +562,20 @@ def test_outside_the_fitted_domain_the_measured_tier_wins():
     assert below.sigma == pytest.approx(DEFAULT_TIER_SIGMA.tiers["WR"][-1].sigma)
 
 
-def test_kicker_sigma_is_labelled_a_pure_guess_and_reuses_the_old_constant():
+def test_kicker_sigma_is_labelled_not_yet_fitted_and_reuses_the_old_constant():
+    """Item 4.1 audit, KICK-2: the K sigma is still the 3.5 flat hypothesis,
+    but the REASON is no longer 'unmeasurable' — migration 013 landed the FG
+    columns, so the honest label is 'not yet fitted' naming the follow-up."""
     est = weekly_sigma("K", mu=7.0, rank=1)
     assert est.source == "kicker_flat_hypothesis"
     assert est.sigma == DEFAULT_VARIANCE.k_flat_sigma
-    assert "UNMEASURABLE" in est.reason
+    assert "NOT YET FITTED" in est.reason and "migration 013" in est.reason
+    assert "UNMEASURABLE" not in est.reason and "has no FG" not in est.reason
     assert "K" not in DEFAULT_TIER_SIGMA.tiers
+    # The 3.5 model's own describe() line moved with it.
+    form = DEFAULT_VARIANCE.describe("K", 7.0, DEFAULT_VARIANCE.k_flat_sigma)
+    assert "not yet fitted" in form and "migration 013" in form
+    assert "UNMEASURABLE" not in form
 
 
 def test_the_item_3_5_variance_model_is_left_working_untouched():

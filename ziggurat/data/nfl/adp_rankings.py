@@ -299,8 +299,16 @@ def ingest_adp_rankings(conn, df, *, retrieved_as_of: str) -> int:
 def pull_adp_rankings(conn, *, retrieved_as_of: str) -> int:
     """Pull the current FantasyPros ECR scrape and store it. ``nfl.import_ff_rankings``
     is the seam cached-fixture tests patch. The endpoint carries a single current
-    scrape_date; a weekly panel accumulates by pulling every week (dedup the in-
-    flight edge-week scrape) or the Phase-4 db_fpecr backfill into this table."""
+    scrape_date, so this table accumulates a weekly panel only by pulling every
+    week (dedup the in-flight edge-week scrape).
+
+    Do NOT backfill the historical db_fpecr archive into this table: its key
+    (fantasypros_id, ecr_type, scrape_date, retrieved_as_of) has no ``fp_page``,
+    and the archive carries 215 measured same-key page collisions (dual-eligible
+    players and defenses published on two positional pages of one series on one
+    day — e.g. ppr-rb-cheatsheets + ppr-wr-cheatsheets, 59) that ``INSERT OR
+    REPLACE`` would silently fold. The panel lives in ``fpecr_panel`` (migration
+    011, ``ziggurat.data.nfl.fpecr``)."""
     df = nfl.import_ff_rankings()
     return ingest_adp_rankings(conn, df, retrieved_as_of=retrieved_as_of)
 

@@ -1018,6 +1018,22 @@ _T2_CASES = {
              espn_id="900001"),
         "get_depth_chart", {"season": 2023},
     ),
+    # Item 4.1 — the two weekly market archives (migrations 011/012). Both are
+    # bulk history by construction (one pull day for five seasons), so both are
+    # exactly the silent-empty class this contract exists for.
+    "fpecr": (
+        "fpecr_panel",
+        _row(fantasypros_id="99999", ecr_type="ro", fp_page="ppr-cheatsheets",
+             scrape_date=_PAST_KNOWABLE, season=2023, week_basis="schedules",
+             position="RB", page_rank=1, pos_rank=1),
+        "get_fpecr", {"season": 2023},
+    ),
+    "sleeper_ownership": (
+        "sleeper_ownership",
+        _row(season=2023, season_type="regular", week=6, sleeper_id="999901",
+             position="RB", owned_pct=42.5),
+        "get_sleeper_ownership", {"season": 2023},
+    ),
 }
 
 _T2_MODULES = {
@@ -1026,6 +1042,7 @@ _T2_MODULES = {
     "ngs_receiving": "ngs", "injuries": "injuries", "game_odds": "game_odds",
     "schedules": "schedules", "depth_charts_weekly": "depth_charts_weekly",
     "depth_chart_slots": "depth_charts",
+    "fpecr": "fpecr", "sleeper_ownership": "sleeper_ownership",
 }
 
 

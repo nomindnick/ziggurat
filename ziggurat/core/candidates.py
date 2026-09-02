@@ -36,7 +36,7 @@ ships plain reasons, priors are quoted with their source and the word
 module, never imports from ``ziggurat/draft/``.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -48,7 +48,7 @@ from ziggurat.data.nfl.depth_charts import (
     qb1_change_candidates,
 )
 from ziggurat.data.nfl.snap_counts import get_snap_counts
-from ziggurat.data.nfl.usage import _combine_clubs, usage_deltas
+from ziggurat.data.nfl.usage import _combine_clubs, season_snap_lines, usage_deltas
 from ziggurat.data.nfl.weekly_stats import get_weekly_stats
 from ziggurat.league import state as league_state
 
@@ -272,11 +272,15 @@ def _snap_pct_by_gsis(conn, *, as_of, season, week, view) -> dict[str, float | N
     return {g: _combine_clubs(v)["offense_pct"] for g, v in by_gsis.items()}
 
 
-def _emergence_hits(raw, snap_pct: float | None) -> dict[str, float]:
+def _emergence_hits(raw, snap_pct: float | None,
+                    floors: Mapping[str, float] = EMERGENCE_FLOORS) -> dict[str, float]:
     """The absolute-usage floors a prior_week=None player CLEARS on his target
     week (any-of). None raw values are UNKNOWN and never clear a floor (Rule 2:
     never treat a missing observation as a real 0.0). ``raw`` is a weekly_stats
-    row (sqlite3.Row — index access, no .get)."""
+    row (sqlite3.Row — index access, no .get). ``floors`` defaults to the shipped
+    ``EMERGENCE_FLOORS``; the backtest harness (item 4.1) passes its own so a
+    tuning run can vary them WITHOUT editing this module (the shipped constants
+    stay the production setting)."""
     values = {
         "carries": raw["carries"],
         "targets": raw["targets"],
@@ -284,14 +288,15 @@ def _emergence_hits(raw, snap_pct: float | None) -> dict[str, float]:
         "offense_pct": snap_pct,
     }
     hits: dict[str, float] = {}
-    for metric, floor in EMERGENCE_FLOORS.items():
+    for metric, floor in floors.items():
         v = values.get(metric)
         if v is not None and float(v) >= floor:
             hits[metric] = float(v)
     return hits
 
 
-def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names):
+def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
+               emergence_floors: Mapping[str, float] = EMERGENCE_FLOORS):
     """USAGE_BREAKOUT rows. ``names`` maps gsis_id -> display name (Rule 6:
     usage_deltas / weekly_stats carry NO name column).
 
@@ -300,33 +305,53 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names)
     all None (season debut / return / promotion — item 3.3 F1), an ABSOLUTE-usage
     ROLE-EMERGENCE path off the target week's raw usage. Emergence rows are added
     to the SAME list so the injury arm's beneficiary index sees a debut who
-    inherited a vacated role."""
+    inherited a vacated role.
+
+    ``thresholds`` (the differenced floors) and ``emergence_floors`` (the absolute
+    floors) are parameters so the item-4.1 replay can vary them. Rule 6: the
+    differenced reason quotes ``thresholds.label``/``source`` (a tuned setting
+    carries its own); the emergence reason quotes ``EMERGENCE_LABEL`` ONLY when
+    the floors in force ARE the shipped ones — otherwise it names the floors in
+    force and says they are a tuning setting, so a tuned run never wears the
+    default hypothesis's provenance (``_emergence_label``).
+
+    COST (item 4.1 audit, COST-1): the season-to-date stat and snap frames are
+    read ONCE here and handed to ``usage_deltas`` per position (``stats=`` /
+    ``snaps=``), instead of each position re-reading the whole season — which
+    made every week re-pay the snap table three times. The target-week raw
+    usage is sliced from the same stat read (identical rows: same accessor,
+    same ``as_of``/``view``)."""
     espn_of = base.espn_by_gsis(conn)  # crosswalk-at-now, immutable identity
-    # Raw target-week usage + snap share for the role-emergence path, read
-    # as_of- and view-threaded exactly like the delta read below.
-    raw_usage = {r["player_id"]: r for r in get_weekly_stats(
-        conn, as_of=as_of, season=season, week=week, view=view)}
+    # ONE season-to-date stat read (every position; usage_deltas filters), ONE
+    # membership-restricted snap fold shared across positions, and the target
+    # week's snap share for the role-emergence path — all as_of- and
+    # view-threaded exactly alike.
+    stats = get_weekly_stats(conn, as_of=as_of, season=season, through_week=week, view=view)
+    raw_usage = {r["player_id"]: r for r in stats if r["week"] == week}
     snap_pct = _snap_pct_by_gsis(conn, as_of=as_of, season=season, week=week, view=view)
+    snaps = season_snap_lines(
+        conn, as_of=as_of, season=season, week=week, view=view,
+        gsis_ids={r["player_id"] for r in stats if r["position"] in positions})
+    emergence_label = _emergence_label(emergence_floors)
     rows: list[CandidateRow] = []
     for position in positions:
         for d in usage_deltas(conn, as_of=as_of, season=season, week=week,
-                              position=position, view=view):
+                              position=position, view=view, stats=stats, snaps=snaps):
             gsis = d["player_id"]
             if d["prior_week"] is None:
                 # ROLE EMERGENCE — no prior week to difference (F1).
                 raw = raw_usage.get(gsis)
                 if raw is None:
                     continue
-                hits = _emergence_hits(raw, snap_pct.get(gsis))
+                hits = _emergence_hits(raw, snap_pct.get(gsis), emergence_floors)
                 if not hits:
                     continue
                 usage_bits = ", ".join(_fmt_delta_abs(m, v) for m, v in sorted(
-                    hits.items(), key=lambda kv: -kv[1] / EMERGENCE_FLOORS[kv[0]]))
+                    hits.items(), key=lambda kv: -kv[1] / emergence_floors[kv[0]]))
                 reasons = [
                     f"role emergence — first knowable game this season (no prior week "
                     f"to difference): {usage_bits}.",
-                    f"absolute-usage floor is a labelled hypothesis (item 3.3, tuning "
-                    f"deferred to Phase 4). ({EMERGENCE_LABEL})",
+                    emergence_label,
                 ]
                 rows.append(CandidateRow(
                     player_key=gsis or f"?:{d['team']}",
@@ -334,7 +359,7 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names)
                     position=d["position"], team=d["team"],
                     gsis_id=gsis, espn_id=espn_of.get(gsis),
                     signal_kind=SIGNAL_USAGE,
-                    magnitude=sum(v / EMERGENCE_FLOORS[m] for m, v in hits.items()),
+                    magnitude=sum(v / emergence_floors[m] for m, v in hits.items()),
                     week=week, prior_week=None,
                     hypothesis=False, reasons=tuple(reasons),
                 ))
@@ -382,6 +407,20 @@ def _fmt_delta(metric: str, value: float) -> str:
     if metric in _PCT_METRICS:
         return f"{label} {value:+.0%}"
     return f"{label} {value:+.0f}"
+
+
+def _emergence_label(floors: Mapping[str, float]) -> str:
+    """The emergence reason's second sentence (Rule 6). The shipped floors keep
+    the item-3.3 sentence VERBATIM (the item-4.1 replay freezes reason text, so
+    the default bytes are pinned); any other floors are named in force and
+    disclosed as a tuning setting — never as the shipped hypothesis."""
+    if dict(floors) == dict(EMERGENCE_FLOORS):
+        return (f"absolute-usage floor is a labelled hypothesis (item 3.3, tuning "
+                f"deferred to Phase 4). ({EMERGENCE_LABEL})")
+    in_force = ", ".join(f"{m} >= {f:g}" for m, f in floors.items())
+    return (f"absolute-usage floors in force are NON-DEFAULT ({in_force}): an "
+            "item-4.1 tuning setting under evaluation, not the shipped item-3.3 "
+            "hypothesis.")
 
 
 def _fmt_delta_abs(metric: str, value: float) -> str:
@@ -661,6 +700,8 @@ def build_candidates(
     since=None,
     view: base.AsOfView = "historical",
     today=None,
+    thresholds: BreakoutThresholds | None = None,
+    emergence_floors: Mapping[str, float] | None = None,
 ) -> CandidateBoard:
     """The weekly candidate scan (item 3.3). Rule 1: ``as_of`` keyword-only, no
     default; ``view`` threaded into EVERY accessor.
@@ -673,9 +714,19 @@ def build_candidates(
     2025). ``today`` drives the freshness banner only — never a substitute for
     ``as_of``.
 
+    ``thresholds`` / ``emergence_floors`` (item 4.1) let the backtest harness vary
+    the usage arm's differenced and absolute floors WITHOUT editing this module;
+    ``None`` means the shipped ``DEFAULT_BREAKOUT`` / ``EMERGENCE_FLOORS``, so the
+    production CLI and every no-arg caller are row-for-row unchanged. The label a
+    caller passes travels into the reason text (Rule 6).
+
     The 2025 validation path binds the WHOLE generator once:
     ``base.latest_truth(build_candidates)(conn, as_of=..., season=2025, week=W)``.
     """
+    if thresholds is None:
+        thresholds = DEFAULT_BREAKOUT
+    if emergence_floors is None:
+        emergence_floors = EMERGENCE_FLOORS
     if week is None:
         week = _resolve_completed_week(conn, as_of=as_of, season=season, view=view)
         if week is None:
@@ -703,7 +754,8 @@ def build_candidates(
 
     usage_rows = _usage_arm(conn, as_of=as_of, season=season, week=week,
                             positions=scan_positions, view=view,
-                            thresholds=DEFAULT_BREAKOUT, names=names)
+                            thresholds=thresholds, names=names,
+                            emergence_floors=emergence_floors)
     injury_rows = _injury_arm(conn, as_of=as_of, season=season, week=week,
                               view=view, usage_rows=usage_rows)
     qb1_rows, qb1_note = _qb1_arm(conn, as_of=as_of, season=season, since=since, view=view)

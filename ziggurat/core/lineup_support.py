@@ -134,8 +134,9 @@ class VarianceModel:
     ``sigma(position, mu) = a + b*mu`` for the skill positions and D/ST (an OLS
     fit of realised weekly-score standard deviation on the mean, per player-season
     / team-season, >=8 REG games, 2021-2025, RE-SCORED through ``scoring.py``);
-    kickers get a flat sigma because ``weekly_stats`` carries no FG make/distance
-    columns to fit against. ``correlation_qb_passcatcher`` is the one non-zero
+    kickers get a flat sigma that has NOT YET BEEN FITTED (``weekly_stats``
+    gained FG make/distance/miss columns in migration ``013``, item 4.1; the fit
+    is a recorded follow-up). ``correlation_qb_passcatcher`` is the one non-zero
     cross-player correlation (a QB and a WR/TE on his own NFL team), an unmeasured
     "correlated starts" hypothesis (the strongest underdog lever).
 
@@ -177,7 +178,8 @@ class VarianceModel:
         it was measured on (Rule 6 — every prior quotes its label + source)."""
         pos = canon_position(position) or position
         if pos == "K":
-            form = f"flat sigma {sigma:.1f} (kicker weekly swing — UNMEASURABLE locally)"
+            form = (f"flat sigma {sigma:.1f} (kicker weekly swing — a hypothesis not yet "
+                    "fitted; FG columns landed in migration 013)")
         else:
             a, b = self.coefficients.get(pos, (0.0, 0.0))
             form = (f"sigma {sigma:.1f} = {a:.2f} + {b:.3f} x {mu:.1f} proj "
@@ -201,10 +203,11 @@ DEFAULT_VARIANCE = VarianceModel(
     r_squared=MappingProxyType({
         "QB": 0.099, "RB": 0.696, "WR": 0.715, "TE": 0.767, "DST": 0.064,
     }),
-    # Kicker sigma is UNMEASURABLE locally: weekly_stats has no FG make/distance/
-    # miss columns and no FG line exists in the DB, so score_kicker cannot be
-    # exercised on historical rows. 3.5 = a kicker's ~8-pt week swing on 1-2 makes
-    # plus -1/miss. A pure hypothesis, revisit in Phase 4 if an FG source lands.
+    # Kicker sigma is NOT YET FITTED: weekly_stats gained FG make/distance/miss
+    # columns in migration 013 (item 4.1), so score_kicker CAN now be exercised
+    # on historical K rows — the OLS re-fit is a recorded follow-up. 3.5 = a
+    # kicker's ~8-pt week swing on 1-2 makes plus -1/miss; a hypothesis until
+    # that fit lands.
     k_flat_sigma=3.5,
     # A QB and a pass-catcher on his own NFL team score together (the same drives
     # produce both). rho=+0.35 is a hypothesis, NOT measured (Phase 4); all other

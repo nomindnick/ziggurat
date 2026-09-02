@@ -101,6 +101,22 @@ def test_spine_sources_lead_the_registry_because_order_is_dependency_order():
             assert names.index(spec.name) > names.index("schedules"), spec.name
 
 
+def test_perishable_sources_run_before_the_archive_pulls():
+    """Item 4.1 audit, OPS-3: the two network-heavy market archives (a ~38 MB
+    parquet mirror and up to eighteen spaced Sleeper requests) sit at the END
+    of the daily group. A 07:22 pull that stalls on them must have already
+    landed every PERISHABLE daily source — those lose an observation for good
+    when the day is missed; the archives are re-pullable any time."""
+    daily = [s.name for s in refresh.SOURCES if s.group == "daily"]
+    fpecr_at, sleeper_at = daily.index("fpecr"), daily.index("sleeper_ownership")
+    assert fpecr_at < sleeper_at == len(daily) - 1
+    for spec in refresh.SOURCES:
+        if spec.group == "daily" and spec.perishable:
+            assert daily.index(spec.name) < fpecr_at, spec.name
+    # And nothing in the group depends on either archive.
+    assert not any(getattr(s, "needs", None) for s in refresh.SOURCES if s.group == "daily")
+
+
 # ------------------------------------------------------- selection / cadence
 
 
@@ -1825,6 +1841,59 @@ def test_drops_and_collisions_share_one_ceiling_but_stay_named_apart(db):
     assert out[0]["dropped"] == 10                          # the duplicates are NOT in it
     assert "6 unstampable" in out[0]["reason"]
     assert "4 collapsed on a primary-key collision" in out[0]["reason"]
+
+
+def test_a_drop_with_its_own_reason_is_named_by_it_not_called_unstampable(db):
+    """Item 4.1 audit, SLEEP-8: 'unstampable' is the schedules diagnosis. A
+    drop an ingester recorded under a different ``why`` is named by that reason
+    (its head, before the first em-dash), and only the default-``why`` remainder
+    is called unstampable — so the operator opens the right investigation."""
+    def _mixed(ctx):
+        base.note_drops("fake", 1, 100, why="no numeric `owned` in 0..100 — an upstream "
+                                             "anomaly below the drift allowance")
+        base.note_drops("fake", 2, 100)                       # the default why
+        base.note_drops("fake", 3, 100, why="IDP position", by_design=True)
+        return 94
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _mixed),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    reason = out[0]["reason"]
+    assert out[0]["status"] == refresh.STATUS_PARTIAL and out[0]["dropped"] == 3
+    assert "1 dropped: no numeric `owned` in 0..100" in reason, reason
+    assert "an upstream anomaly" not in reason                 # the head only
+    assert "2 unstampable" in reason
+    assert "lost 3/97" in reason                               # by-design leaves the denominator
+    assert "IDP" not in reason                                 # by-design is not a loss
+
+
+def test_a_run_note_rides_the_free_text_column_and_the_status_is_unchanged(db):
+    """``base.note_run`` is disclosure, not a verdict: an ``ok`` run with a note
+    stays ``ok``, the note lands after the status reason in the run's ``error``
+    column (the only free text ``nfl_ingest_runs`` has), ``format_run`` prints
+    it, and ``ingest status`` surfaces it as a NOTE line — LOUD as DIVERGENCE
+    when the note says so."""
+    def _noted(ctx):
+        base.note_run("fake", "weeks [7] of season 2026 not yet published upstream")
+        return 10
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _noted),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_OK and not refresh.run_failed(out)
+    assert out[0]["reason"] == "note: weeks [7] of season 2026 not yet published upstream"
+    assert "not yet published" in refresh.format_run(out)
+    stored = db.execute("SELECT status, error FROM nfl_ingest_runs WHERE source='z'").fetchone()
+    assert stored[0] == refresh.STATUS_OK and "not yet published" in stored[1]
+
+    def _diverged(ctx):
+        base.note_drops("fake", 1, 100)
+        base.note_run("fake", "DIVERGENCE on week(s) [6]: the live copy no longer matches")
+        return 99
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _diverged),), season=2026,
+                             retrieved_as_of="2026-07-25", today="2026-07-25")
+    assert out[0]["status"] == refresh.STATUS_PARTIAL
+    assert out[0]["reason"].startswith("wrote 99 rows, lost 1/100")
+    assert " | note: DIVERGENCE on week(s) [6]" in out[0]["reason"]
 
 
 def test_a_collision_alone_can_trip_the_ceiling_that_drops_alone_would_not(db):
