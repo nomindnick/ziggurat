@@ -2283,6 +2283,272 @@ candidate join exercised non-empty, the legal-path render constrained, the budge
 branches covered). Suite green (**1305 passed, 4 skipped**; +27). Details:
 gitignored `intel/research/waiver-3.4-design.md`.
 
+**Addendum — item 3.4b, sequential (chain) claim pricing, 2026-09-02.** The first
+in-season defect the operating cadence itself surfaced, and it was in the LIST, not
+in any single number.
+
+*The defect.* Every `SwapRow.gain` prices its move as if it were the ONLY one you
+make, so `_select_claims` ranked them and printed the top k — quoting each claim
+against a roster that stops existing the moment the claim above it wins. Tuesday
+step 4 then said "queue every positive-marginal claim shown". **Measured
+2026-09-01: three RB adds priced +5.55 / +5.25 / +2.21 each alone; all three won;
+the JOINT gain was +1.22** (pairs +3.2…+3.9 — RB4 carries insurance value, RB5/RB6
+essentially none). **On 2026-09-02 the same tool, on the new roster, recommended
+the exact REVERSE of all three** (+2.65 / +1.68 / … each alone; reversing all three
+= −1.22), off projections verified byte-identical across the two pulls. The tool was
+walking a flat ridge and would have kept recommending one reversal per day, each
+one individually defensible.
+
+*The fix.* Price the season-long list SEQUENTIALLY. New seam on `MarginalBoard`
+(`ziggurat/core/marginal.py`): `value_after(swaps, *, pure_adds)` = the roster with
+each swap's drop removed and add inserted, valued at the board's own reporting depth
+(`REPORT_DEPTH = 3`), memoised on the applied identities; plus `swap_keys` (the
+model keys, index-aligned with `swaps` — `_reprice_swaps` now returns `(row, keys)`
+pairs on BOTH branches, because it drops non-positive rows and re-sorts, so the keys
+used to die inside `_SwapMatrix`), `roster_keys`, and `roster_position_counts`. The
+memo lives on `_SwapMatrix` because `MarginalBoard` is frozen. `value_after` refuses
+a duplicated key (`fill_lineup` does not dedupe — a repeated key seats the same
+player twice, measured +29.99 pts on the live roster) and refuses a STREAMED row
+outright (a one-week `model_now` price has no meaning over the season window, and
+the board does not expose `model_now` to guess with).
+
+`_select_claims` (`ziggurat/core/waiver.py`) became a lazy greedy (CELF) over the
+seasonal rows: a heap keyed `(drop_unpriceable, −conditional gain, −standalone gain,
+add, drop, index)`, pop, skip on a used add/drop identity or a `POSITION_CAPS`
+breach across the chain, re-price if stale, STOP at the first fresh non-positive
+gain. `ClaimRec.gain` is now the CONDITIONAL number and `ClaimRec.gain_alone` the
+standalone one (printed beside it, because it is exactly what the claim is worth if
+the lines above it lose to a rival with better priority); `chain_rank` is 1-based
+across claims + grabs and 0 for the streaming lane. `WaiverPlan` gains `chain_gain`
+(measured as `value_after(all) − base`, NEVER accumulated — the telescoping identity
+`chain_gain == Σ conditional gains` is tested at 1e-9 against an independent
+recomputation), `chain_rejected`, `chain_not_repriced` and `chain_stop`.
+`claim_budget` became a TOTAL cap over WAIVER + FREE_AGENT + UNKNOWN (stricter than
+the old per-bucket cap); the streamed K/DST lane keeps its own separate slice and is
+otherwise byte-frozen.
+
+*Two smaller defects fixed in passing.* An open-slot PURE ADD quoted the paired
+swap's gain, which understates it (adding without dropping is never worse) — it is
+now priced as `roster + add`, and the note says open-slots-first is an ASSUMPTION a
+starter-upgrading swap can dominate. And `POSITION_CAPS` was only ever checked
+per-swap against the BASE roster, so a chain could breach a cap that nothing
+re-checked (`fill_lineup` would have silently seated a legal subset of an illegal
+roster).
+
+*Two disclosures shipped rather than hidden.* (1) The lazy re-evaluation is exact
+under diminishing returns and a HEURISTIC otherwise — a complement (a starter and
+his own handcuff) can be ranked lower than it deserves, never missed, because every
+candidate stays on the heap and is re-priced before it can be accepted. One plan
+note says so in plain words, and a constructed supermodular fixture pins that a
+complement is accepted reporting the HIGHER number. (2) A chain can end because the
+matrix ran out of legal drops rather than for any economic reason — measured live
+2026-09-02, `board.swaps` held 179 rows over exactly THREE distinct drop identities
+— so `chain_stop` distinguishes `nonpositive` / `budget` / `exhausted` /
+`eval_budget` / `no_candidates` and the plan never reports bookkeeping as an
+economic conclusion. A `CHAIN_EVAL_BUDGET = 200` ceiling on valuations degrades
+LOUDLY (the chain stops with a note) rather than silently truncating; cost scales
+with chain length × candidates re-evaluated, not with matrix size.
+
+*Live acceptance, re-measured on the shipped command* (`ziggurat waivers --reasons
+--claim-budget 10 --as-of 2026-09-02`): **23.9 s** against a 21.8 s pre-change
+baseline (48 valuations, ~2 s), inside the item's ~35 s budget. Chain of TWO:
+Josh Downs ← Keaton Mitchell **+3.3** (rank 1, conditional == standalone by
+construction), Jordan Love ← Chris Rodriguez Jr. **+1.0 conditional / +2.2 alone**
+(rank 2); joint **+4.3**. Refused: Jalen Coker ← Woody Marks **+1.7 alone / −5.6
+after** (plus 2 more measured, 18 more disclosed as not re-priced). Streaming lane
+unchanged (Rams → Chargers D/ST +1.1, five rows). The pre-change tool printed three
+independent claims (+3.3 / +2.6 / +1.2) whose joint value is **−1.2**.
+
+*Docs.* CLAUDE.md Tuesday step 4 no longer says "queue every positive-marginal claim
+shown"; it says queue the chain in the NUMBERED order printed, that a SHORT list is
+the answer rather than a truncation, that the refused list is a fallback only, and
+that the joint total is what the plan is worth (it IS the sum of the printed
+conditional gains — it is the "alone" numbers that do not add up). Step 2's
+"the cap TRUNCATES each claim list" justification for `--claim-budget 10` was
+reconciled in the same edit.
+
+Twelve new waiver tests + six new marginal tests; NINE adversarial mutations were
+run against a scratch copy of the module (conditional pricing reverted, telescoping
+broken, laziness removed, pure-add re-quoted, streaming folded into the chain, the
+double-seat guard removed, the unpriceable de-prioritisation removed, key alignment
+scrambled, the memo removed) and each was caught by its intended assertion. Four
+shipped mechanisms were NOT pinned by any of them and are covered by the audit round
+below. No migration (`schema_version` stays 13) and no new dependency; the one CLI
+edit is help text — `--claim-budget` described the cap as a per-list shortlist limit
+("extra claims are free"), which this item made false, and now names the chain
+ceiling. No logic in the CLI (Rule 3). Suite green
+(**2,665 passed, 4 skipped**; +18). **Standing lesson: a list of individually-correct
+recommendations is not a correct list. If the operator is told to act on all of
+them, the tool owes them the JOINT number.**
+
+**Addendum — item 3.4b audit-fix round, 2026-09-02 (same day).** A multi-lens
+adversarial audit (sequential-pricing math; novice-facing display; cost/runtime/
+determinism; rules/boundary/test-rigor; docs & cadence fidelity) returned **24
+confirmed findings**, every one verified by three refute-first agents. All are
+fixed. **No recommendation the tool makes moved**: the live command still returns
+the same two claims, the same +4.3 joint and the same five streaming rows. The
+REFUSED section still holds three rows, but two of them moved: the build had
+refused Malik Willis and Tua Tagovailoa on VALUE (a QB add onto a 3-QB roster),
+and the audit's new `chain_capped` bucket now names them for what they are —
+blocked by `POSITION_CAPS`, not measured worthless — so Jordyn Tyson and AJ
+Barner (two more swaps sharing the Woody Marks drop) took their places. Every
+other fix is a disclosure the build swallowed, a search fence it lacked, or a
+sentence that was false.
+
+*The headline — the module deleted its own measurement.* In the rejection pass a
+leftover re-priced at a POSITIVE conditional gain was `continue`d (waiver.py, "a
+complement the lazy search under-ranked… Not shown as one"): absent from the
+claims, from `chain_rejected` AND from `chain_not_repriced`, after the module had
+just spent a 56 ms valuation establishing it was worth having. Meanwhile the plan
+printed "a SHORT list is the answer here, not a truncation. Do not queue past the
+end of it" and, unconditionally, "It cannot make one disappear." Both are false in
+exactly the branch the code handled. Reachable two ways: the handcuff coupling in
+`ScenarioModel.week_value` makes the objective genuinely supermodular for a
+starter/backup pair, and the `drop_unpriceable` first rung of `_chain_key` breaks
+the lazy upper bound even under strict submodularity (that route is also a
+DISCLOSURE REGRESSION — pre-3.4b `bucket()` still SHOWED such a row, last). Fixed
+with `WaiverPlan.chain_under_ranked` (rendered in the DEFAULT view), the two
+sentences deleted/conditioned, and an ACCOUNTING INVARIANT: every leftover the
+pass touches lands in exactly one of `chain_rejected` / `chain_measured_not_shown`
+/ `chain_under_ranked` / `chain_capped` / `chain_not_repriced`, and the counts must
+sum to the leftovers (asserted).
+
+*The chain's ORDER was destroyed by its own renderer.* `_select_claims` builds one
+ordered chain and then partitions it by KIND into `claims` / `fcfs_grabs`, which
+render as two sections — so a chain that interleaves a free-agent grab prints
+rank 1, 3, 2 while the notes say "in the order printed … Queue them in that order",
+`_claim_line` says "if the claims above win", and a rank-3 reason says "the 2
+claim(s) listed above this one" with one above it. `chain_rank` was rendered
+NOWHERE, so the true order was unrecoverable, and CLAUDE.md's amended step 4 told
+the operator to follow it. Reachability is the ordinary in-season case (live pool
+2026-09-02: 872 FREEAGENT vs 4 WAIVERS). Every chained line now carries `#K`; the
+notes say the numbers run across BOTH sections and to act in number order; the
+reasons count chain positions rather than printed lines; and the grab-vs-claim
+timing asymmetry (a grab is clicked now, claims clear overnight) is stated instead
+of left implicit.
+
+*The cost fence starved the half it was protecting.* Phase A (open slots) is
+exhaustive per step — 82 distinct adds x ~68 ms on the live board — and shared one
+counter with phase B, so at two open slots it burned 194 of 200 valuations and
+`chain_stop` came back `eval_budget`; at three, phase B never ran at all and the
+priced-refusal list was empty. Phase A now has a per-step top-K scan
+(`PHASE_A_SCAN_TOP_K = 25`, disclosed with the skipped count) and its own share of
+the ceiling (`PHASE_B_EVAL_RESERVE = 80` held back), and **a phase-A cost stop is
+never terminal**. Its `g <= 0` shortcut also stopped settling the whole search
+when a candidate was excluded from `reps` by the PURE-add cap test: `cap_ok(s,
+pure=True)` counts the add without the offsetting drop, so a same-position swap at
+a capped position is legal in phase B and invisible to phase A's "a pure add
+dominates the same swap" argument. The constant's own comment is corrected too —
+one depth-3 valuation is 56 ms as a swap and ~68 ms as a pure add, so the ceiling
+is worth 11-15 s, not the ~2.6 s the live path spends, and it is APPROXIMATE (the
+base/`prev`/`alone`/`chain_gain` bookkeeping calls are counted, not refused;
+measured overshoot +2).
+
+*Sentences that asserted what nobody measured.* `--claim-budget 0` returned
+`no_candidates` and the plan then said "every add here would cost a drop worth
+more than the add" without running a single valuation (now `STOP_BUDGET` plus a
+note that says nothing about the pool; the streaming slice is clamped so a
+negative budget cannot silently truncate). A streaming-only plan printed "these 0
+add(s) are priced as a CHAIN, in the order printed … Queue them in that order" AND
+suppressed the honest hold-your-roster note, because the guard tested all three
+lanes (now the CHAIN is judged on its own, `_chain_notes` returns nothing at n=0,
+and `STOP_NO_CANDIDATES` finally has a branch). The "not re-priced" note said
+"only the top 3 are" even when the ceiling meant NONE were, and — measured live —
+disclaimed as "unmeasured" 10 of 17 rows the chain had ALREADY measured, because
+the display cap was tested before the freshness flag (now freshness first, free
+numbers always classified, and the wording is driven by what was really priced).
+The `STOP_EXHAUSTED` note blamed "every remaining pair reuses a player already
+spent above" when the real cause was a `POSITION_CAPS` refusal (drain causes are
+now counted separately), and a cap-blocked leftover was rendered with an economic
+reason (now its own `chain_capped` bucket naming the cap as an item-3.2 modelling
+guard).
+
+*Novice-facing display.* A pure add's FIRST reason bullet was still the swap
+matrix's own sentence — the paired swap's number plus a phantom drop, two bullets
+above "no drop required" — and with several open slots every pure add named the
+same drop; rebuilt from the reported gain, with every inherited sentence naming
+the drop filtered out. A chained claim's first bullet likewise stated the
+STANDALONE gain unqualified above the headline's conditional one; re-labelled in
+place. Only `chain_rejected[0]` was ever rendered and `ChainRejection.reason` was
+read by nothing — now every refusal renders, with its reason under `--reasons`,
+under a REFUSED heading; refusals sharing one drop collapse into one statement
+about that drop; the example was the only unlabelled `<-` on the page (the shipped
+`morning_briefing` summarizer inverted it, naming the DROP as the add) and blamed
+the ADD for a loss the shared drop caused. The DROP BOARD is priced pre-chain and
+said so nowhere while contradicting the chain in the same view — it now discloses
+the baseline, marks the drops the chain has spent, marks a drop the chain has
+measured as refused, and says a named replacement can be had ONCE. The joint line
+hard-coded "{n} wks" and printed "over 1 wks" in a one-week window (one
+`_weeks_phrase` for the whole report). The waiver-priority sentence said "your
+claims are ranked by projected gain" beside two non-comparable numbers.
+
+*Rules & test rigor.* `position_counts` was `= None`-defaulted, and `dict(None or
+{})` makes every `POSITION_CAPS` check `0 + 1 <= cap` — the cross-chain guard the
+build ADDED was off unless the caller remembered it. Now required. Four shipped
+mechanisms had **no test anywhere** and each survived deletion against the full
+suite: `chain_not_repriced`, the cross-chain caps, `CHAIN_EVAL_BUDGET` and its
+`STOP_EVAL_BUDGET` degrade path (the only assertion referencing it was
+`calls <= CHAIN_EVAL_BUDGET`, which RAISING the constant satisfies), and
+`value_after`'s canonical `sorted(keys)` (the determinism test ran both chains in
+ONE process, where a set of the same strings iterates identically — the exact
+hazard the code comment names). All four are pinned; the key-sort test is
+mutation-verified (`sorted(keys)` -> `list(keys)` fails it and nothing else).
+
+*Docs.* CLAUDE.md Tuesday step 4 said the joint total is "not the sum of the
+individual lines" — the opposite of the item's own tested telescoping identity,
+and of the same file 670 lines earlier; it also asserted the economic stop
+unconditionally and told the operator to queue a refusal as a fallback with no
+statement that ESPN grants every queued claim in one batch. Rewritten: numbered
+order, the total IS the sum of the printed gains (the "alone" numbers are the ones
+that do not add up), read the tool's stated stop reason rather than assume it, and
+a refusal is a SUBSTITUTE never an addition. Step 2 regained the streaming-slice
+sentence its rewrite deleted; Wednesday step 1 now states the briefing's fixed
+`claim_budget=3`; the 3.4 status paragraph carries an amendment pointer (it still
+said "re-pricing nothing"); and this plan's own "no CLI change" and "every one
+mutation-verified" claims are corrected above.
+
+*Four proposed fixes deliberately NOT taken, recorded so they are not re-derived.*
+(1) **Reordering the chain so FCFS grabs are priced FIRST.** Two of the three
+verifiers judged it harmful: constraining the greedy by ACQUISITION KIND changes
+the selected SET, not just the attribution, and one measured that on the live board
+it would surface a grab worth **−5.9 after the chain** as an act-now
+recommendation. `value_after` is a set function, so the joint number is
+order-invariant and nothing numeric is lost by leaving the order alone; the
+wall-clock asymmetry (a grab is clicked now, claims clear overnight) is now STATED
+instead. (2) **Headlining `gain_alone` for a grab at `chain_rank > 1`.** It would
+break the property the whole item rests on — that the printed headline gains SUM to
+`chain_gain` (tested at 1e-9, and now the thing CLAUDE.md tells the operator to
+read aloud). The standalone number is on the same line either way. (3) **Demoting
+`drop_unpriceable` below `−gain` in `_chain_key`** to restore the lazy-greedy upper
+bound. Kept: it is a deliberate 3.4 decision with a recorded rationale (accepting an
+unpriceable-drop row would price every conditional gain below it against a
+fictional post-chain roster), and the disclosure hole it opened is what
+`chain_under_ranked` now closes — such a row is re-priced in the rejection pass and
+NAMED, with its upper-bound caveat, exactly as the pre-3.4b build showed it.
+(4) **A CELF resume** (push the positive re-price back on the heap and continue).
+It moves the stop semantics and the point at which `chain_gain` is measured, for a
+branch that fires zero times on the live board; reporting the measurement is the
+smaller change that removes the false sentence.
+
+*Re-measured.* Live command unchanged in shape and result (see the numbers in the
+run below). Eighteen new tests (2,683 passed, 4 skipped; +18 over the build). No migration
+(`schema_version` stays 13), no new dependency.
+
+*Gate + operator polish, same morning.* The workflow's gate failed on ONE
+sentence — the claim above that the audit fixes left "the same three refusals"
+(two had moved to the new position-cap bucket; corrected in place). Two
+rendering changes made by hand after reading the live page: the ACTION now
+prints first (WAIVER CLAIMS → FREE-AGENT GRABS → REFUSED → BLOCKED → STREAMING
+→ DROP BOARD, pinned by test — the refusals are worded against "the moves
+above", which is now literally where they are), and a position-2 line reads
+"if #1 lands" rather than the range-of-one "if #1-#1 land" (`_above_phrase`,
+pinned). Re-run live: 24.1 s, byte-identical across `PYTHONHASHSEED`, same
+chain / joint / refusals / streaming rows. Suite **2,684 passed, 4 skipped**.
+**Standing lesson: a search that
+MEASURES something and then drops it is worse than one that never looked — it
+turns the tool's own stop sentence into a lie, and that sentence is the part a
+novice cannot check.**
+
 ### 3.5 [Build] Lineup support & streaming
 **Goal:** Weekly starter recommendations with win-probability variance posture (opponent projected total → underdog/favorite mode), slot-lock optionality (Thursday players never in FLEX), time-contingent GTD handling, Sunday-morning inactives check; plus the D/ST + K streaming ranker using house scoring, opponent quality, Vegas totals, and weather. Hard-coded sanity checks (OUT/bye players never recommended) enforced in code with tests.
 **Done when:** for a synthetic week, the lineup changes appropriately when the opponent's projection swings from −20 to +20, and the streaming ranker's weather sensitivity is demonstrable.

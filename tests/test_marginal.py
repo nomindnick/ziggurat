@@ -1551,3 +1551,153 @@ def test_latest_truth_still_gates_fact_time_on_the_new_entry_point(db, world):
         pool_limit=None,
     )
     assert all(r.unvalued for r in early), "nothing was knowable the day before"
+
+
+# ---------------------------- 12. the board's re-pricing seam (item 3.4b) -----
+#
+# The swap matrix's model keys used to die inside ``_SwapMatrix``: ``_reprice_swaps``
+# drops non-positive rows and re-sorts, so nothing downstream could recover which
+# model entries a resolved row was priced from — and without them item 3.4's claim
+# list could only be priced one move at a time, which is the flat-ridge defect
+# 3.4b fixes. These pin the seam itself.
+
+
+def test_swap_keys_stay_aligned_with_the_resolved_rows(db, world):
+    """The keys are index-aligned with ``swaps`` AFTER the re-pricing pass has
+    dropped rows and re-sorted, and they name the right entries: re-pricing a row
+    from its own keys reproduces its own gain."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    assert board.swaps and len(board.swap_keys) == len(board.swaps)
+    entries = board.model.entries
+    for row, (drop_key, add_key) in zip(board.swaps, board.swap_keys, strict=True):
+        assert entries[drop_key].player == row.drop
+        assert entries[add_key].player == row.add
+        assert entries[drop_key].on_roster and not entries[add_key].on_roster
+
+
+def test_value_after_reproduces_a_season_long_swap_gain(db, world):
+    """``value_after([row]) - value_after(())`` IS the row's re-priced gain — the
+    identity item 3.4b's chain rests on, and what makes the rank-1 conditional gain
+    equal to the standalone one rather than approximately equal to it."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    row = next(s for s in board.swaps
+               if s.drop_position not in marginal.STREAMED_POSITIONS)
+    assert board.value_after([row]) - board.value_after() == pytest.approx(
+        row.gain, abs=1e-6)
+    # the base is the board's own roster at the reporting depth
+    assert board.value_after() == pytest.approx(
+        board.model.value_at_depth(board.roster_keys, marginal.REPORT_DEPTH), abs=1e-9)
+
+
+def test_value_after_refuses_to_seat_a_player_twice(db, world):
+    """``fill_lineup`` buckets keys by position and does NOT dedupe, so a repeated
+    key seats the same player in two slots and inflates the total silently and in
+    the operator's favour. Two swaps sharing a drop are exactly how a chain would
+    do that by accident, so the size invariant RAISES instead."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    pairs = {}
+    for row, keys in zip(board.swaps, board.swap_keys, strict=True):
+        if row.drop_position in marginal.STREAMED_POSITIONS:
+            continue
+        pairs.setdefault(keys[0], []).append(row)
+    shared = next(rows for rows in pairs.values() if len(rows) >= 2)
+    with pytest.raises(ValueError, match="expected"):
+        board.value_after(shared[:2])          # same drop twice -> 17 keys, not 16
+
+
+def test_value_after_refuses_a_streamed_row(db, world):
+    """A streamed D/ST or K row is priced on ``model_now``'s ONE-WEEK horizon,
+    which the board does not expose — so pricing one season-long would report a
+    one-week move over the whole window. It raises rather than guess."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    streamed = [s for s in board.swaps
+                if s.horizon_weeks == 1 and s.drop_position in marginal.STREAMED_POSITIONS]
+    assert streamed, "the fixture must produce a streamed swap"
+    with pytest.raises(ValueError, match="season-long only"):
+        board.value_after([streamed[0]])
+
+
+def test_value_after_is_memoised_and_order_insensitive(db, world):
+    """The chain calls ``value_after(accepted)`` once per step and again for the
+    next step's baseline, so a miss would double the cost of the whole search; and
+    the applied set is keyed as a SET, so the same chain in a different order costs
+    nothing extra and returns a bit-identical number."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    seasonal = [s for s in board.swaps
+                if s.drop_position not in marginal.STREAMED_POSITIONS]
+    a, b = None, None
+    seen_drops = set()
+    for s in seasonal:
+        key = board._swaps.keys_of(s)[0]
+        if key in seen_drops:
+            continue
+        seen_drops.add(key)
+        if a is None:
+            a = s
+        elif b is None and s.add != a.add:
+            b = s
+            break
+    assert a is not None and b is not None
+    before = board.value_after_evaluations
+    first = board.value_after([a, b])
+    assert board.value_after_evaluations == before + 1
+    assert board.value_after([b, a]) == first          # same set, memo hit
+    assert board.value_after_evaluations == before + 1
+
+
+def test_roster_position_counts_come_from_the_base_roster(db, world):
+    """The chain re-checks POSITION_CAPS across several swaps at once, which needs
+    the counts the per-swap search was checked against."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    counts = board.roster_position_counts
+    assert sum(counts.values()) == len(board.roster_keys)
+    assert counts["DST"] == 1 and counts["K"] == 1     # the IR row is excluded
+
+
+def test_value_after_hands_the_model_a_CANONICALLY_SORTED_key_list(db, world):
+    """DETERMINISM. ``value_at_depth`` sums over the keys in the order it is given,
+    and shuffling a 16-key roster moves the sum by ~4.5e-13 — enough to flip an
+    exact-tie comparison in the chain's heap. ``value_after`` therefore sorts, and
+    that sort is load-bearing rather than cosmetic.
+
+    Pinned on the ARGUMENT, not on a same-process re-run: two chains built in ONE
+    interpreter iterate a set of the same strings identically, so the in-process
+    determinism test cannot see this at all. Replacing ``sorted(keys)`` with
+    ``list(keys)`` fails here and nowhere else in the suite."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    seasonal = [s for s in board.swaps
+                if s.drop_position not in marginal.STREAMED_POSITIONS]
+    assert seasonal
+
+    ctx = board._swaps._ctx
+    model_full = ctx[1]
+    seen: list[list[str]] = []
+    real = model_full.value_at_depth
+
+    def spy(keys, depth):
+        seen.append(list(keys))
+        return real(keys, depth)
+
+    object.__setattr__(model_full, "value_at_depth", spy) if hasattr(
+        model_full, "__dataclass_fields__") else setattr(
+        model_full, "value_at_depth", spy)
+    try:
+        board._swaps._value_cache.clear()
+        board.value_after()
+        board.value_after(seasonal[:1])
+    finally:
+        try:
+            object.__setattr__(model_full, "value_at_depth", real)
+        except Exception:                       # noqa: BLE001 - plain attribute
+            model_full.value_at_depth = real
+
+    assert seen, "value_after did not reach the model"
+    for keys in seen:
+        assert keys == sorted(keys), keys

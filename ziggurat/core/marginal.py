@@ -522,6 +522,64 @@ class MarginalBoard:
         return self._swaps.resolve()
 
     @property
+    def swap_keys(self) -> tuple[tuple[str, str], ...]:
+        """``(drop_key, add_key)`` per row of ``swaps``, INDEX-ALIGNED (item 3.4b).
+
+        The model keys are what makes a swap re-priceable against a roster other
+        than today's — item 3.4b's sequential claim chain needs exactly that. They
+        used to die inside ``_SwapMatrix``: ``_reprice_swaps`` drops non-positive
+        rows and re-sorts, so nothing downstream could recover which model entries
+        a resolved row was priced from. Deliberately NOT a dict keyed on
+        ``SwapRow`` (a frozen, hashable dataclass — two equal rows would collide)
+        and deliberately NOT re-derived from ``add_espn_id``/``drop_espn_id`` (the
+        entry key falls back to a gsis id or a display name when a player has no
+        ESPN id, so id-reconstruction is right today and not a contract).
+        """
+        return self._swaps.resolve_keys()
+
+    @property
+    def roster_keys(self) -> tuple[str, ...]:
+        """The base roster's model keys, canonically sorted (item 3.4b)."""
+        return self._swaps.base_keys()
+
+    @property
+    def roster_position_counts(self) -> Mapping[str, int]:
+        """position -> how many of them the BASE roster holds (item 3.4b).
+
+        The chain applies several swaps at once, and ``POSITION_CAPS`` was only
+        ever checked per-swap against this base — so the caller needs the base to
+        re-check the cap across a chain.
+        """
+        return self._swaps.base_position_counts()
+
+    def value_after(
+        self,
+        swaps: Sequence[SwapRow] = (),
+        *,
+        pure_adds: Sequence[SwapRow] = (),
+    ) -> float:
+        """``V`` of this roster with ``swaps`` applied and ``pure_adds`` inserted
+        (item 3.4b), at the board's own reporting depth.
+
+        Each swap removes its drop's model key and inserts its add's; a pure add
+        inserts without removing (an open active slot). Memoised on the applied
+        identities, so the chain's telescoping
+        ``value_after(acc_k) - value_after(acc_{k-1})`` costs ONE evaluation per
+        step rather than two.
+
+        SEASON-LONG ONLY. A streamed (D/ST or K) drop is priced on ``model_now``'s
+        one-week horizon, which the board does not expose, so handing one here
+        RAISES rather than silently pricing a one-week move over the whole window.
+        """
+        return self._swaps.value_after(swaps, pure_adds=pure_adds)
+
+    @property
+    def value_after_evaluations(self) -> int:
+        """How many DISTINCT roster valuations ``value_after`` has actually run
+        (memo hits are free). The cost fence a caller can assert on."""
+        return self._swaps.evaluations
+
+    @property
     def ranked(self) -> tuple[MarginalRow, ...]:
         return tuple(r for r in self.rows if not r.unvalued)
 
@@ -531,21 +589,119 @@ class MarginalBoard:
 
 
 class _SwapMatrix:
-    """The swap matrix's un-re-priced state plus everything needed to finish it."""
+    """The swap matrix's un-re-priced state plus everything needed to finish it.
+
+    Also the home of item 3.4b's ``value_after`` memo: ``MarginalBoard`` is a
+    FROZEN dataclass, so a cache cannot be assigned on it.
+    """
 
     def __init__(self, rows, keys, *, entries, model_full, model_now, depth):
         self._rows, self._keys = rows, keys
         self._ctx = (entries, model_full, model_now, depth)
         self._resolved: tuple[SwapRow, ...] | None = None
+        self._resolved_keys: tuple[tuple[str, str], ...] | None = None
+        # Two lookups, deliberately: identity first (exact), row-equality second
+        # (survives a caller holding an equal-but-not-identical row). A row whose
+        # equality bucket holds TWO different key pairs maps to None — refuse
+        # rather than guess which model entries the caller meant.
+        self._keys_by_id: dict[int, tuple[str, str]] = {}
+        self._keys_by_row: dict[SwapRow, tuple[str, str] | None] = {}
+        self._value_cache: dict[tuple, float] = {}
+        self.evaluations = 0
 
     def resolve(self) -> tuple[SwapRow, ...]:
         if self._resolved is None:
             entries, model_full, model_now, depth = self._ctx
-            self._resolved = tuple(_reprice_swaps(
+            pairs = _reprice_swaps(
                 self._rows, self._keys, entries=entries, model_full=model_full,
                 model_now=model_now, depth=depth,
-            ))
+            )
+            self._resolved = tuple(row for row, _k in pairs)
+            self._resolved_keys = tuple(k for _row, k in pairs)
+            for row, ks in zip(self._resolved, self._resolved_keys, strict=True):
+                self._keys_by_id[id(row)] = ks
+                if self._keys_by_row.setdefault(row, ks) != ks:
+                    self._keys_by_row[row] = None
         return self._resolved
+
+    def resolve_keys(self) -> tuple[tuple[str, str], ...]:
+        self.resolve()
+        return self._resolved_keys or ()
+
+    def keys_of(self, row: SwapRow) -> tuple[str, str]:
+        self.resolve()
+        ks = self._keys_by_id.get(id(row))
+        if ks is not None:
+            return ks
+        if row not in self._keys_by_row:
+            raise KeyError(
+                "this SwapRow did not come out of this board's swap matrix, so its "
+                "model keys are unknown — re-price it from board.swaps."
+            )
+        ks = self._keys_by_row[row]
+        if ks is None:
+            raise KeyError(
+                "two identical SwapRows in this matrix were priced from different "
+                "model entries — refusing to guess which one was meant."
+            )
+        return ks
+
+    def base_keys(self) -> tuple[str, ...]:
+        entries = self._ctx[0]
+        return tuple(sorted(k for k, e in entries.items() if e.on_roster))
+
+    def base_position_counts(self) -> Mapping[str, int]:
+        entries = self._ctx[0]
+        counts: dict[str, int] = {}
+        for k in self.base_keys():
+            pos = entries[k].position
+            counts[pos] = counts.get(pos, 0) + 1
+        return MappingProxyType(counts)
+
+    def value_after(self, swaps=(), *, pure_adds=()) -> float:
+        entries, model_full, _model_now, depth = self._ctx
+        applied: list[tuple[str, str]] = []
+        for row in swaps:
+            drop_key, add_key = self.keys_of(row)
+            if entries[drop_key].position in STREAMED_POSITIONS:
+                raise ValueError(
+                    f"value_after is season-long only, but '{row.drop}' is a streamed "
+                    f"{entries[drop_key].position} priced on a ONE-WEEK horizon — "
+                    f"mixing the two would report a one-week move over the whole window."
+                )
+            applied.append((drop_key, add_key))
+        added = [self.keys_of(row)[1] for row in pure_adds]
+
+        cache_key = (frozenset(applied), frozenset(added))
+        hit = self._value_cache.get(cache_key)
+        if hit is not None:
+            return hit
+
+        base = self.base_keys()
+        keys = set(base)
+        for drop_key, add_key in applied:
+            keys.discard(drop_key)
+            keys.add(add_key)
+        keys.update(added)
+        # ``fill_lineup`` buckets keys by position and does NOT dedupe, so one
+        # repeated key seats the same player in two slots (measured +29.99 pts on a
+        # live 16-man roster). A chain that re-added a rostered body would inflate
+        # the joint gain silently and in the operator's favour — so the size
+        # invariant is checked, not assumed.
+        expected = len(base) + len(added)
+        if len(keys) != expected:
+            raise ValueError(
+                f"value_after: applying these moves leaves {len(keys)} roster keys, "
+                f"expected {expected} — a duplicated or off-roster key would be seated "
+                f"twice. Refusing to price it."
+            )
+        # Canonically sorted: shuffling a 16-key roster moves the sum by ~4.5e-13
+        # (float summation order), which is enough to flip an exact-tie comparison
+        # between two runs of the same chain.
+        value = model_full.value_at_depth(sorted(keys), max(int(depth), 1))
+        self.evaluations += 1
+        self._value_cache[cache_key] = value
+        return value
 
 
 # ------------------------------------------------------------- week resolution
@@ -2120,9 +2276,20 @@ def _unpriceable_reasons(d: _Entry, window: Sequence[int]) -> tuple[str, ...]:
 def _reprice_swaps(swaps, keys, *, entries, model_full, model_now, depth):
     """Re-price the RETAINED swap rows on the REPORTING estimator, so the add side
     and the drop side quote the same number for the same move — splitting them is
-    how the add board and the drop board start disagreeing."""
-    if depth <= 1 or not swaps:
-        return swaps
+    how the add board and the drop board start disagreeing.
+
+    Returns ``(row, (drop_key, add_key))`` pairs on BOTH branches (item 3.4b): the
+    ``depth <= 1`` passthrough preserves alignment too, because the chain reads the
+    keys on every path and not just the default one. ``remaining`` is deliberately
+    NOT handed on — it is exactly ``roster_keys - {drop_key}`` and it is the
+    PRE-CHAIN roster, so carrying it invites pricing a later link against a roster
+    that no longer exists.
+    """
+    if not swaps:
+        return []
+    if depth <= 1:
+        return [(row, (drop_key, add_key))
+                for row, (drop_key, add_key, _rem) in zip(swaps, keys, strict=True)]
     roster = [k for k, e in entries.items() if e.on_roster]
     deep_full = model_full.value_at_depth(roster, depth)
     deep_now = model_now.value_at_depth(roster, depth)
@@ -2136,12 +2303,12 @@ def _reprice_swaps(swaps, keys, *, entries, model_full, model_now, depth):
             # The cheap search estimator thought this move helped; the unbiased one
             # says it does not. A swap matrix is a list of moves worth making.
             continue
-        out.append(replace(
+        out.append((replace(
             row, gain=gain,
             reasons=(row.reasons[0].replace(
                 f"{row.gain:+.1f} house pts", f"{gain:+.1f} house pts"),) + row.reasons[1:],
-        ))
-    out.sort(key=lambda s: (-s.gain, s.add, s.drop))
+        ), (drop_key, add_key)))
+    out.sort(key=lambda pair: (-pair[0].gain, pair[0].add, pair[0].drop))
     return out
 
 

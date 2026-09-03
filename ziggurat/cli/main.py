@@ -298,7 +298,10 @@ def waivers(
     last_week: Annotated[int, typer.Option("--last-week",
         help="Final week priced (applies whether or not --from-week is given).")] = 17,
     claim_budget: Annotated[int, typer.Option("--claim-budget",
-        help="Max claims/grabs in the action shortlist (extra claims are free).")] = 3,
+        min=0,
+        help="Ceiling on the claim CHAIN (claims + grabs together, and on the "
+             "separate streaming lane); the chain usually ends earlier, on its "
+             "own. 0 is not 'unlimited' here — it prices nothing.")] = 3,
     reasons: Annotated[bool, typer.Option("--reasons", help="Print every claim/drop's reasons.")] = False,
     pool_limit: Annotated[int, typer.Option("--pool-limit",
         help="Free agents scanned per position (0 = the whole pool).")] = DEFAULT_POOL_LIMIT,

@@ -328,9 +328,12 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   it calls `marginal.build_board()` ONCE (drop board + add/drop swap matrix, adds
   already scoped to the FA pool and carrying WAIVERS-vs-FREEAGENT status), joins
   `candidates.build_candidates` on `espn_id` for opportunity context, and reads the
-  roster + FA pool + `waiver_rank` from `league/state` — re-pricing nothing. No
-  scoring (Rule 2), no migration (`schema_version` 7). The **one new piece is the
-  roster-legality precheck**: it recounts IR itself (the shared seater strips all IR
+  roster + FA pool + `waiver_rank` from `league/state` — re-pricing nothing.
+  **Amended 2026-09-02 by item 3.4b below: the claim list IS now re-priced
+  sequentially (`MarginalBoard.value_after`, 45 valuations on the live board), and
+  the chain is a second load-bearing piece.** No
+  scoring (Rule 2), no migration (`schema_version` 7). The **one new piece (as
+  built) is the roster-legality precheck**: it recounts IR itself (the shared seater strips all IR
   rows, hiding the exact 17>16 oversize), reslots an ineligible IR occupant IR→BE
   before pricing the forced drop, and runs independently of `build_board` (which
   raises at `scoring_period==0`) so refuse-and-propose never depends on pricing.
@@ -362,6 +365,112 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   non-empty, the legal render constrained). Suite green (**1305 passed**; +27).
   Details: `IMPLEMENTATION_PLAN.md` 3.4 + gitignored
   `intel/research/waiver-3.4-design.md`.
+
+- **3.4b sequential (chain) claim pricing — built & tested 2026-09-02, the first
+  in-season defect the cadence itself caught.** Every `SwapRow.gain` prices its
+  move as if it were the ONLY one you make, so ranking them and printing the top k
+  quoted each claim against a roster that stops existing the moment the claim above
+  it wins — and Tuesday step 4 said "queue every positive-marginal claim shown".
+  **Measured 2026-09-01: three adds at +5.55 / +5.25 / +2.21 each ALONE, all three
+  won, JOINT gain +1.22; on 2026-09-02 the same tool recommended the exact REVERSE
+  of all three off byte-identical projections** (verified across pulls). Nothing was
+  wrong about a single swap; the list was wrong as a LIST, and the tool would have
+  walked that flat ridge one reversal a day. Fixed by pricing the season-long list
+  SEQUENTIALLY: a lazy greedy (CELF) at the reporting depth over the existing swap
+  matrix, where claim k is priced against the roster after claims 1..k−1 have won
+  and the chain STOPS at the first non-positive conditional gain. `ClaimRec.gain`
+  is now that conditional number, `ClaimRec.gain_alone` the old standalone one
+  (printed beside it — it is what the claim is worth if the lines above LOSE), and
+  the plan carries `chain_gain` (the joint total, measured as
+  `value_after(all) − base`, equal to the sum of the printed gains by construction
+  and tested at 1e-9) plus `chain_rejected` (positive alone, measured ≤ 0 after —
+  the refusals, shown in the DEFAULT view). New `MarginalBoard.value_after` /
+  `.swap_keys` / `.roster_keys` / `.roster_position_counts` are the seam; the memo
+  lives on `_SwapMatrix` because the board is frozen. `claim_budget` became a TOTAL
+  cap over claims + grabs; the streamed K/DST lane is untouched and outside the
+  chain (`value_after` RAISES on a one-week row rather than pricing it over the
+  season). **Two smaller defects fixed in passing:** an open-slot PURE ADD quoted
+  the paired swap's gain, which understates it (now priced as roster + add), and
+  `POSITION_CAPS` was only ever checked per-swap against the base roster, so a
+  chain could breach a cap nothing re-checked. **Live acceptance 2026-09-02**
+  (`ziggurat waivers --reasons --claim-budget 10 --as-of 2026-09-02`, **23.9 s**
+  against a 21.8 s pre-change baseline, ~2 s for 48 valuations): chain of TWO —
+  Josh Downs ← Keaton Mitchell +3.3 (rank 1), Jordan Love ← Chris Rodriguez Jr.
+  **+1.0 conditional / +2.2 alone** (rank 2) — joint **+4.3**, with Jalen Coker ←
+  Woody Marks refused at **+1.7 alone / −5.6 after**; streaming unchanged (Rams →
+  Chargers D/ST +1.1). The pre-change tool printed three independent claims
+  (+3.3 / +2.6 / +1.2) whose joint value is **−1.2**. Suite green (**2,665
+  passed**; +18). **Two disclosures the fix ships rather than hides:** the lazy
+  re-evaluation is exact under diminishing returns and a HEURISTIC for complements
+  (a starter and his own handcuff can be ranked lower than they deserve — never
+  missed), and a chain can end because the matrix ran out of legal drops rather
+  than for any economic reason (measured live: 179 swap rows, **three** distinct
+  drop identities), so the plan states WHICH ended it and never reports bookkeeping
+  as a conclusion. **Two things changed MEANING, not just behaviour, and they are
+  already in circulation:** a `gain` in a journal entry written before 2026-09-02 is
+  a standalone number and a later one is conditional; and the Wednesday phone
+  teaser's "N claim(s)" (`len(plan.claims)`, unchanged code) now counts a chain, so
+  a shorter number there is the fix working, not a broken briefing. **Standing
+  lesson: a list of individually-correct
+  recommendations is not a correct list — if the operator is told to act on all of
+  them, the tool owes them the JOINT number.**
+
+- **3.4b audit-fix round — done 2026-09-02, same day.** A multi-lens adversarial
+  audit returned 24 confirmed findings on the shipped chain; all are fixed and
+  the shipped RECOMMENDATIONS are unchanged (same two claims, same +4.3 joint,
+  same five streaming rows; three refusals still, though two of them moved —
+  the two QBs the build had refused on value now sit in the new BLOCKED BY A
+  POSITION LIMIT bucket, and two more Woody Marks swaps took their place) —
+  every fix is either a disclosure the build swallowed or a search fence it
+  lacked. **The headline is
+  that the module deleted its own measurement:** a leftover the rejection pass
+  re-priced at a POSITIVE conditional gain was `continue`d — absent from the
+  claims, from `chain_rejected` AND from `chain_not_repriced` — while the plan
+  printed "a SHORT list is the answer here, not a truncation" and "It cannot
+  make one disappear". Both sentences were false about a number the module was
+  holding, and the pre-3.4b build had shown such a row. Now `chain_under_ranked`
+  reports it, the two sentences are gone/conditional, and **every leftover lands
+  in exactly one disclosed bucket** whose counts must close (asserted).
+  **Second: the chain's ORDER was destroyed by its own renderer.** The two
+  sections are split by ACTION (queue overnight vs click now), so a chain that
+  interleaves a free-agent grab printed rank 1, 3, 2 while the notes said "in the
+  order printed ... Queue them in that order" and a reason said "the 2 claim(s)
+  listed above" with one above it — and `chain_rank` was rendered nowhere, so the
+  order was unrecoverable. Every chained line now carries `#K`, the notes name
+  number order across both sections, and the grab-timing asymmetry is stated.
+  **Third: the cost fence starved the half it was protecting** — phase A
+  (open slots) is exhaustive and, measured, burned 194 of 200 valuations at two
+  open slots, so the lazy swap lane never ran and the plan reported an economic
+  stop. Phase A now has its own reserve plus a disclosed top-K scan, and a
+  phase-A cost stop is never terminal; its `g <= 0` shortcut also no longer
+  settles the whole search when a same-position swap at a capped position was
+  filtered out of its own candidate set. Also fixed: `--claim-budget 0` claimed
+  the pool held nothing worth having without pricing a thing; a streaming-only
+  plan printed "these 0 add(s) are priced as a CHAIN"; the "not re-priced" note
+  claimed the top 3 were priced when the ceiling meant NONE were, and disclaimed
+  as "unmeasured" 10 rows the chain had already measured; the exhaustion note
+  blamed a spent player for a POSITION_CAPS refusal; a cap-blocked row got an
+  economic reason; a pure add's first bullet still quoted the paired swap and
+  named a phantom drop; a chained claim's first bullet stated the standalone gain
+  above its own qualifier; only the FIRST refusal was ever rendered and
+  `ChainRejection.reason` was dead code; the refusal example was the one
+  unlabelled `<-` on the page (the shipped LLM summarizer inverted it) and blamed
+  the ADD for a loss the shared DROP caused; the drop board is pre-chain and said
+  so nowhere; the joint line read "over 1 wks"; and `position_counts` defaulted to
+  `None`, which silently disabled the cross-chain cap guard. **Four shipped
+  mechanisms had no test at all** (the not-re-priced disclosure, the cross-chain
+  caps, the eval ceiling and its degrade path, and `value_after`'s canonical key
+  sort) — each survived deletion against the whole suite; all four are now pinned,
+  the key-sort one mutation-verified. Re-measured live: **24.2 s**, same chain,
+  same joint, same streaming lane (the bullet above says "48 valuations"; the
+  audit's own instrumentation of the live board reads **45**). A final
+  operator-read polish put the ACTION first on the page (claims and grabs print
+  before the refused / capped rows, pinned by test) and spelled a position-2
+  line "if #1 lands" instead of the range-of-one "if #1-#1 land". Suite green
+  (**2,684 passed, 4 skipped**).
+  **Standing lesson this round paid for: a search that MEASURES something and then
+  drops it is worse than one that never looked — it makes the tool's own stop
+  sentence a lie, and the sentence is the part a novice cannot check.**
 
 - **3.5 lineup support & streaming — built, audited & fixed 2026-07-26.** Two new
   **permanent** core modules, pure composition over existing as-of accessors (no
@@ -957,9 +1066,16 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 1. Preflight. If today's league sync hasn't landed, run
    `.venv/bin/ziggurat league sync` — Tuesday reads today's rosters.
 2. `.venv/bin/ziggurat waivers --reasons --claim-budget 10` — the deeper
-   budget is deliberate: the cap TRUNCATES each claim list and nothing prints
-   past it, so Tuesday (when claims are free) never runs at the quick-scan
-   default of 3. The roster-legality precheck runs FIRST and is the point:
+   budget is deliberate: `--claim-budget` is the CEILING on the whole claim
+   chain, and the quick-scan default of 3 can cut it off while the last line
+   is still clearly positive. Since item 3.4b the cap is rarely what ends the
+   list (the tool says which ended it), but Tuesday is when claims are free,
+   so run it deep. The cap ALSO slices how many STREAMING rows print — that
+   lane sits outside the chain and is still a hard slice (the tool says how
+   many it hid); those rows are ranked alternatives for one slot, and
+   `ziggurat stream` is where that decision belongs. (0 is not "unlimited"
+   here — at 0 the tool prices nothing and says so.) The roster-legality
+   precheck runs FIRST and is the point:
    ESPN blocks ALL transactions while a roster is illegal, and Tuesday's
    league-wide status reset is exactly when an IR-slot occupant flips
    Out → Questionable and breaks legality. On a refusal: relay the proposed
@@ -968,18 +1084,52 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 3. Cross-reference `.venv/bin/ziggurat candidates --reasons` for the breakout
    context behind each add. Where the two disagree, surface the disagreement —
    never smooth it over.
-4. Recommend the final claim list with drops. Claims are free: queue every
-   positive-marginal claim shown — and if the LAST claim listed is still
-   clearly positive, re-run with a deeper `--claim-budget` (the list may be
-   truncated, not exhausted). The operator submits in the app before the
-   overnight batch.
+4. Recommend the claim list **as a chain, in the NUMBERED order printed**
+   (item 3.4b, 2026-09-02). Every chained line carries a `#K`; the numbers run
+   across BOTH the WAIVER CLAIMS and FREE-AGENT GRABS sections, which are split
+   by how you ACT on them (queue overnight vs click now), so `#2` can be
+   printed under `#3` — **act in number order, not page order**. Each line's
+   gain assumes every lower-numbered line LANDED; the "(+X.X alone)" number
+   beside it is what it is worth if those do not. A FREE-AGENT GRAB is clicked
+   NOW while the claims clear overnight, so a grab lands before every claim
+   whatever its number.
+   **Read the "IF EVERY CLAIM AND GRAB LISTED WINS" total to the operator —
+   that is what the plan is worth.** The printed line gains ADD UP to it by
+   construction (tested at 1e-9); it is the "(+X.X alone)" numbers that do NOT,
+   and summing those is the pre-3.4b mistake this item removed.
+   **Read the tool's stated reason for where the list ends — do not assume it.**
+   "the next-best add is worth nothing or less once these have won" is a
+   verdict: a SHORT list is the answer, not a truncation, and queueing past it
+   is how you end up reversing your own moves the next morning. "the priced
+   add/drop pairs ran out", "every remaining add would put you over this
+   board's limit for its position" and "pricing hit this module's ceiling" are
+   BOOKKEEPING — a further claim was never measured, so journal that rather
+   than report a short list as a verdict. Re-running deeper helps ONLY in the
+   one case the plan names the budget.
+   The tool names every refusal it measured, in the same `add X (POS) <- drop
+   Y (POS)` form the claim lines use, plus counts for the ones it measured but
+   did not list and the ones it never priced at all ("unmeasured, not
+   rejected"). **A refusal is a SUBSTITUTE, never an addition**: ESPN processes
+   every claim you queue in the same overnight batch and can grant all of them
+   (measured 2026-09-01 — three queued, three won, joint +1.2 against +5.5
+   alone). If you genuinely expect to lose a numbered move, queue the refusal
+   INSTEAD OF that move — its "alone" number is what it is then worth — never
+   alongside it. A row under "POSITIVE AFTER THE CHAIN" is the opposite case:
+   the search reached it too late to rank, and it is worth queueing AFTER the
+   list. The operator submits in the app before the overnight batch.
 5. Journal each claim: add, drop, the tool's stated reasons verbatim, and what
    would make it wrong. A no-claim Tuesday is journaled as the decision not to
    claim.
 
 ### Wednesday — post-waiver scan
 1. The 06:00 PT briefing (timer) is on the phone; the full text is in
-   `intel/weekly/briefings/`. Read it.
+   `intel/weekly/briefings/`. Read it. It composes at a **fixed
+   `claim_budget=3` with no flag of its own**, and since item 3.4b that 3 is a
+   TOTAL over claims + grabs (it used to be 3 of each), so its action list can
+   be shorter than the pre-3.4b one for two different reasons — the chain
+   ended, or the budget did. The briefing says which; if it says the budget,
+   re-run `.venv/bin/ziggurat waivers --claim-budget 10` rather than acting on
+   the short list.
 2. `.venv/bin/ziggurat league sync`, then compare the roster against Tuesday's
    journal: which claims won, which lost.
 3. `.venv/bin/ziggurat waivers --reasons` again — the pool has re-formed, and a

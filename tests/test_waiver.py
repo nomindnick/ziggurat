@@ -14,11 +14,13 @@ proposes the fix (the done-when).
 """
 
 import re
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 
 from ziggurat.core import waiver
+from ziggurat.core.marginal import SwapRow
 from ziggurat.core.valuation import DEFAULT_ROSTER
 from ziggurat.core.waiver import (
     IR_ELIGIBLE_LABEL,
@@ -695,14 +697,19 @@ def test_a_streamed_row_reads_this_week_in_the_format(db, marginal_world):
 
 
 def test_the_legal_path_claim_line_has_the_expected_shape(db, marginal_world):
-    """F15: a legal-path claim line reads 'add <name> (<pos>)  <-  drop <name> ...
-    +N.N pts / <horizon>' in that order."""
+    """F15: a legal-path claim line reads '#K add <name> (<pos>)  <-  drop <name> ...
+    +N.N pts / <horizon>' in that order.
+
+    The '#K' is item 3.4b's audit fix: the two sections are split by ACTION (queue
+    overnight vs click now), so the chain runs across them and the PRINTED order is
+    not the chain order whenever a grab interleaves. Without the number on the line
+    the operator cannot recover it."""
     _world(marginal_world, injury="OUT")
     plan = _plan(db)
     rec = next(iter(list(plan.claims) + list(plan.fcfs_grabs)), None)
     assert rec is not None and rec.drop is not None
     line = waiver._claim_line(rec)
-    assert line.strip().startswith(f"add {rec.add} ({rec.add_position})")
+    assert line.strip().startswith(f"#{rec.chain_rank} add {rec.add} ({rec.add_position})")
     assert f"<-  drop {rec.drop}" in line
     assert f"{rec.gain:+.1f} pts" in line
     assert ("this week" if rec.horizon == 1 else f"{rec.horizon} wks") in line
@@ -783,3 +790,871 @@ def test_a_completed_week_opportunity_signal_lands_on_the_matching_claim(db, mar
     assert match, "the breakout RB should surface as a positive add"
     assert match[0].add_espn_id == str(rb_espn)
     assert any("opportunity signal [USAGE_BREAKOUT]" in r for r in match[0].reasons)
+
+
+
+# ==================== Cluster F — item 3.4b: claims are a CHAIN ===============
+#
+# The defect these pin: every SwapRow.gain prices its move as if it were the ONLY
+# one you make, so the pre-3.4b "rank them, print the top k" quoted each claim
+# against a roster that stops existing the moment the claim above it wins.
+# Measured live 2026-09-01: three adds worth +5.55 / +5.25 / +2.21 each ALONE were
+# worth +1.22 together, and the next morning the same module recommended reversing
+# all three off unchanged projections. Every player below is invented (Rule 5).
+#
+# The fixture reproduces the live SHAPE, not the live numbers: a deep, cheap bench
+# (six running backs, four of them buried) whose bodies are the cheapest drops, and
+# a pool of wide receivers who each look like a large upgrade ALONE because they
+# would seat the single FLEX slot — which only one of them can ever do.
+
+
+_CHAIN_ROSTER = [
+    {"name": "Alpha Thrower", "pos": "QB", "team": "TEN", "pts": 22.0, "bye": 6,
+     "on_team": TEAM},
+    {"name": "Bravo Thrower", "pos": "QB", "team": "NO", "pts": 12.0, "bye": 8,
+     "on_team": TEAM},
+    # Two starting RBs and FOUR buried ones: the buried bodies are the cheapest
+    # drops on the board, which is what lets a chain eat into real depth.
+    {"name": "Charlie Rusher", "pos": "RB", "team": "ATL", "pts": 18.0, "bye": 11,
+     "on_team": TEAM},
+    {"name": "Delta Rusher", "pos": "RB", "team": "BUF", "pts": 16.0, "bye": 7,
+     "on_team": TEAM},
+    {"name": "Echo Rusher", "pos": "RB", "team": "CHI", "pts": 10.0, "bye": 9,
+     "on_team": TEAM},
+    {"name": "Foxtrot Rusher", "pos": "RB", "team": "GB", "pts": 9.0, "bye": 10,
+     "on_team": TEAM},
+    {"name": "Golf Rusher", "pos": "RB", "team": "SF", "pts": 8.0, "bye": 12,
+     "on_team": TEAM},
+    {"name": "Hotel Rusher", "pos": "RB", "team": "SEA", "pts": 7.0, "bye": 5,
+     "on_team": TEAM},
+    {"name": "India Catcher", "pos": "WR", "team": "DAL", "pts": 17.0, "bye": 8,
+     "on_team": TEAM},
+    {"name": "Juliett Catcher", "pos": "WR", "team": "DEN", "pts": 15.0, "bye": 9,
+     "on_team": TEAM},
+    {"name": "Kilo Catcher", "pos": "WR", "team": "HOU", "pts": 14.0, "bye": 12,
+     "on_team": TEAM},
+    {"name": "Papa Catcher", "pos": "WR", "team": "LV", "pts": 13.0, "bye": 7,
+     "on_team": TEAM},
+    {"name": "Lima Endzone", "pos": "TE", "team": "IND", "pts": 11.0, "bye": 13,
+     "on_team": TEAM},
+    {"name": "Mike Endzone", "pos": "TE", "team": "MIN", "pts": 10.0, "bye": 6,
+     "on_team": TEAM},
+    {"name": "November Boot", "pos": "K", "team": "KC", "pts": 8.0, "bye": 14,
+     "on_team": TEAM},
+    {"name": "Oscar D/ST", "pos": "D/ST", "team": "MIA", "pts": 7.0, "bye": 5,
+     "on_team": TEAM, "weeks": _ODD},
+]
+
+# Three receivers, each positive ALONE. Only one FLEX slot exists, so the second is
+# worth far less once the first has won and the third is worth LESS THAN NOTHING.
+_CHAIN_POOL = [
+    {"name": "Quebec Catcher", "pos": "WR", "team": "NYJ", "pts": 20.0, "bye": 11,
+     "status": "WAIVERS"},
+    {"name": "Romeo Catcher", "pos": "WR", "team": "PIT", "pts": 19.0, "bye": 10,
+     "status": "WAIVERS"},
+    {"name": "Sierra Catcher", "pos": "WR", "team": "NYG", "pts": 14.0, "bye": 12,
+     "status": "WAIVERS"},
+]
+
+
+def _chain_world(marginal_world, roster=None, pool=None):
+    marginal_world(list(_CHAIN_ROSTER if roster is None else roster)
+                   + list(_CHAIN_POOL if pool is None else pool), retrieved=PULL)
+
+
+def _chain_plan(db, **kw):
+    kw.setdefault("claim_budget", 10)
+    return _plan(db, **kw)
+
+
+def _all_recs(plan):
+    return list(plan.claims) + list(plan.fcfs_grabs)
+
+
+def _chain_board(db, roster_specs=None):
+    """The raw board behind the chain fixture — the pre-chain standalone numbers."""
+    from ziggurat.core.marginal import build_board
+    roster = [dict(r) for r in waiver.league_state.get_player_state(
+        db, as_of=PULL, season=SEASON, on_team_id=TEAM)]
+    pool = [dict(r) for r in waiver.league_state.get_free_agents(
+        db, as_of=PULL, season=SEASON)]
+    return build_board(db, as_of=PULL, season=SEASON, roster=roster, pool=pool,
+                       weeks=WEEKS, pool_limit=None)
+
+
+def test_the_claim_list_is_priced_as_a_chain_not_as_independent_moves(db, marginal_world):
+    """D1 REGRESSION. The printed list no longer over-promises. The joint gain is
+    strictly LESS than the sum of the standalone gains the module used to print,
+    a later claim is worth measurably less in the chain than alone, and an add
+    that is positive ALONE is REFUSED with a measured negative 'after' number —
+    the flat-ridge reversal that had the tool recommending the opposite of
+    yesterday's advice off unchanged projections."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    recs = _all_recs(plan)
+    assert len(recs) == 2, [(r.add, r.drop) for r in recs]
+
+    # ranks are 1..n across claims + grabs, no gaps, no duplicates
+    assert sorted(r.chain_rank for r in recs) == [1, 2]
+
+    # what the OLD list implicitly promised, vs what the chain actually pays
+    promised = sum(r.gain_alone for r in recs)
+    assert plan.chain_gain < promised - 5.0, (plan.chain_gain, promised)
+    later = next(r for r in recs if r.chain_rank == 2)
+    assert later.gain < later.gain_alone - 5.0, (later.gain, later.gain_alone)
+
+    # the refusal: positive alone, measured <= 0 once the chain above has won
+    assert plan.chain_rejected, "a positive-alone add must be refused here"
+    worst = plan.chain_rejected[0]
+    assert worst.add == "Sierra Catcher"
+    assert worst.gain_alone > 1.0 > 0.0 > worst.gain_after
+    assert plan.chain_stop == waiver.STOP_NONPOSITIVE
+    # and the plan SAYS a short list is the answer, not a truncation
+    assert any("SHORT list is the answer" in n for n in plan.notes)
+
+
+def test_the_joint_gain_equals_the_sum_of_the_conditional_gains(db, marginal_world):
+    """The telescoping identity is the whole design: ``chain_gain`` is measured as
+    value_after(everything) − value_after(nothing) and each printed gain is
+    value_after(k) − value_after(k−1), so the printed numbers must ADD UP to the
+    joint total. Accumulating (``base += g``) is the easy way to make this pass
+    while the numbers drift, so it is asserted at 1e-9."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    recs = _all_recs(plan)
+    assert recs
+    assert plan.chain_gain == pytest.approx(sum(r.gain for r in recs), abs=1e-9)
+
+    # rank 1's conditional gain IS its standalone gain, and both equal the board's
+    # own re-priced SwapRow gain — the two estimators cannot have drifted apart.
+    first = next(r for r in recs if r.chain_rank == 1)
+    assert first.gain == pytest.approx(first.gain_alone, abs=1e-9)
+    board = _chain_board(db)
+    row = next(s for s in board.swaps if s.add == first.add and s.drop == first.drop)
+    assert first.gain == pytest.approx(row.gain, abs=1e-6)
+    assert board.value_after([row]) - board.value_after() == pytest.approx(
+        row.gain, abs=1e-6)
+
+    # INDEPENDENT recomputation of the joint number from the board itself. Without
+    # this, a chain that accumulated (base += g) instead of re-measuring would pass
+    # the identity above trivially — both sides would be the same running sum.
+    rows = [next(s for s in board.swaps if s.add == r.add and s.drop == r.drop)
+            for r in recs]
+    assert plan.chain_gain == pytest.approx(
+        board.value_after(rows) - board.value_after(), abs=1e-6)
+
+
+def test_the_chain_stops_at_the_first_non_positive_gain(db, marginal_world):
+    """With budget to spare the chain stops on ECONOMICS and says so."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db, claim_budget=10)
+    assert plan.chain_stop == waiver.STOP_NONPOSITIVE
+    assert len(_all_recs(plan)) == 2 < 10          # stopped on its own, not on the cap
+
+
+def test_claim_budget_caps_the_whole_chain_and_says_which(db, marginal_world):
+    """The other stop: a tight budget truncates, and the note says THAT rather than
+    'the next claim is worth nothing'. ``claim_budget`` is now a TOTAL cap over
+    claims + grabs (it used to cap each bucket separately)."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db, claim_budget=1)
+    assert len(_all_recs(plan)) == 1
+    assert len(plan.claims) + len(plan.fcfs_grabs) <= 1
+    assert plan.chain_stop == waiver.STOP_BUDGET
+    assert any("--claim-budget" in n and "NOT because" in n for n in plan.notes)
+
+
+class _FakeBoard:
+    """A board whose ``value_after`` is SUPERMODULAR: B is worth more once A has
+    won. Real lineup objectives are essentially never like this, which is exactly
+    why the complement case needs a constructed one rather than a fixture."""
+
+    def __init__(self, values):
+        self.values = values
+        self.calls = 0
+
+    def value_after(self, swaps=(), *, pure_adds=()):
+        self.calls += 1
+        return self.values[frozenset(s.add for s in tuple(swaps) + tuple(pure_adds))]
+
+
+def _fake_swap(add, gain, drop, *, add_id, drop_id):
+    return SwapRow(
+        add=add, drop=drop, gain=gain, add_position="WR", drop_position="RB",
+        add_status="WAIVERS", add_startable_this_week=True, horizon_weeks=15,
+        reasons=(f"add {add}, drop {drop}",), add_espn_id=add_id, drop_espn_id=drop_id,
+    )
+
+
+def test_a_complementary_add_is_accepted_and_reports_the_HIGHER_number(db):
+    """Lazy re-evaluation is exact under diminishing returns and a HEURISTIC
+    otherwise. A complement — an add worth MORE once another has won — must still
+    be accepted, and must report the conditional (higher) number, not the stale
+    standalone one it was seeded with. Nothing may raise.
+
+    A is worth 10 alone, B is worth 4 alone, and together they are worth 20 — so
+    B's true conditional gain is 10, two and a half times its seed."""
+    a = _fake_swap("A Catcher", 10.0, "Y Rusher", add_id="a", drop_id="y")
+    b = _fake_swap("B Catcher", 4.0, "Z Rusher", add_id="b", drop_id="z")
+    board = _FakeBoard({
+        frozenset(): 0.0,
+        frozenset({"A Catcher"}): 10.0,
+        frozenset({"B Catcher"}): 4.0,
+        frozenset({"A Catcher", "B Catcher"}): 20.0,
+    })
+    chain = waiver._select_claims(
+        [a, b], board=board, claim_budget=10, waiver_rank=None, team_count=None,
+        open_slots=0, candidate_notes={}, dup_names=set(),
+        # A fake board has no roster, so caps-off is a DELIBERATE choice here, not
+        # a forgotten argument: `position_counts` is required precisely so that a
+        # caller cannot disable the cross-chain POSITION_CAPS guard by omission.
+        position_counts={},
+    )
+    recs = list(chain.claims) + list(chain.grabs)
+    assert [(r.chain_rank, r.add) for r in recs] == [(1, "A Catcher"), (2, "B Catcher")]
+    second = recs[1]
+    assert second.gain == pytest.approx(10.0) and second.gain_alone == pytest.approx(4.0)
+    assert second.gain > second.gain_alone
+    assert chain.chain_gain == pytest.approx(20.0)
+    assert chain.chain_gain == pytest.approx(sum(r.gain for r in recs))
+    # the reason states BOTH numbers, so the operator can see the assumption
+    blob = " ".join(second.reasons)
+    assert "+10.0" in blob and "+4.0" in blob
+
+
+def test_distinct_add_and_drop_identities_survive_the_chain(db, marginal_world):
+    """Item 3.4's own pairing invariants are not collateral damage: identity is
+    still the ESPN id, and no player is spent twice across the whole chain."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    recs = _all_recs(plan)
+    assert len(recs) >= 2
+    adds = [r.add_espn_id for r in recs]
+    drops = [r.drop for r in recs if r.drop is not None]
+    assert all(a is not None for a in adds)
+    assert len(set(adds)) == len(adds)
+    assert len(set(drops)) == len(drops)
+
+
+def test_an_open_slot_is_priced_as_a_pure_add_not_as_the_paired_swap(db, marginal_world):
+    """Item 3.4b fixes a number that was quietly wrong: a pure add used to QUOTE the
+    gain of the swap it was found through, which understates it (adding without
+    dropping is never worse than swapping). It is now priced as roster + add."""
+    short = [s for s in _CHAIN_ROSTER if s["name"] != "Hotel Rusher"]     # 15 active
+    _chain_world(marginal_world, roster=short)
+    plan = _chain_plan(db)
+    assert plan.legality.active_count == 15
+    top = _all_recs(plan)[0]
+    assert top.chain_rank == 1 and top.drop is None and top.drop_position is None
+    assert any("pure ADD" in r for r in top.reasons)
+
+    board = _chain_board(db)
+    paired = max(s.gain for s in board.swaps if s.add == top.add)
+    assert top.gain > paired, (top.gain, paired)     # strictly better, not "at least"
+    assert any("that ordering is an assumption" in n for n in plan.notes)
+
+    # AND no phantom drop anywhere in its reasons (item 3.4b audit). The swap
+    # matrix's own lead sentence names the drop the pure add was FOUND through and
+    # quotes that swap's number — a third figure, and an instruction to drop a
+    # player the row's own last bullet says needs no drop. Every rec whose drop is
+    # None must be free of it, and its lead sentence must quote the reported gain.
+    roster_names = {s["name"] for s in short}
+    for rec in _all_recs(plan):
+        if rec.drop is not None:
+            continue
+        for r in rec.reasons:
+            for nm in roster_names:
+                assert nm not in r, (rec.add, nm, r)
+        assert f"{rec.gain:+.1f} house pts" in rec.reasons[0], rec.reasons[0]
+
+
+def test_the_streaming_lane_is_untouched_by_the_chain(db, marginal_world):
+    """FREEZE. The streamed D/ST lane sits OUTSIDE the chain entirely: same rows,
+    same one-week horizon, ``chain_rank`` 0, ``gain_alone == gain``, and a rendered
+    line byte-identical to the pre-3.4b one (no 'if the claims above win' suffix).
+    ``value_after`` cannot price a one-week move against a season-long roster and
+    raises rather than try, so this is a correctness boundary, not cosmetics."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert plan.streaming
+    for rec in plan.streaming:
+        assert rec.chain_rank == 0
+        assert rec.gain_alone == rec.gain
+        assert rec.horizon == 1
+        line = waiver._claim_line(rec)
+        assert "if the claims above win" not in line
+        assert f"{rec.gain:+.1f} pts / this week" in line
+    # ... and the board itself refuses to price one season-long
+    board = _chain_board(db)
+    streamed = [s for s in board.swaps if waiver._is_streamed(s)]
+    assert streamed
+    with pytest.raises(ValueError, match="season-long only"):
+        board.value_after([streamed[0]])
+
+
+def test_the_chain_search_is_lazy_not_a_full_re_evaluation(db, marginal_world):
+    """COST FENCE. The chain must not decay into 'just re-price everything each
+    step': that is len(candidates) x chain_len valuations, measured at 15.2 s on the
+    live board against 2.6 s lazily — enough on its own to bust the item's runtime
+    budget. Counted on the BOARD rather than on ScenarioModel, because resolving
+    ``board.swaps`` itself runs 2 + N valuations BEFORE selection starts, so a
+    global counter would measure re-pricing and call it selection."""
+    _chain_world(marginal_world)
+    board = _chain_board(db)
+    swaps = board.swaps                      # resolve BEFORE counting
+
+    class Counting:
+        def __init__(self, inner):
+            self._inner, self.calls = inner, 0
+
+        def value_after(self, sw=(), *, pure_adds=()):
+            self.calls += 1
+            return self._inner.value_after(sw, pure_adds=pure_adds)
+
+    counter = Counting(board)
+    chain = waiver._select_claims(
+        swaps, board=counter, claim_budget=10, waiver_rank=None, team_count=None,
+        open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts=board.roster_position_counts,
+    )
+    seasonal = [s for s in swaps if not waiver._is_streamed(s)]
+    chain_len = len(chain.claims) + len(chain.grabs)
+    assert chain_len >= 2 and len(seasonal) > chain_len
+    assert counter.calls < len(seasonal) * chain_len, (counter.calls, len(seasonal))
+    # sharper: a NON-lazy greedy re-prices every candidate on its FIRST step alone,
+    # so it cannot come in under len(seasonal) calls. The lazy one does.
+    assert counter.calls < len(seasonal), (counter.calls, len(seasonal))
+    assert counter.calls <= waiver.CHAIN_EVAL_BUDGET
+
+
+def test_the_chain_is_deterministic_across_runs(db, marginal_world):
+    """Same inputs -> the same chain, in the same order, to the last bit. The
+    valuation is order-sensitive at ~1e-13 (float summation order), which is enough
+    to flip an exact tie, so the roster keys are canonically sorted before pricing
+    and the tie ladder is a total order."""
+    _chain_world(marginal_world)
+    a = _chain_plan(db)
+    b = _chain_plan(db)
+
+    def shape(p):
+        return [(r.chain_rank, r.add, r.drop, r.gain, r.gain_alone) for r in _all_recs(p)]
+
+    assert shape(a) == shape(b)
+    assert a.chain_gain == b.chain_gain
+    assert a.chain_stop == b.chain_stop
+    assert [(c.add, c.drop, c.gain_alone, c.gain_after) for c in a.chain_rejected] == \
+           [(c.add, c.drop, c.gain_alone, c.gain_after) for c in b.chain_rejected]
+
+
+def test_the_default_view_shows_the_joint_total_and_both_numbers(db, marginal_world):
+    """RULE 6. The operator reads the DEFAULT view (and so does the Wednesday
+    briefing, which renders exactly this with ``reasons=False``). The joint total,
+    the priced-in-order instruction and the refused reversals all have to be there:
+    a novice who sees two claims each worth '+60' will queue both."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "IF EVERY CLAIM AND GRAB LISTED WINS:" in text
+    assert f"{plan.chain_gain:+.1f} pts over" in text
+    assert "priced in NUMBER order" in text
+    # both numbers on a chained line, and the rank that makes the order recoverable
+    later = next(r for r in _all_recs(plan) if r.chain_rank > 1)
+    above = "#1 lands" if later.chain_rank == 2 else f"#1-#{later.chain_rank - 1} land"
+    assert f"if {above} ({later.gain_alone:+.1f} alone)" in text
+    assert "#1-#1" not in text          # a range of one is not a spelling
+    # The ACTION prints before every refusal: the page is opened to learn what to
+    # queue, and the refusals are worded against "the moves above".
+    assert text.index("WAIVER CLAIMS") < text.index("FREE-AGENT GRABS") \
+        < text.index("positive ALONE, measured at <= 0") < text.index("DROP BOARD")
+    # rank 1 carries its number too, and no conditional suffix (nothing is above it)
+    first = next(r for r in _all_recs(plan) if r.chain_rank == 1)
+    assert f"#1 add {first.add}" in text
+    assert f"{first.gain:+.1f} pts / {first.horizon} wks\n" in text + "\n"
+    # the refused reversals, in the DEFAULT view — EVERY one of them, in the same
+    # labelled 'add X (POS) <- drop Y (POS)' vocabulary the claim lines use. The
+    # shipped one-example bare-arrow form was measurably inverted by the briefing
+    # summarizer, and rows 2 and 3 were counted but never named at any verbosity.
+    assert "positive ALONE, measured at <= 0" in text
+    for r in plan.chain_rejected:
+        assert f"add {r.add} ({r.add_position})" in text
+        assert f"{r.gain_after:+.1f} after" in text
+        if r.drop:
+            assert f"drop {r.drop} ({r.drop_position or '-'})" in text
+    # and the ESPN batch semantics that make "fallback" executable
+    assert "INSTEAD OF" in text
+    # no raw float noise anywhere the operator reads
+    assert "e-09" not in text and "e-06" not in text
+
+
+def test_the_chained_suffix_names_a_single_move_or_a_range():
+    """RULE 6. Position 2 assumes ONE move landed, so it says so — ``#1-#1`` is a
+    range of one and reads as a typo. From position 3 the range is real."""
+    assert waiver._above_phrase(2) == "#1 lands"
+    assert waiver._above_phrase(3) == "#1-#2 land"
+    assert waiver._above_phrase(5) == "#1-#4 land"
+
+
+def test_the_chain_reads_nothing_new_from_the_database(db, marginal_world):
+    """LEAKAGE / Rule 1. The chain re-prices through ScenarioModel, which is pure
+    arithmetic over entries the board already gated at ``as_of`` — so selection must
+    issue ZERO further queries. Scoped to ``_select_claims`` deliberately:
+    ``build_waiver_plan`` itself reads (the opportunity-signal join), so a fence
+    around the whole plan would be flaky by design rather than load-bearing."""
+    _chain_world(marginal_world)
+    board = _chain_board(db)
+    swaps = board.swaps
+
+    seen: list[str] = []
+    db.set_trace_callback(seen.append)
+    try:
+        chain = waiver._select_claims(
+            swaps, board=board, claim_budget=10, waiver_rank=None, team_count=None,
+            open_slots=0, candidate_notes={}, dup_names=set(),
+            position_counts=board.roster_position_counts,
+        )
+    finally:
+        db.set_trace_callback(None)
+    assert chain.claims or chain.grabs
+    assert seen == [], seen
+
+
+# --------------------------------------------------------------------------
+# item 3.4b audit — the mechanisms the first build shipped without a pin
+# --------------------------------------------------------------------------
+
+
+class _FuncBoard:
+    """A board whose value is an explicit FUNCTION of the applied add set — for
+    cases where enumerating every subset by hand would be noise rather than the
+    thing under test."""
+
+    def __init__(self, fn):
+        self.fn = fn
+        self.calls = 0
+
+    def value_after(self, swaps=(), *, pure_adds=()):
+        self.calls += 1
+        return self.fn(frozenset(s.add for s in tuple(swaps) + tuple(pure_adds)))
+
+
+def _fs(add, gain, drop, *, add_id, drop_id, add_pos="WR", drop_pos="RB",
+        status="WAIVERS", unpriceable=False):
+    """``_fake_swap`` with the positions and the drop-priceability exposed."""
+    return SwapRow(
+        add=add, drop=drop, gain=gain, add_position=add_pos, drop_position=drop_pos,
+        add_status=status, add_startable_this_week=True, horizon_weeks=15,
+        reasons=(f"add {add} ({add_pos}), drop {drop} ({drop_pos}): "
+                 f"{gain:+.1f} house pts over 15 weeks",),
+        add_espn_id=add_id, drop_espn_id=drop_id, drop_unpriceable=unpriceable,
+    )
+
+
+def test_a_leftover_measured_POSITIVE_after_the_chain_is_reported_not_discarded():
+    """The lazy greedy is a heuristic for COMPLEMENTS, and the shipped build turned
+    that caveat into a silent deletion: a leftover the rejection pass re-priced at
+    a POSITIVE conditional gain was ``continue``d — absent from the claims, from
+    ``chain_rejected`` AND from ``chain_not_repriced`` — while the plan printed
+    'a SHORT list is the answer here, not a truncation' and 'It cannot make one
+    disappear'. Both sentences were false about a number the module was holding.
+
+    A/B/D/E over a supermodular table: the chain takes A then E and stops on D's
+    fresh -0.5, leaving C measured at +6.0 against the finished chain."""
+    a = _fs("Alpha Catcher", 10.0, "Sierra Rusher", add_id="a", drop_id="s")
+    b = _fs("Bravo Catcher", 5.0, "Tango Rusher", add_id="b", drop_id="t")
+    c = _fs("Charlie Catcher", 4.0, "Uniform Rusher", add_id="c", drop_id="u")
+    e = _fs("Echo Catcher", 3.0, "Victor Rusher", add_id="e", drop_id="v")
+    V = {
+        frozenset(): 0.0,
+        frozenset({"Alpha Catcher"}): 10.0,
+        frozenset({"Bravo Catcher"}): 5.0,
+        frozenset({"Charlie Catcher"}): 4.0,
+        frozenset({"Echo Catcher"}): 3.0,
+        frozenset({"Alpha Catcher", "Bravo Catcher"}): 9.5,
+        frozenset({"Alpha Catcher", "Charlie Catcher"}): 9.0,
+        frozenset({"Alpha Catcher", "Echo Catcher"}): 12.0,
+        frozenset({"Alpha Catcher", "Echo Catcher", "Bravo Catcher"}): 11.5,
+        frozenset({"Alpha Catcher", "Echo Catcher", "Charlie Catcher"}): 18.0,
+    }
+    chain = waiver._select_claims(
+        [a, b, c, e], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={},
+    )
+    assert chain.chain_stop == waiver.STOP_NONPOSITIVE
+    assert [r.add for r in chain.claims] == ["Alpha Catcher", "Echo Catcher"]
+
+    # Charlie is measured POSITIVE after the chain and must be REPORTED, not binned.
+    assert [r.add for r in chain.chain_under_ranked] == ["Charlie Catcher"]
+    assert chain.chain_under_ranked[0].gain_after == pytest.approx(6.0)
+    assert chain.chain_under_ranked[0].gain_alone == pytest.approx(4.0)
+
+    # ... and the notes must stop saying the two things it falsifies.
+    notes = waiver._chain_notes(chain, claim_budget=10, weeks=15)
+    joined = " ".join(notes)
+    assert "It cannot make one disappear" not in joined
+    assert "not a truncation" not in joined
+    assert "still positive against the finished list" in joined
+
+
+def test_an_under_ranked_positive_row_is_RENDERED_in_the_default_view(db, marginal_world):
+    """...and it has to reach the page, not just the dataclass. The DEFAULT view is
+    what the operator and the Wednesday briefing read."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    row = waiver.ChainRejection(
+        add="Victor Catcher", add_position="WR", drop="Whiskey Rusher",
+        drop_position="RB", gain_alone=4.0, gain_after=6.0,
+        reason="Victor Catcher measures +6.0 AFTER the moves above have won.",
+    )
+    seeded = replace(plan, chain_under_ranked=(row,))
+    text = waiver.format_waiver_plan(seeded, reasons=False)
+    assert "POSITIVE AFTER THE CHAIN" in text
+    assert "add Victor Catcher (WR)  <-  drop Whiskey Rusher (RB)" in text
+    assert "+4.0 alone / +6.0 after" in text
+    # the reason itself is a --reasons detail, not default-view noise
+    assert row.reason not in text
+    assert row.reason in waiver.format_waiver_plan(seeded, reasons=True)
+
+
+def test_every_leftover_lands_in_exactly_one_disclosed_bucket():
+    """ACCOUNTING. Nothing the rejection pass touches may leave it unreported: the
+    four buckets plus the unmeasured count must add up to the leftovers, or a
+    future ``continue`` can silently eat a candidate again."""
+    a = _fs("Alpha Catcher", 10.0, "Sierra Rusher", add_id="a", drop_id="s")
+    rest = [
+        _fs(f"Rest{i} Catcher", 9.0 - i, f"Drop{i} Rusher", add_id=f"r{i}",
+            drop_id=f"d{i}")
+        for i in range(6)
+    ]
+    V = {frozenset(): 0.0}
+    V[frozenset({"Alpha Catcher"})] = 10.0
+    for r in rest:
+        V[frozenset({r.add})] = r.gain
+        V[frozenset({"Alpha Catcher", r.add})] = 10.0 - 0.5   # every pair is worse
+    chain = waiver._select_claims(
+        [a, *rest], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={},
+    )
+    assert len(chain.claims) == 1
+    leftovers = 6
+    accounted = (
+        len(chain.chain_rejected) + chain.chain_measured_not_shown
+        + len(chain.chain_under_ranked) + len(chain.chain_capped)
+        + chain.chain_not_repriced
+    )
+    assert accounted == leftovers, (
+        chain.chain_rejected, chain.chain_measured_not_shown,
+        chain.chain_under_ranked, chain.chain_capped, chain.chain_not_repriced)
+    # and the display cap is a DISPLAY cap, not a measurement claim
+    assert len(chain.chain_rejected) == waiver.CHAIN_REJECTED_PRICED
+    assert chain.chain_measured_not_shown + chain.chain_not_repriced == 3
+
+
+def test_position_caps_are_re_checked_ACROSS_the_chain():
+    """``POSITION_CAPS`` used to be checked per-swap against the BASE roster only,
+    so two individually-legal adds could jointly breach a cap. The board is
+    strictly ADDITIVE here, so economics cannot be what stops the second add —
+    only the cap can. Deleting the ``cap_ok`` guard makes this test fail."""
+    caps = waiver.POSITION_CAPS["QB"]
+    one = _fs("One Thrower", 10.0, "Sierra Rusher", add_id="1", drop_id="s",
+              add_pos="QB")
+    two = _fs("Two Thrower", 9.0, "Tango Rusher", add_id="2", drop_id="t",
+              add_pos="QB")
+    V = {
+        frozenset(): 0.0,
+        frozenset({"One Thrower"}): 10.0,
+        frozenset({"Two Thrower"}): 9.0,
+        frozenset({"One Thrower", "Two Thrower"}): 19.0,      # additive
+    }
+    at_cap_minus_one = {"QB": caps - 1, "RB": 5}
+    chain = waiver._select_claims(
+        [one, two], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts=at_cap_minus_one,
+    )
+    assert [r.add for r in chain.claims] == ["One Thrower"], "the cap is not enforced"
+
+    # ... and the SAME board with headroom takes both, so the cap is what did it.
+    loose = waiver._select_claims(
+        [one, two], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={"QB": 0, "RB": 5},
+    )
+    assert [r.add for r in loose.claims] == ["One Thrower", "Two Thrower"]
+
+
+def test_a_cap_blocked_leftover_is_labelled_a_cap_not_an_economic_refusal():
+    """A cap refusal must not be dressed as a valuation. The shipped build gave a
+    cap-blocked row the 'winning him too would undo part of them' sentence — which
+    blames the chain for a roster limit — and, if it re-priced POSITIVE, dropped it
+    entirely. It also drove the exhaustion note to assert the wrong cause."""
+    caps = waiver.POSITION_CAPS["QB"]
+    one = _fs("One Thrower", 10.0, "Sierra Rusher", add_id="1", drop_id="s",
+              add_pos="QB")
+    two = _fs("Two Thrower", 9.0, "Tango Rusher", add_id="2", drop_id="t",
+              add_pos="QB")
+    V = {
+        frozenset(): 0.0,
+        frozenset({"One Thrower"}): 10.0,
+        frozenset({"Two Thrower"}): 9.0,
+        frozenset({"One Thrower", "Two Thrower"}): 19.0,
+    }
+    chain = waiver._select_claims(
+        [one, two], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={"QB": caps - 1, "RB": 5},
+    )
+    assert [r.add for r in chain.chain_capped] == ["Two Thrower"]
+    assert not chain.chain_rejected and not chain.chain_under_ranked
+    reason = chain.chain_capped[0].reason
+    assert "caps that at" in reason and "not a league rule" in reason
+    assert "undo part of them" not in reason
+
+    # the exhaustion note names the CAP, not a spent player
+    assert chain.chain_stop == waiver.STOP_EXHAUSTED
+    notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
+    assert "reuses a player already spent above" not in notes
+    assert "over this board's limit for its position" in notes
+
+
+def test_a_cap_excluded_pure_add_does_not_let_phase_a_settle_the_whole_search():
+    """Phase A's shortcut rests on 'a pure add is never worse than the same add as
+    a swap' — true only for adds phase A could SEE. ``cap_ok(s, pure=True)`` counts
+    the add WITHOUT the offsetting drop, so a same-position swap at a capped
+    position is legal in phase B and invisible in phase A. The shipped build let a
+    worthless pure add settle the entire search and skip that swap."""
+    caps = waiver.POSITION_CAPS["TE"]
+    upgrade = _fs("Great Endzone", 9.0, "Weak Endzone", add_id="g", drop_id="w",
+                  add_pos="TE", drop_pos="TE")
+    dud = _fs("Dud Catcher", 0.5, "Sierra Rusher", add_id="d", drop_id="s")
+    V = {
+        frozenset(): 0.0,
+        frozenset({"Great Endzone"}): 9.0,
+        frozenset({"Dud Catcher"}): 0.0,          # worth NOTHING as a pure add
+        frozenset({"Great Endzone", "Dud Catcher"}): 9.0,
+    }
+    chain = waiver._select_claims(
+        [upgrade, dud], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=1, candidate_notes={}, dup_names=set(),
+        position_counts={"TE": caps, "RB": 5, "WR": 4},
+    )
+    assert [r.add for r in chain.claims] == ["Great Endzone"], (
+        "phase A settled on a pure-add argument that never covered the capped swap")
+
+
+def test_a_phase_a_cost_stop_never_kills_the_swap_lane(monkeypatch):
+    """Phase A is exhaustive per open slot; phase B is the cheap lazy half where
+    the swaps live. A COST exhaustion in phase A is not evidence that no swap pays,
+    so it must not set a terminal stop — measured on the live board, two open slots
+    burned 194 of 200 valuations in phase A and phase B never ran."""
+    monkeypatch.setattr(waiver, "CHAIN_EVAL_BUDGET", 6)
+    monkeypatch.setattr(waiver, "PHASE_B_EVAL_RESERVE", 4)
+    rows = [
+        _fs(f"Pure{i} Catcher", 5.0 - i * 0.1, f"Drop{i} Rusher", add_id=f"p{i}",
+            drop_id=f"q{i}")
+        for i in range(6)
+    ]
+    weight = {r.add: r.gain for r in rows}
+    # Strictly diminishing: only the two best adds ever pay, so the board is
+    # submodular and nothing here depends on a contrived complement.
+    board = _FuncBoard(lambda ks: sum(sorted((weight[k] for k in ks),
+                                             reverse=True)[:2]))
+    chain = waiver._select_claims(
+        rows, board=board, claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=2, candidate_notes={}, dup_names=set(),
+        position_counts={},
+    )
+    assert chain.phase_a_truncated
+    assert chain.chain_stop != waiver.STOP_NONPOSITIVE
+    # phase B still ran on its reserve and took something
+    assert chain.claims, "a phase-A cost stop starved the swap lane"
+    notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
+    assert "cost limit on the open-slot half only" in notes
+
+
+def test_the_evaluation_ceiling_stops_the_chain_LOUDLY(monkeypatch):
+    """The ceiling exists so a post-Week-1 board cannot silently blow the runtime
+    budget. Nothing pinned its degrade path: the only assertion referencing it was
+    ``calls <= CHAIN_EVAL_BUDGET``, which RAISING the constant satisfies."""
+    monkeypatch.setattr(waiver, "CHAIN_EVAL_BUDGET", 4)
+    rows = [
+        _fs(f"Cand{i} Catcher", 5.0 - i * 0.1, f"Drop{i} Rusher", add_id=f"c{i}",
+            drop_id=f"e{i}")
+        for i in range(8)
+    ]
+    V = {frozenset(): 0.0}
+    for r in rows:
+        V[frozenset({r.add})] = r.gain
+        for r2 in rows:
+            if r2 is not r:
+                V[frozenset({r.add, r2.add})] = max(r.gain, r2.gain) + 0.05
+    chain = waiver._select_claims(
+        rows, board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={},
+    )
+    assert chain.chain_stop == waiver.STOP_EVAL_BUDGET
+    notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
+    assert "cost limit, not a verdict" in notes
+    # and it must never be reported as an economic conclusion
+    assert "not a truncation" not in notes
+
+
+def test_the_not_repriced_note_never_claims_a_pricing_that_did_not_happen(monkeypatch):
+    """The shipped note said '(only the top 3 are, to keep this report inside a few
+    seconds)' unconditionally — including when the evaluation ceiling meant ZERO
+    were re-priced and ``chain_rejected`` was empty. It told the operator three
+    refusals were measured when the tool measured none."""
+    chain = waiver._ChainResult(
+        claims=(), grabs=(), streaming=(), chain_gain=0.0, chain_rejected=(),
+        chain_not_repriced=79, chain_stop=waiver.STOP_EVAL_BUDGET, evaluations=203,
+    )
+    notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
+    assert "NONE of them were" in notes
+    assert f"only the top {waiver.CHAIN_REJECTED_PRICED} are" not in notes
+
+
+def test_a_leftover_the_chain_ALREADY_measured_is_not_reported_as_unmeasured():
+    """FRESHNESS BEFORE THE DISPLAY CAP. The shipped pass counted every row past the
+    cap into ``chain_not_repriced`` — 'treat them as unmeasured, not as rejected' —
+    without first checking ``at[i] == len(accepted)``, the module's own 'this row
+    already carries a post-chain number' flag. Measured live, 10 of 17 such rows
+    were fresh and strongly negative: the sentence was false for the majority of
+    the rows it covered, at zero cost to fix."""
+    a = _fs("Alpha Catcher", 10.0, "Sierra Rusher", add_id="a", drop_id="s")
+    rest = [
+        _fs(f"Rest{i} Catcher", 9.0 - i, f"Drop{i} Rusher", add_id=f"r{i}",
+            drop_id=f"d{i}")
+        for i in range(6)
+    ]
+    V = {frozenset(): 0.0, frozenset({"Alpha Catcher"}): 10.0}
+    for r in rest:
+        V[frozenset({r.add})] = r.gain
+        V[frozenset({"Alpha Catcher", r.add})] = 9.5          # every pair is worse
+    chain = waiver._select_claims(
+        [a, *rest], board=_FakeBoard(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={},
+    )
+    # the chain re-priced several leftovers on its way to stopping; those numbers
+    # are in hand, so they must be classified as REFUSALS, not disclaimed
+    measured = len(chain.chain_rejected) + chain.chain_measured_not_shown
+    assert measured >= 4, (measured, chain.chain_not_repriced)
+    notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
+    if chain.chain_measured_not_shown:
+        assert "also MEASURED at" in notes
+
+
+def test_claim_budget_zero_does_not_claim_the_pool_is_worthless(db, marginal_world):
+    """'You asked me not to look' is not 'there were no candidates'. At budget 0 the
+    shipped plan asserted 'every add here would cost a drop worth more than the
+    add' — a specific, checkable claim, false, and made without running a single
+    valuation."""
+    _chain_world(marginal_world)
+    plan = _plan(db, claim_budget=0)
+    assert not plan.claims and not plan.fcfs_grabs
+    assert plan.chain_stop == waiver.STOP_BUDGET
+    joined = " ".join(plan.notes)
+    assert "no add in the free-agent pool improves this roster" not in joined
+    assert "--claim-budget is 0" in joined and "says nothing about the free-agent pool" in joined
+    # ... while a positive add demonstrably exists
+    deep = _plan(db, claim_budget=10)
+    assert deep.claims or deep.fcfs_grabs
+
+
+def test_a_streaming_only_plan_does_not_print_chain_instructions(db, marginal_world):
+    """A live streaming lane with an empty season-long chain routed the plan into
+    the chain notes, which printed 'these 0 add(s) are priced as a CHAIN, in the
+    order printed ... Queue them in that order' over an empty list — AND suppressed
+    the one sentence that is the answer on such a day."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert plan.streaming and not plan.claims and not plan.fcfs_grabs
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "priced as a CHAIN" not in text
+    assert "Queue them in that order" not in text
+    assert "no SEASON-LONG add in the free-agent pool improves this roster" in text
+
+
+def test_the_streaming_slice_is_disclosed_when_it_hides_a_positive_stream(db, marginal_world):
+    """``claim_budget`` slices the STREAMING lane too, and the pre-3.4b sentence
+    that covered that ('the cap TRUNCATES each claim list') was replaced by one
+    that is true of claims+grabs and false of streaming. A truncated list printed
+    under a note reading 'a SHORT list is the answer, not a truncation'."""
+    specs = _active_specs()
+    specs[13] = {"name": "Weak DST", "pos": "D/ST", "team": "MIA", "pts": 1.0,
+                 "bye": 5, "on_team": TEAM,
+                 "weeks": {w: 1.0 for w in range(3, 18)}}
+    specs += [
+        {"name": "Streamer DST", "pos": "D/ST", "team": "PIT", "pts": 1.0, "bye": 10,
+         "status": "WAIVERS", "weeks": {3: 80.0}},
+        {"name": "Backup DST", "pos": "D/ST", "team": "CLE", "pts": 1.0, "bye": 11,
+         "status": "WAIVERS", "weeks": {3: 40.0}},
+    ]
+    marginal_world(specs, retrieved=PULL)
+
+    deep = _plan(db, claim_budget=10)
+    assert len(deep.streaming) == 2, [r.add for r in deep.streaming]
+    shallow = _plan(db, claim_budget=1)
+    assert len(shallow.streaming) == 1
+    joined = " ".join(shallow.notes)
+    assert "one-week STREAM(s) are positive but not shown" in joined
+    # ... and the deep run, which hides nothing, must not claim it did
+    assert "not shown" not in " ".join(deep.notes)
+
+
+def test_the_joint_line_reads_this_week_in_a_one_week_window(db, marginal_world):
+    """ONE rendering of a horizon per report. The joint line hard-coded '{n} wks',
+    so a one-week window — reachable on a plain in-season run in week 17 — printed
+    'over 1 wks' above claim lines saying '/ this week'."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    one = replace(plan, weeks=(17,))
+    text = waiver.format_waiver_plan(one, reasons=False)
+    assert "1 wks" not in text and "1 wk(s)" not in text
+    assert "pts over this week" in text
+
+
+def test_the_drop_board_says_it_is_priced_BEFORE_the_chain(db, marginal_world):
+    """The drop board comes from the single pre-chain ``build_board`` scan while the
+    claims above it are priced sequentially on top of it — two lanes, two rosters,
+    in one view. Unlabelled it reads as a menu that can be combined with the chain,
+    and it can point at exactly the drop the chain has just refused."""
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "these numbers assume you make NONE of the" in text
+    assert "can only be added ONCE" in text
+    spent = {r.drop for r in _all_recs(plan) if r.drop}
+    for name in spent:
+        assert f"{name} (" in text
+    assert "already spent" in text
+
+
+def test_the_chain_notes_are_absent_when_there_is_no_chain():
+    """``_chain_notes`` must not narrate an ordering that does not exist. Guarded
+    at the function too, not only at the call site, because it is reachable from
+    every stop reason with an empty chain."""
+    for stop in (waiver.STOP_NO_CANDIDATES, waiver.STOP_NONPOSITIVE,
+                 waiver.STOP_EXHAUSTED, waiver.STOP_BUDGET):
+        chain = waiver._ChainResult(
+            claims=(), grabs=(), streaming=(), chain_gain=0.0, chain_rejected=(),
+            chain_not_repriced=0, chain_stop=stop, evaluations=0,
+        )
+        notes = " ".join(waiver._chain_notes(chain, claim_budget=3, weeks=15))
+        assert "priced as a CHAIN" not in notes, stop
+        assert "Queue them in that order" not in notes, stop
+        assert "how the next claim is chosen" not in notes, stop
+
+
+def test_a_position_counts_argument_is_required_not_defaulted():
+    """A safety check whose default value is 'off' is the shape the 3.1/3.1b audits
+    kept finding: every ``POSITION_CAPS`` entry is >= 1, so an empty mapping makes
+    ``0 + 1 <= cap`` true for everything and the cross-chain guard evaporates. The
+    caller must disable it on purpose, never by omission."""
+    import inspect
+    sig = inspect.signature(waiver._select_claims)
+    p = sig.parameters["position_counts"]
+    assert p.default is inspect.Parameter.empty
+    assert p.kind is inspect.Parameter.KEYWORD_ONLY
