@@ -465,3 +465,139 @@ def test_missing_database_file_does_not_traceback(tmp_path):
                                  "--path", str(tmp_path / "nope.sqlite")])
     assert result.exit_code == 0
     assert "NEVER RUN" in result.output
+
+
+# ==================================================== item 3.8a — standing lines
+
+
+def test_status_always_states_the_waiver_batch_time_and_is_silent_when_ir_is_clean(
+        crosswalked_db, league_world):
+    """Two standing lines with OPPOSITE contracts (item 3.8a).
+
+    The waiver-batch time is ALWAYS printed — it is the deadline Tuesday's last
+    step depends on, and this league's batches run 00:01-01:13 PACIFIC, not the
+    "3-4 AM" (Eastern) figure that was in circulation. The IR check is SILENT when
+    clean: `league status` is in every day's preflight, and a line that says
+    "nothing changed" every day is how the operator learns to skip the report.
+
+    CATCHES: an unconditional IR line (crying wolf), and a waiver line that
+    disappears when there is nothing to say.
+    """
+    payload, pool = league_world(holdings={"1000": 4})
+    for entry in pool:
+        entry["player"]["injured"] = \
+            entry["player"]["injuryStatus"] in state.IR_ELIGIBLE_STATUSES
+        entry["player"]["droppable"] = True
+    _run(crosswalked_db, payload, pool, day="2026-09-08")
+    report = sync.format_status(crosswalked_db, season=2026, through="2026-09-08")
+    assert "waivers last : 2026-09-02" in report
+    # The deadline is DERIVED from this league's own waiverProcessDays, not
+    # restated as a constant: 2026-09-08 is a Tuesday and this league runs no
+    # Tuesday batch, so the next one is Wednesday and the cutoff is Tuesday night.
+    assert "next batch Wed 2026-09-09" in report
+    assert "queue by ~23:59 PT Tue 2026-09-08" in report
+    assert "IR RULE CHECK" not in report
+
+    # a designation this league has NEVER served appears -> exactly one line
+    payload2, pool2 = league_world(holdings={"1000": 4})
+    for entry in pool2:
+        entry["player"]["injured"] = \
+            entry["player"]["injuryStatus"] in state.IR_ELIGIBLE_STATUSES
+        entry["player"]["droppable"] = True
+    pool2[3]["player"]["injuryStatus"] = "DOUBTFUL"
+    pool2[3]["player"]["injured"] = False
+    _run(crosswalked_db, payload2, pool2, day="2026-09-09")
+    report2 = sync.format_status(crosswalked_db, season=2026, through="2026-09-09")
+    assert report2.count("IR RULE CHECK") == 1
+    assert "DOUBTFUL" in report2
+
+
+def test_status_says_so_when_the_waiver_time_was_never_captured(crosswalked_db, league_world):
+    """Pre-014 snapshots hold no settings row at all; the line must say that
+    rather than vanish or print a fabricated time."""
+    payload, pool = league_world(settings=False)
+    _run(crosswalked_db, payload, pool, day="2026-09-08")
+    report = sync.format_status(crosswalked_db, season=2026, through="2026-09-08")
+    assert "no league settings captured at this as-of" in report
+    assert "run a sync" in report
+
+
+def test_a_missing_settings_block_degrades_the_run_but_keeps_the_snapshot(
+        crosswalked_db, league_world):
+    """Silence is not success (item 3.8a). The snapshot is PERISHABLE and must
+    survive a rulebook read failure — but the run must not log `ok`.
+
+    CATCHES: swallowing the settings failure into a green run, which is what makes
+    a half-decoded rulebook look healthy.
+    """
+    payload, pool = league_world(settings=False)
+    summary = _run(crosswalked_db, payload, pool, day="2026-09-08")
+    assert summary["status"] == "partial"
+    assert summary["teams"] == 10 and summary["players"] > 0
+    assert "no `settings` block" in sync.format_status(
+        crosswalked_db, season=2026, through="2026-09-08")
+
+
+def test_a_monday_read_does_not_promise_a_batch_this_league_never_runs(
+        crosswalked_db, league_world):
+    """The deadline line is DAY-AWARE (item 3.8a audit).
+
+    This league's waiverProcessDays hold no TUESDAY, so on a MONDAY evening
+    nothing processes that night and the real cutoff is Tuesday 23:59 PT. A flat
+    "queue claims before ~23:59 PT" said otherwise on the one weekday it is wrong.
+
+    CATCHES: a re-hard-coded deadline, and a derivation that ignores the stored
+    process days.
+    """
+    payload, pool = league_world(holdings={"1000": 4})
+    _run(crosswalked_db, payload, pool, day="2026-09-07")   # a MONDAY
+    report = sync.format_status(crosswalked_db, season=2026, through="2026-09-07")
+    assert "next batch Wed 2026-09-09" in report
+    assert "queue by ~23:59 PT Tue 2026-09-08" in report
+
+
+def test_a_settings_row_with_no_execution_time_does_not_tell_you_to_run_a_sync(
+        crosswalked_db, league_world):
+    """Two DIFFERENT states, two different sentences (item 3.8a audit).
+
+    "no settings row at this as-of" is fixed by a sync. "the settings row exists
+    and ESPN served no waiverLastExecutionDate" is NOT — re-running produces the
+    same NULL — and reporting it as a pre-2026-09-02 capture gap misattributes a
+    live gap to the migration era.
+
+    CATCHES: collapsing the two back into one falsy branch.
+    """
+    payload, pool = league_world(holdings={"1000": 4})
+    payload["status"] = {"currentMatchupPeriod": 1, "finalScoringPeriod": 17}
+    _run(crosswalked_db, payload, pool, day="2026-09-08")
+    report = sync.format_status(crosswalked_db, season=2026, through="2026-09-08")
+    assert "carries no waiverLastExecutionDate" in report
+    assert "a sync will NOT fill this in" in report
+    assert "not captured before 2026-09-02" not in report
+    assert "run a sync" not in report
+
+
+def test_faab_being_on_reaches_the_daily_preflight_and_inert_is_silent(
+        crosswalked_db, league_world):
+    """The one settings change that invalidates the claim list has a DAILY
+    surface (item 3.8a audit).
+
+    Before this, `settings_verdicts` was reachable only from `ziggurat league
+    settings` — a command the weekly cadence never runs — so a commissioner
+    switching FAAB on stayed invisible to every module that prices a claim, which
+    is the stated reason `league_settings` is stored at all.
+
+    CATCHES: an unwired verdict, and a line that fires every day when the budget
+    is inert (the operator-attention contract).
+    """
+    payload, pool = league_world(holdings={"1000": 4})
+    _run(crosswalked_db, payload, pool, day="2026-09-08")
+    assert "FAAB IS ON" not in sync.format_status(
+        crosswalked_db, season=2026, through="2026-09-08")
+
+    payload2, pool2 = league_world(holdings={"1000": 4})
+    payload2["settings"]["acquisitionSettings"]["isUsingAcquisitionBudget"] = True
+    _run(crosswalked_db, payload2, pool2, day="2026-09-09")
+    report = sync.format_status(crosswalked_db, season=2026, through="2026-09-09")
+    assert "FAAB IS ON" in report
+    assert "does NOT track a budget" in report

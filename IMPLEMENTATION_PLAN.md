@@ -2260,6 +2260,19 @@ mechanics to **confirm in-app post-draft** — disclosed on every plan, same dis
 scoring §3.8. Open TODOs recorded: ingest `eligibleSlots` for machine-truth; DOUBTFUL/PUP;
 within-week priority-reset behaviour.
 
+**Amendment — item 3.8a, 2026-09-02 (Rule 7): two statements above are now false and one
+of those TODOs is CLOSED as not-to-be-done.** `eligibleSlots` is NOT authoritative for IR:
+slot 21 (IR) is listed for **1,036 of 1,036** players alongside slot 20 (BE) — a positional
+map, not a per-player gate — so "ingest `eligibleSlots` for machine-truth" is struck, not
+deferred, and the field is deliberately not stored. The draft happened 2026-08-31. The
+hypothesis has SPLIT: the DESIGNATION half is SETTLED (ESPN's own per-player `injured`
+boolean, migration `014`, marks exactly `IR_ELIGIBLE_STATUSES` with 0 exceptions over
+1,036 rows), so "UNVERIFIED"/"confirm in-app post-draft" left `IR_ELIGIBLE_LABEL`; the
+IR-SLOT MECHANISM half keeps the word in `IR_FIX_MODEL_LABEL` — 0 of 10 rosters have ever
+occupied the slot, i.e. unverified by measurement rather than by omission. DOUBTFUL/PUP
+remain UNOBSERVED and are now WATCHED by `ziggurat league ir-check` (they are not settled);
+within-week priority-reset is untouched. See §3.8's scope bullet 1 and its Update block.
+
 Three verified workflows (recon → build+green-gate → 7-dimension adversarial audit with
 per-finding refute-first verification, 29 agents). **The audit found the seam clean (no
 leakage, no rules/boundary violations) and 18 real defects (6 major), all fixed. The
@@ -2776,6 +2789,7 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 
 **Scope — wave A, needs only the completed draft (from 2026-09-01):**
 1. **IR legality model (3.4).** `IR_ELIGIBLE_STATUSES` and `IR_FIX_MODEL_LABEL` are disclosed UNVERIFIED on every waiver plan because ESPN's `eligibleSlots` is not ingested and no roster existed to test against. Ingest `eligibleSlots` for machine truth, confirm which statuses ESPN actually accepts into the IR slot, and settle DOUBTFUL/PUP handling. Removing an UNVERIFIED banner is the deliverable, not just a passing test.
+   > **AMENDED INLINE 2026-09-02 (wave A build, Rule 7): the premise of this bullet is FALSE.** Measured live against the post-draft league: `eligibleSlots` carries **no IR information at all** — slot 21 (IR) is listed for **1,036 of 1,036** players in the universe, alongside slot 20 (BE). It is a POSITIONAL map, not a per-player IR gate, and it is deliberately NOT ingested. The machine truth is ESPN's own per-player `injured` boolean (migration `014`). "Confirm which statuses ESPN actually accepts into the IR slot" also could not be done: **0 of 10 rosters have ever occupied the IR slot**, so that half stays UNVERIFIED by measurement rather than by omission. See the Update block.
 2. **`acquisitionBudget = 100` semantics (1.5 open confirmation D).** Season transaction-count cap or inert default? Verify against the live ESPN UI with a real roster. It gates whether the waiver module should be counting spend at all.
 3. **Trade deadline** (epoch ≈ early-Dec 2026) localized precisely from league settings.
 
@@ -2791,7 +2805,285 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 **Rule note:** any scoring correction lands in `core/scoring.py` **only** (Rule 2), and any derivation fix lands at the ingestion layer where the 1.3 TODO says it belongs — `score_dst` brackets an already-derived value and must not learn to derive one.
 
 **Update:**
-> _[To be completed — wave A from 2026-09-01, wave B from 2026-09-15.]_
+> **Wave A done 2026-09-02. Wave B remains open (needs a finalized week, from
+> 2026-09-15).** Migration `014_league_ground_truth.sql` → `schema_version` 14:
+> three nullable columns on `league_player_state` (`injured`, `droppable`,
+> `entry_injury_status`) and a new `league_settings` table, one row per
+> `(season, retrieved_as_of)` stamped like `league_teams`. New permanent surface:
+> `state.map_settings` / `validate_settings_row`, `state.get_league_settings` /
+> `league_position_limits` / `injured_flag_crosstab` / `latest_snapshot_day` /
+> `ir_rule_check` (+ `IRRuleReport`, `format_ir_rule_report`, `format_settings`,
+> `settings_verdicts`), `marginal.effective_position_caps` / `describe_cap` /
+> `MarginalBoard.position_caps` / `MarginalRow.undroppable`, `waiver.DropRec.undroppable`
+> / `LegalityVerdict.ir_flag_notes` / `WaiverPlan.position_caps` / `.ir_rule`, and
+> `ziggurat league {settings,ir-check}`. Suite **2,714 passed, 4 skipped** (+30).
+>
+> **The premise correction is the headline, and it is annotated inline on scope
+> bullet 1 above.** `eligibleSlots` is not an IR signal: slot 21 is listed for
+> 1,036 of 1,036 players, alongside slot 20 (BE). It is a positional map. Storing
+> it would have repeated the exact mistake this item exists to correct — store a
+> field, assume it means something, never test it — so it is not stored, and the
+> module prose that named it as "ESPN's authoritative eligibility" is gone.
+>
+> **Scope item 1 — IR legality. SPLIT, because only one half is settleable.**
+> *Settled:* ESPN serves a per-player `injured` boolean, now ingested, and it
+> marks **exactly** `{OUT, INJURY_RESERVE}` — 0 exceptions over the whole
+> 1,036-player universe (ACTIVE/false 808, QUESTIONABLE/false 121,
+> INJURY_RESERVE/true 54, none/false 42, OUT/true 9, DAY_TO_DAY/false 1,
+> SUSPENSION/false 1). `_ir_status` now reads the flag FIRST and falls back to the
+> designation proxy per player, with a per-player disclosure; "UNVERIFIED" and
+> "confirm in the ESPN app post-draft" left `IR_ELIGIBLE_LABEL`.
+> *NOT settled, and it keeps the word:* what ESPN's IR SLOT accepts, and when ESPN
+> blocks a transaction. **0 of 10 rosters in this league have ever used the IR
+> slot**; every roster entry reads `injuryStatus: NORMAL` and every team reads
+> `isTransactionLocked: false`. `injured` agreeing with `injury_status` is TWO
+> ENCODINGS OF ONE FACT, not a mechanism — retiring the banner on that basis would
+> have dropped the label from a claim exactly as unverified as the day it was
+> written. `IR_FIX_MODEL_LABEL` is narrowed to the (a)/(b)/(c) mechanics and names
+> the two things that settle it: the first IR occupant this league produces, or a
+> 30-second app check (drag a QUESTIONABLE player onto IR, read the refusal).
+> **First observation, 2026-09-03 (operator, on the ESPN WEBSITE — there is no
+> app on this side):** the roster page exposes moves only through a per-player
+> MOVE button under ACTIONS that lists the destinations ESPN will accept, and on
+> the operator's 16/16 roster (0/1 IR; ten ACTIVE, five QUESTIONABLE, one
+> DAY_TO_DAY, no OUT/INJURY_RESERVE player) IR was offered to NOBODY — only
+> starter↔bench swaps. So the "refusal" the label asked for is an ABSENT option,
+> not a message, and **the negative half of (b) is observed: an ineligible body
+> cannot be put on IR — ESPN enforces the eligibility gate on the way in.** NOT
+> observed, and the label says so: the positive half (an OUT/IR player being
+> OFFERED the slot — the roster carried none to try; the league's one rostered
+> OUT player sits on another team's bench, which says nothing about what that
+> manager was offered), and (a)/(c), which need a real occupant who heals. The
+> label, the plan-renderer disclosure and the `ir-check` ask were re-worded to
+> the website's affordance ("open his MOVE menu the first time an OUT/IR player
+> is on your roster"), the word UNVERIFIED stays, and the `ir-check` pin
+> (`test_ir_check_names_the_app_check_that_settles_the_item_today`) now asserts
+> the observation is printed and the app-drag wording is gone.
+> *DOUBTFUL / PUP / NFI remain **UNOBSERVED** and remain treated as INELIGIBLE.*
+> They are not settled; they are WATCHED. `ir_rule_check` carries an
+> unobserved-status baseline (the seven designations this league had served by
+> 2026-09-02) and reports any new one with the `injured` value ESPN gave it and
+> how the rule treats it — that is the event the check exists for, because
+> "divergences: none" would otherwise print every single day and train the
+> operator to skip the report (the same crying-wolf argument 3.1b used to refuse a
+> second gap report). `league status` prints the IR line ONLY on news.
+>
+> **Scope item 2 — `acquisitionBudget = 100`. CLOSED: INERT.**
+> `isUsingAcquisitionBudget: false`, `acquisitionLimit: -1`,
+> `matchupAcquisitionLimit: -1.0`, `rosterSettings.moveLimit: -1`, `financeSettings`
+> all 0.0 — identical in the 2025 `leagueHistory`. The waiver module owes NO spend
+> or count accounting. **Counter finding, recorded on the mapper at `map_team` and
+> in the migration header so nothing ever reads it wrong:
+> `transactionCounter.acquisitions` did NOT increment for three won waiver
+> claims** (team 10: 0 acquisitions / 3 drops; a second team: 0 / 1 drop / 5
+> moveToActive), so `league_teams.acquisitions` is not a count of claims won.
+> Nothing in `ziggurat/` reads it today (grep verified).
+>
+> **Scope item 3 — trade deadline. CLOSED.** `deadlineDate: 1796230800000` →
+> **2026-12-02 09:00 PST** (17:00 UTC), stored at full precision with ESPN's raw
+> epoch beside it. The NFL week it precedes is a **JOIN against `schedules`**, not
+> arithmetic: the first REG gameday strictly after it is 2026-12-03 → **week 13**.
+> Arithmetic would have been wrong by a day — 2026's Week 1 opens on a WEDNESDAY
+> (09-09), not a Thursday.
+>
+> **Two findings outside the stated scope, kept because both prevent a
+> recommendation the operator cannot follow.** (a) **ESPN's undroppable list is ON
+> in this league** (`isUsingUndroppableList: true`) and 19 of 1,036 players are
+> `droppable: false`, **two of them on the operator's own roster**. The app refuses
+> those drops. The fence sits at the TWO `swaps.append` sites inside the scan's
+> drop loop — not at the loop head, which would have deleted the drop-board row
+> the operator still needs — plus a second fence on the illegal-roster forced
+> drop, which picks a BOARD row rather than a swap and is the one instruction that
+> cannot be worked around (obeying a refused drop leaves the roster illegal and
+> every claim blocked). The board still prices him, tagged `[UNDROPPABLE …]` on
+> the DEFAULT page, as a field rather than a `reasons` string. (b) **The league's
+> own `positionLimits` are ingested**, so the reason text that said "not a league
+> rule" now has a league rule to reckon with. Composition happens at ONE seam
+> (`effective_position_caps`, resolved inside `build_board`, exposed as
+> `board.position_caps`, read by all three cap check points). A naive `min()` was a
+> bug twice over: ESPN's −1 "unlimited" sentinel becomes a cap of −1 and refuses
+> every add at that position, and the label spaces do not meet ("D/ST" vs "DST"),
+> which drops the defense limit silently. Today `POSITION_CAPS` ≤ the league limit
+> everywhere (QB 3≤4, RB 8≤8, WR 8≤8, TE 3≤3, K 1≤3, DST 1≤3), so **there is no
+> live behaviour change** and the binding path is proved synthetically — an
+> unexercised fence is not a fence.
+>
+> **One correction to this file's own cadence section.** The waiver batch runs
+> **00:01–01:13 PACIFIC**, measured from ESPN's own `waiverProcessStatus` map
+> (n=29: 28 batches in 2025 + 2026-09-02 at 00:06:12 PDT). CLAUDE.md's "~3–4 AM
+> PT" was the EASTERN clock. The operator-facing consequence is now stated in
+> Tuesday step 4: submit before **~23:59 PT Tuesday**. `waiverProcessHour: 11` is
+> stored RAW — no batch has ever run at that hour in any zone we can name, so the
+> unit is unknown and is not guessed.
+>
+> **Degradation.** A missing or half-decoded settings block never costs the
+> snapshot (teams, matchups and players still land) but never logs `ok` either:
+> `validate_settings_row` refuses the row and the run degrades to `partial`. A
+> DEGRADED row is the real hazard — it looks healthy and silently changes
+> decisions through the cap fence and the FAAB verdict.
+>
+> **Not built, recorded:** `pendingTransactionIds` (present on all 160 entries,
+> all empty — a possible future "which claims are queued" read);
+> `lineupLocked`/`rosterLocked`/`tradeLocked`; storing `eligibleSlots` (M1);
+> anything in wave B. Measured tables and the re-runnable probe:
+> gitignored `intel/research/ground-truth-3.8a.md`.
+>
+> **Standing lesson: two encodings of one field agreeing is a tautology, not a
+> confirmed mechanism** — and a standing check that can only ever report the case
+> it always passes will be ignored by the time the case it was built for arrives.
+> Watch the unobserved, not the observed.
+>
+> ---
+>
+> **Audit-fix round — done 2026-09-02, same day.** A multi-lens adversarial audit
+> (50 raw findings across 5 lenses, deduped to 30 distinct defects, each verified
+> by three refute-first agents) returned **30 confirmed, 0 refuted — 14 major, 16
+> minor** on the shipped wave A. All are fixed; **no recommendation, number or
+> ordering moves** — every fix is a disclosure the build swallowed, a fence it
+> lacked, or a sentence it asserted without measuring. No schema change: migration
+> `014` is applied and frozen and nothing here needed a `015`. Two bookkeeping
+> notes on the round itself: the fix pass's narrative said "26 confirmed", a
+> number that matched neither the dedupe nor the verify stage (both 30) — the
+> ledger here follows the stages, not the narrative; and the fix pass closed 29 of
+> the 30 and never touched the last (minor: the zero-drop IR-move fix labelled its
+> DESTINATION player "(IR-eligible)" with no per-player evidence, while flag-first
+> lets that player carry a visible ACTIVE tag), which was fixed by hand afterwards
+> — `_zero_drop_reslot` returns each moved player's `_ir_reason` line and the fix
+> splices them before `IR_FIX_MODEL_LABEL` — and pinned in
+> `tests/test_waiver.py::test_a_zero_drop_ir_move_is_the_primary_fix_when_an_eligible_body_exists`.
+>
+> **The headline is that the fence's own enumeration was wrong about itself.**
+> `marginal.py` listed the four places a drop can be named and closed "A fifth
+> path is a fifth fence" — and there was a fifth, unfenced: the blocked page's
+> "you may instead DROP {occupant} himself" note names an IR-ineligible occupant
+> in PROSE, so neither the matrix fence nor the forced-drop fence covers it. ESPN's
+> undroppable list is composed of elite players and the Tuesday crux is a player
+> hurt enough to occupy IR, so obeying it means the app refuses and the roster
+> stays illegal. Two RENDERING surfaces were wrong the same way: `ziggurat
+> marginal` — a shipped operator command whose header is literally "drop board —
+> LOWEST value is the most droppable" — rendered NO undroppable tag at any
+> verbosity while the same board tagged two rows on `ziggurat waivers`, and told
+> the operator to "drop him and add X and you would GAIN N". Both renderers now
+> build from one `UNDROPPABLE_TAG` stem, a fenced row's reason is a valuation
+> rather than an instruction, and the docstring enumerates six paths and two
+> renderers.
+>
+> **Second: the blocked page discarded its own disclosures.** `format_waiver_plan`
+> returned before the `plan.notes` loop, so on the one page where ESPN is blocking
+> every transaction NO note rendered — the IR RULE CHECK headline, the
+> undroppable-skip note, item 3.4's alternative-fix option, the board's "no
+> projections are knowable" caveat. Worse, this item introduced a new terminal
+> outcome (`forced_drop is None` when every priceable row is undroppable) whose
+> ONLY explanation lived in that dead channel: the page printed an alarm, no fix
+> and no reason. Now the notes render, a `NO FIX THIS TOOL CAN NAME` block carries
+> the reason, the blocked path also keeps `board.notes` / `position_caps` /
+> `league_limits` (it kept none of them), and the dangling "(see CANNOT VALUE)"
+> pointer — a section only `format_marginal` has — is gone.
+>
+> **Third: cap attribution was INFERRED from `cap < POSITION_CAPS[pos]` instead of
+> carried, and that is wrong in both directions on the real board.** This league
+> allows QB 4 / RB 8 / WR 8 / TE 3 / K 3 / D/ST 3, so at RB, WR and TE the two
+> fences TIE and a refusal printed "the binding limit is 3. That is a modelling
+> guard …, not a league rule" — which a novice reads as "the app will let me do
+> this anyway"; and with NO settings row read at all (every stored day before
+> 2026-09-02, the A/B copy, any backtest DB) the header still asserted "TWO fences
+> apply … ESPN positionLimits". `MarginalBoard.league_limits` now carries the
+> league map (None = not read), `describe_cap` has four answers including
+> BOTH-AGREE-AT-N and NOT-CAPTURED, `_caps_phrase` names each entry's source, and
+> the header says how many fences really applied. `league settings` no longer
+> asserts "this board's own caps are tighter" — a comparison it never performed and
+> structurally cannot — and its "-1 = unlimited" legend prints only when a -1 is
+> actually on the page.
+>
+> **Fourth: the flag-first rewrite — the item's headline behaviour change — was
+> pinned by NOTHING.** Both tests used rows where the flag and the tag agree, so a
+> mutant that ignores `injured` entirely (the pre-3.8a code) passed the full suite,
+> 2,702 passed, identical to control. Three discriminating rows are now pinned. The
+> same divergence case exposed a self-contradicting page: the violation and the
+> REQUIRED ROSTER MOVE quoted the injury TAG as the evidence for a verdict the FLAG
+> made, so the page said "ESPN lists him OUT, not IR-eligible" above a label saying
+> OUT is exactly the IR-eligible designation. Both sentences are now built from the
+> deciding signal and say plainly when the two ESPN fields disagree.
+>
+> **Fifth: the watch LATCHED.** `OBSERVED_INJURY_STATUSES` is a frozen constant, so
+> the first DOUBTFUL (expected 2026-09-11) would have put the identical headline on
+> `league status` and on every waiver plan for the rest of the season — the exact
+> crying-wolf failure the watch was written to avoid, with the genuine events then
+> arriving inside a sentence the operator had been trained to skip. "Never seen
+> before" is now derived from this league's OWN earlier snapshots, with the
+> constant as the pre-014 floor. Alongside it: `has_news`'s coverage clause is
+> scoped to rows that can decide something for THIS reader (a hole on a rival's
+> bench, and every permanently-unrepairable pre-baseline snapshot, went silent);
+> the first IR occupant is reported as a TRANSITION rather than a standing state;
+> and divergences are aggregated by DESIGNATION rather than per crosstab row (the
+> third grouping dimension made one diverging tag report as several with each n
+> undercounted).
+>
+> **Also fixed, each with a load-bearing test:** `ziggurat league ir-check` printed
+> "divergences: none — the flag marks exactly INJURY_RESERVE/OUT" on snapshots
+> where ZERO comparisons were possible, and suppressed its coverage line entirely
+> when `rostered_n == 0`, so a silent section doubled as a clean bill of health; the
+> `injured`-coverage disclosure named only the IR consequence and not the DROP one,
+> though both flags are NULL together, and pointed at `ir-check` (which re-reports
+> the same percentage) rather than at the PULL that repairs it; the report never
+> named the ~30-second app check that is the only way to settle the IR-slot
+> question today; a settings row with NOT-CAPTURED acquisition fields passed
+> validation and printed a definitive "FAAB is off, claims are free, no caps"
+> verdict, plus the literal string "acquisition budget None is INERT"; the FAAB
+> verdict reached no daily surface at all and the claim reason asserted "free and
+> non-FAAB" from a hard-coded literal — both now read the flag, and `league status`
+> and every waiver plan speak when it is ON or uncaptured; the trade-deadline
+> sentence was backwards ("the last NFL week it precedes is week 13" when 13 is the
+> FIRST week after it); the `waivers last` line gave a deadline that is wrong on
+> Monday nights (this league runs no Tuesday batch) and told the operator to run a
+> sync for a field a sync will not produce; the forced-drop note named EVERY
+> undroppable roster player as "skipped", including ones that were never candidates,
+> and was ungrammatical for the live two-player case; the FAAB settled-date borrowed
+> `IR_RULE_BASELINE_DATE`, so bumping the injury baseline silently re-dated an
+> unrelated fact (now `ACQUISITION_SETTLED_DATE`); the league's own roster SHAPE was
+> stored, printed and consumed by nothing, so `check_legality` and `league settings`
+> could contradict each other silently (reconciled by DISCLOSURE, not by deriving
+> `RosterStructure` — that also drives replacement levels and the weekly seater);
+> and the cross-tab's third dimension plus the LEAGUE branch of `describe_cap` were
+> both shipped with no test that could see them (the one wiring test's assertion was
+> `or`-joined with a condition that is always true).
+>
+> **Docs (Rule 7):** CLAUDE.md's Tuesday step 4 quoted verbatim a chain stop
+> sentence this item had DELETED, and `tests/test_operating_cadence.py` re-derives
+> only quoted `ziggurat` invocations — never quoted OUTPUT — so it rotted silently
+> with the suite green; the quote is corrected and a new pin now checks every stop
+> sentence the cadence quotes against `waiver.py`. Two numbers were wrong in the
+> ledger every later item is graded against: the schema transition (`8→14`, carried
+> over from the 3.6 bullet — it was 13→14) and the suite count (2,712 vs the real
+> 2,714). CLAUDE.md's new Tuesday/Wednesday text claimed a 05:15 snapshot persists;
+> `league_player_state` is partitioned by DAY and every later sync destroys it, so
+> the comparison is Tuesday's snapshot against today's and must be done BEFORE any
+> Wednesday grab. §3.4's Update block still asserted the premise M1 disproved and
+> carried an `eligibleSlots` TODO this item closed as not-to-be-done; it now carries
+> the amendment.
+>
+> **Nothing was deliberately left unfixed.** Suite green (**2,743 passed, 4
+> skipped**; +29 over wave A, every one of them a pin for a defect above; four of
+> the highest-value pins were mutation-verified — reverting flag-first
+> ``_ir_status``, the observed-set union, the divergence aggregation and the
+> ``format_marginal`` tag each turns one red). Migrations `001`-`013` are
+> byte-identical to HEAD and `014`'s pinned sha256 is unchanged; no timer was
+> stopped, because no migration was placed. The A/B (`--path
+> db/ziggurat.sqlite.bak-v13`, 24.1 s) and the live run (24.0 s, against a 24.36 s
+> baseline) both reproduce the wave-A chain EXACTLY: #1 Downs <- Mitchell +3.3,
+> #2 Love <- Rodriguez Jr. +1.0 (+2.2 alone), joint **+4.3**, 5 streaming rows, 3
+> refused, 3 capped. The A/B's diff is label text only, and it is now CORRECT
+> about that copy: no settings row, so the page says "Only ONE fence applied here"
+> rather than crediting ESPN's positionLimits, and the coverage note names both
+> flags and the pull that repairs them. `db/ziggurat.sqlite.bak-v13.pristine`
+> re-verified at `schema_version` 13, read-only.
+>
+> **Standing lesson this round paid for: an enumeration of the places a rule must
+> be enforced is itself a claim, and it needs a test.** `marginal.py` listed four
+> drop paths and asserted the list complete; there were five, and two RENDERERS of
+> the one scan disagreed about the same row. The same shape produced the flag-first
+> mutant that no test could see: a mechanism is not pinned by a test that cannot
+> distinguish it from the mechanism it replaced.
 
 ### 3.11 [Build] Draft-engine integration — the composed engine ships as the default
 

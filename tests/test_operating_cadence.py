@@ -88,3 +88,47 @@ def test_the_week_journal_template_ships_and_scaffolds():
     assert "Decision log" in body and "Monday retro" in body
     # the one line the whole retro hinges on
     assert "PROCESS, not outcome" in body or "process, not outcome" in body.lower()
+
+
+# ==================== item 3.8a audit fix — the cadence quotes OUTPUT too
+
+
+# Every stop/verdict sentence the Tuesday step tells a fresh session to classify
+# by MATCHING the tool's own wording. These are doc-to-code links exactly like a
+# quoted `ziggurat` invocation, and nothing checked them: item 3.8a rewrote one of
+# these sentences in `waiver.py` and left CLAUDE.md quoting the deleted text, with
+# the whole suite green. A session that cannot find the quoted BOOKKEEPING phrase
+# reads the unfamiliar sentence as the VERDICT case and stops queueing while a
+# further claim was never measured.
+#
+# Fragments only — several of the shipped templates are f-strings with an
+# interpolation mid-sentence, so a whole sentence could never be a literal.
+_QUOTED_STOP_FRAGMENTS = (
+    "the next-best add is worth nothing or less once these have won",
+    "the priced add/drop pairs ran out",
+    "would put you over the binding limit for",
+    "pricing hit this module's ceiling",
+    "IF EVERY CLAIM AND GRAB LISTED WINS",
+    "POSITIVE AFTER THE CHAIN",
+)
+
+
+def _joined_source(path: Path) -> str:
+    """Module source with implicit adjacent string literals joined.
+
+    A naive line-based search under-reports: three of these fragments are wrapped
+    across source lines and would look missing while being perfectly present.
+    """
+    return re.sub(r'"\s*\n\s*f?"', "", path.read_text())
+
+
+def test_every_stop_sentence_the_cadence_quotes_still_exists_in_the_tool():
+    waiver_src = _joined_source(REPO_ROOT / "ziggurat" / "core" / "waiver.py")
+    # Markdown re-wraps prose, so compare on collapsed whitespace or a quote that
+    # happens to straddle a line break reads as absent.
+    section = re.sub(r"\s+", " ", _cadence_section())
+    for fragment in _QUOTED_STOP_FRAGMENTS:
+        assert fragment in waiver_src, \
+            f"CLAUDE.md quotes a sentence `waiver.py` no longer prints: {fragment!r}"
+        assert fragment in section, \
+            f"this pin has drifted from the cadence it guards: {fragment!r}"

@@ -49,7 +49,7 @@ from ziggurat.paths import MIGRATIONS_DIR, SCHEMA_PATH
 
 #: Bump with every migration. A literal, not a computed value: if this file
 #: derived the number from the directory it would agree with any mistake.
-LATEST_SCHEMA_VERSION = 13
+LATEST_SCHEMA_VERSION = 14
 
 #: sha256 of every shipped migration. Pinned as literals for the reason spelled
 #: out in `test_an_applied_migration_is_never_edited` — this is the guard against
@@ -80,6 +80,8 @@ MIGRATION_DIGESTS: dict[str, str] = {
         "58065eaafef5a1adce6baad14c4c9603a954d7008ed2693b4d5c9f9e37f78ab0",
     "013_weekly_stats_kicking.sql":
         "158fe1778ebf88e8b000c86cbfc29085364f7967a1ef8ff00fc3c32bbf1d9d7b",
+    "014_league_ground_truth.sql":
+        "3f7b424cbba214fd98e78296989f4661492b73e82fa42a8d159c5e7485ef6d0d",
 }
 
 #: The doctrine, printed by the test that enforces it. Long on purpose: the next
@@ -380,6 +382,45 @@ def test_013_adds_nullable_kicking_columns_to_weekly_stats(migrated):
     row = migrated.execute(
         "SELECT * FROM weekly_stats WHERE player_id = '00-0025565'").fetchone()
     assert all(row[col] is None for col in KICKING_COLUMNS)
+
+
+def test_014_adds_nullable_ground_truth_columns_and_the_settings_table(migrated):
+    """Item 3.8a. Three NULLABLE columns on league_player_state — NULL means NOT
+    CAPTURED, never False — plus the league_settings table, keyed one row per
+    (season, snapshot day) like league_teams.
+
+    CATCHES: a NOT NULL / DEFAULT 0 on `injured` or `droppable`, which would turn
+    "we do not know" into "healthy" / "drop away" on all 41 pre-014 snapshot days;
+    and a primary key that is not the day partition (the ingest deletes and
+    rewrites `(season, retrieved_as_of)`).
+    """
+    info = {r["name"]: r for r in migrated.execute("PRAGMA table_info(league_player_state)")}
+    for col, kind in (("injured", "INTEGER"), ("droppable", "INTEGER"),
+                      ("entry_injury_status", "TEXT")):
+        assert col in info, col
+        assert info[col]["type"] == kind
+        assert info[col]["notnull"] == 0, f"{col} must be nullable: NULL = not captured"
+        assert info[col]["pk"] == 0
+        assert info[col]["dflt_value"] is None, f"{col} must have no default"
+    assert _pk_columns(migrated, "league_player_state") == [
+        "season", "espn_player_id", "retrieved_as_of",
+    ]
+
+    # The pre-014 row shape still inserts and reads NULL in all three.
+    migrated.execute(
+        "INSERT INTO league_player_state (season, espn_player_id, player, position, "
+        "retrieved_as_of, knowable_as_of) VALUES (?,?,?,?,?,?)",
+        (2026, "9999", "Pre-014 Player", "WR", "2026-08-01", "2026-08-01"))
+    row = migrated.execute(
+        "SELECT * FROM league_player_state WHERE espn_player_id = '9999'").fetchone()
+    assert row["injured"] is None
+    assert row["droppable"] is None
+    assert row["entry_injury_status"] is None
+
+    assert _pk_columns(migrated, "league_settings") == ["season", "retrieved_as_of"]
+    settings_cols = {r["name"] for r in migrated.execute("PRAGMA table_info(league_settings)")}
+    from ziggurat.league.state import _SETTINGS_COLUMNS
+    assert set(_SETTINGS_COLUMNS) | {"retrieved_as_of", "knowable_as_of"} == settings_cols
 
 
 def test_the_old_snap_counts_key_really_did_lose_the_row(tmp_path):

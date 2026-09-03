@@ -289,11 +289,28 @@ def test_questionable_breaks_legality_in_ir_but_is_a_normal_body_elsewhere():
 
 
 def test_ir_eligibility_is_a_labelled_hypothesis():
+    """Item 3.8a SPLIT this label, and the split is the point.
+
+    The DESIGNATION half is settled: ESPN's own ``injured`` flag marks exactly
+    OUT/INJURY_RESERVE, measured 2026-09-02 with zero exceptions. The IR-SLOT
+    MECHANISM half is not — no roster in this league has ever used the slot — so
+    "UNVERIFIED" must survive on that half and ONLY that half. The old assertion
+    pinned "UNVERIFIED ... post-draft" on the settled sentence; a rewrite that
+    dropped the word entirely would have passed a laxer test.
+    """
     rows = [_row(eid=str(i)) for i in range(16)] + [_row(slot="IR", injury="OUT", eid="ir")]
     v = check_legality(rows)
     assert any(IR_ELIGIBLE_LABEL in r for r in v.reasons)
-    # the disclosure is explicit about being unverified
-    assert any("UNVERIFIED" in r and "post-draft" in r for r in v.reasons)
+    # the SETTLED half no longer calls itself unverified, and no longer defers to
+    # a post-draft app check that has now happened
+    assert "UNVERIFIED" not in IR_ELIGIBLE_LABEL
+    assert "post-draft" not in IR_ELIGIBLE_LABEL
+    assert "measured 2026-09-02" in IR_ELIGIBLE_LABEL
+    # the MECHANISM half still is unverified, and says what settles it
+    assert "UNVERIFIED" in waiver.IR_FIX_MODEL_LABEL
+    assert "IR slot" in waiver.IR_FIX_MODEL_LABEL
+    # and the verdict discloses HOW this occupant was decided (Rule 6)
+    assert any("injury tag" in r for r in v.ir_flag_notes)
 
 
 def test_every_claim_and_drop_ships_reasons(db, marginal_world):
@@ -396,8 +413,17 @@ def test_a_zero_drop_ir_move_is_the_primary_fix_when_an_eligible_body_exists(db,
     assert plan.ir_move_fix, "the costless IR move must be surfaced"
     move_blob = " ".join(plan.ir_move_fix)
     assert "NO drop" in move_blob and "Lead Runner" in move_blob and "IR Guy" in move_blob
-    # it is disclosed as a labelled hypothesis (ESPN mechanics unverified)
+    # it is disclosed as a labelled hypothesis — and since item 3.8a the label is
+    # narrowed to the IR-SLOT MECHANICS, which is the half still unverified
     assert any("UNVERIFIED" in line for line in plan.ir_move_fix)
+    assert any("no roster in this league has ever used the IR slot" in line
+               for line in plan.ir_move_fix)
+    # the DESTINATION's "(IR-eligible)" ships its per-player evidence — which field
+    # decided it (ESPN's own flag, or the injury-tag proxy when the flag was not
+    # captured), the same line the occupant rows carry (item 3.8a audit)
+    evidence = [line for line in plan.ir_move_fix if line.startswith("Lead Runner:")]
+    assert len(evidence) == 1, plan.ir_move_fix
+    assert "`injured` flag" in evidence[0] and "ELIGIBLE" in evidence[0]
     # the drop, if present, is demoted to the ALTERNATIVE
     if plan.forced_drop is not None:
         assert any("ALTERNATIVE" in r for r in plan.forced_drop.reasons)
@@ -458,21 +484,30 @@ def test_two_eligible_ir_occupants_block_and_the_fix_restores_ir_count(db, margi
 
 
 def test_the_ir_unverified_disclosure_shows_in_the_default_blocked_view(db, marginal_world):
-    """F2: the UNVERIFIED IR-eligibility disclosure renders even with reasons=False
-    (the default `ziggurat waivers` view), under a destructive forced drop."""
+    """F2: the IR disclosure renders even with reasons=False (the default
+    `ziggurat waivers` view), under a destructive forced drop.
+
+    Item 3.8a split it: the still-UNVERIFIED half is the IR SLOT MECHANISM, and a
+    per-occupant line now says WHICH signal decided his eligibility."""
     _world(marginal_world, injury="QUESTIONABLE")
     plan = _plan(db)
     text = waiver.format_waiver_plan(plan, reasons=False)
     assert "UNVERIFIED" in text
+    assert "what ESPN's IR SLOT itself accepts" in text
+    # the flag was not captured for this synthetic row, so the PROXY path is
+    # disclosed per player rather than as a blanket sentence
+    assert "flag was NOT captured for this player" in text
 
 
 def test_the_ir_unverified_disclosure_shows_on_the_legal_path(db, marginal_world):
-    """F2: a legal roster whose IR occupant is legitimately OUT still discloses that
-    the legality verdict rests on an UNVERIFIED inference (default view)."""
+    """F2: a legal roster whose IR occupant is legitimately OUT still discloses
+    that the legality verdict rests on an UNVERIFIED IR-slot mechanism (default
+    view) — narrowed by item 3.8a, but still on the default page."""
     _world(marginal_world, injury="OUT")
     plan = _plan(db)
     text = waiver.format_waiver_plan(plan, reasons=False)
     assert "UNVERIFIED" in text
+    assert "what ESPN's IR SLOT itself accepts" in text
 
 
 def test_a_blank_status_ir_occupant_is_unknown_not_illegal():
@@ -969,6 +1004,14 @@ class _FakeBoard:
     won. Real lineup objectives are essentially never like this, which is exactly
     why the complement case needs a constructed one rather than a fixture."""
 
+    # The real board exposes the caps its matrix was filtered with (item 3.8a) and
+    # ``_select_claims`` reads them from there rather than from the module constant,
+    # so the double has to carry them too. ``league_limits = None`` is the THIRD
+    # state — no settings row was readable — and is deliberately not the same as an
+    # empty mapping (audit fix): the page must not claim a fence it never read.
+    position_caps = waiver.POSITION_CAPS
+    league_limits = None
+
     def __init__(self, values):
         self.values = values
         self.calls = 0
@@ -1106,6 +1149,8 @@ def test_the_chain_search_is_lazy_not_a_full_re_evaluation(db, marginal_world):
     class Counting:
         def __init__(self, inner):
             self._inner, self.calls = inner, 0
+            # forward the real board's enforced caps (item 3.8a)
+            self.position_caps = inner.position_caps
 
         def value_after(self, sw=(), *, pure_adds=()):
             self.calls += 1
@@ -1227,6 +1272,9 @@ class _FuncBoard:
     """A board whose value is an explicit FUNCTION of the applied add set — for
     cases where enumerating every subset by hand would be noise rather than the
     thing under test."""
+
+    # See _FakeBoard: _select_claims reads the enforced caps off the board (3.8a).
+    position_caps = waiver.POSITION_CAPS
 
     def __init__(self, fn):
         self.fn = fn
@@ -1408,14 +1456,25 @@ def test_a_cap_blocked_leftover_is_labelled_a_cap_not_an_economic_refusal():
     assert [r.add for r in chain.chain_capped] == ["Two Thrower"]
     assert not chain.chain_rejected and not chain.chain_under_ranked
     reason = chain.chain_capped[0].reason
-    assert "caps that at" in reason and "not a league rule" in reason
+    # Item 3.8a: the reason names WHICH of the two fences bound. This board carries
+    # no league limit, so it must say the module guard — and it must NOT go on
+    # claiming "not a league rule" unconditionally now that a league rule exists.
+    assert f"the binding limit is {caps}" in reason
+    # This board double carries NO league limits (`league_limits is None`), which
+    # is a THIRD state, not the module-guard state: the page must say the league's
+    # own limit was not captured rather than assert a fence nobody read (audit fix).
+    assert "item 3.2's POSITION_CAPS" in reason
+    assert "NOT CAPTURED" in reason
     assert "undo part of them" not in reason
 
     # the exhaustion note names the CAP, not a spent player
     assert chain.chain_stop == waiver.STOP_EXHAUSTED
     notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
     assert "reuses a player already spent above" not in notes
-    assert "over this board's limit for its position" in notes
+    assert "over the binding limit for its position" in notes
+    # ...and with no league limits read, it says ONE fence applied, not two.
+    assert "Only ONE fence applied here" in notes
+    assert "TWO fences apply" not in notes
 
 
 def test_a_cap_excluded_pure_add_does_not_let_phase_a_settle_the_whole_search():
@@ -1658,3 +1717,396 @@ def test_a_position_counts_argument_is_required_not_defaulted():
     p = sig.parameters["position_counts"]
     assert p.default is inspect.Parameter.empty
     assert p.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ============================================ item 3.8a — ESPN's own flags in the plan
+
+
+def _row38(slot=None, injury="ACTIVE", pos="WR", eid="1", name="P", **extra):
+    return {"lineup_slot": slot, "injury_status": injury, "position": pos,
+            "espn_player_id": eid, "player": name, **extra}
+
+
+def test_espn_own_flag_decides_ir_eligibility_and_the_reason_names_it():
+    """ESPN's own `injured` boolean is the same field the app reads, and when we
+    have it, it wins (item 3.8a).
+
+    CATCHES a rewrite that stores the flag and keeps inferring from the tag —
+    which is what `eligibleSlots` got wrong before it: store the field, assume it
+    means something, never actually read it.
+    """
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="INJURY_RESERVE", eid="ir", name="IR Guy", injured=1)]
+    v = check_legality(rows)
+    assert v.legal is True and v.ir_ineligible == ()
+    assert any("ESPN's own `injured` flag reads TRUE" in n for n in v.ir_flag_notes)
+    # the PROXY disclosure must NOT fire — the flag was captured for him
+    assert not any("was NOT captured" in n for n in v.ir_flag_notes)
+
+
+def test_the_espn_flag_overrides_a_stale_looking_tag_and_makes_the_roster_illegal():
+    """The Tuesday-reset crux, decided by ESPN's own flag: an IR occupant whose
+    flag reads FALSE is forced onto the active roster even if his tag still looks
+    plausible. 17 active bodies on a 16-slot roster blocks EVERY transaction."""
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy", injured=0)]
+    v = check_legality(rows)
+    assert v.legal is False
+    assert v.active_count == 17
+    assert [o.player for o in v.ir_ineligible] == ["IR Guy"]
+    assert any("`injured` flag reads FALSE" in n for n in v.ir_flag_notes)
+
+
+def test_an_uncaptured_flag_falls_back_to_the_proxy_with_a_PER_PLAYER_note():
+    """NULL is NOT captured — and that happens on a POST-014 snapshot too, when a
+    rostered player is missing from ESPN's pool response (item 3.8a).
+
+    CATCHES a blanket "pre-migration" note: two IR occupants can differ, and the
+    disclosure has to be about the PLAYER, not about the migration era.
+    """
+    rows = [_row38(eid=str(i)) for i in range(15)] + [
+        _row38(slot="IR", injury="OUT", eid="a", name="Flagged Guy", injured=1),
+        _row38(slot="IR", injury="OUT", eid="b", name="Proxy Guy"),
+    ]
+    v = check_legality(rows)
+    notes = " | ".join(v.ir_flag_notes)
+    assert "Proxy Guy: ESPN's `injured` flag was NOT captured" in notes
+    assert "Flagged Guy: ESPN's own `injured` flag reads TRUE" in notes
+    assert "Flagged Guy: ESPN's `injured` flag was NOT captured" not in notes
+
+
+def test_an_undroppable_player_is_tagged_on_the_DEFAULT_waivers_page(db, marginal_world):
+    """A3: the tag must render WITHOUT --reasons.
+
+    CATCHES putting it in ``reasons``: those render only under --reasons, so on
+    the page the operator actually reads, the board would propose a drop ESPN
+    refuses with no mark at all.
+    """
+    specs = _active_specs() + [_ir_spec("OUT")] + _POOL_SPECS
+    for s in specs:
+        if s["name"] == "Depth Runner":
+            s["droppable"] = 0
+    marginal_world(specs, retrieved=PULL)
+    plan = _plan(db)
+    row = next(d for d in plan.drop_board if d.player == "Depth Runner")
+    assert row.undroppable is True
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "Depth Runner" in text
+    assert "[UNDROPPABLE" in text
+    # and no recommendation anywhere names him as the drop
+    for rec in list(plan.claims) + list(plan.fcfs_grabs) + list(plan.streaming):
+        assert rec.drop != "Depth Runner"
+
+
+def test_the_forced_drop_skips_an_undroppable_player(db, marginal_world):
+    """THE SECOND DROP PATH (item 3.8a). The illegal-roster fix picks a BOARD row,
+    not a swap, so the matrix fence does not cover it — and this is the one
+    instruction the operator cannot work around: obeying a drop ESPN refuses
+    leaves the roster illegal and every claim blocked.
+    """
+    specs = _active_specs() + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    marginal_world(specs, retrieved=PULL)
+    baseline = _plan(db)
+    assert baseline.blocked is True and baseline.forced_drop is not None
+    named = baseline.forced_drop.player
+
+    # now make exactly that player undroppable and rebuild the world
+    db.execute("DELETE FROM league_player_state")
+    db.execute("DELETE FROM projections")
+    db.execute("DELETE FROM players")
+    db.commit()
+    specs2 = [dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    for s in specs2:
+        if s["name"] == named:
+            s["droppable"] = 0
+    marginal_world(specs2, retrieved=PULL)
+    plan = _plan(db)
+    assert plan.blocked is True
+    assert plan.forced_drop is not None
+    assert plan.forced_drop.player != named, "ESPN refuses this drop; naming it is useless"
+    assert any("UNDROPPABLE" in n and named in n for n in plan.notes)
+    # he is still ON the board, tagged
+    assert any(d.player == named and d.undroppable for d in plan.drop_board)
+    # ...and the note REACHES the page. The blocked branch used to return before
+    # the notes loop, so every disclosure routed there was unreachable text.
+    text = waiver.format_waiver_plan(plan)
+    assert any(n in text for n in plan.notes), "a blocked page must render its notes"
+
+
+def test_a_league_position_limit_tighter_than_the_module_guard_binds_the_chain(
+        db, marginal_world):
+    """A4 (mandatory): today POSITION_CAPS <= the league's limit at every position,
+    so this path can ONLY be proved synthetically — and an unexercised fence is
+    not a fence. The refusal must name the LEAGUE rule, not the module guard.
+    """
+    _world(marginal_world, injury="OUT")
+    db.execute(
+        "INSERT INTO league_settings (season, acquisition_type, lineup_slot_counts, "
+        "position_limits, retrieved_as_of, knowable_as_of) VALUES (?,?,?,?,?,?)",
+        (SEASON, "WAIVERS_TRADITIONAL", '{"QB": 1}',
+         # the roster already holds 5 WRs; a league cap of 5 refuses every WR add
+         '{"QB": 3, "RB": 8, "WR": 5, "TE": 3, "K": 3, "D/ST": 3}', PULL, PULL),
+    )
+    db.commit()
+    plan = _plan(db, claim_budget=10)
+    assert plan.position_caps["WR"] == 5 < waiver.POSITION_CAPS["WR"]
+    assert all(r.add_position != "WR" for r in list(plan.claims) + list(plan.fcfs_grabs))
+    text = waiver.format_waiver_plan(plan, reasons=True)
+    assert "your LEAGUE's own roster limit" in text or \
+        any("tighter than this board's guard" in n for n in plan.notes)
+
+
+def test_the_ir_rule_note_is_silent_when_clean_and_speaks_on_news(db, marginal_world):
+    """The operator-attention contract: an interrupt must name an action or stay
+    silent. CATCHES an unconditional 'IR RULE CHECK: clean' note on every plan,
+    which is how the operator learns to skip the one report that matters."""
+    _world(marginal_world, injury="OUT")
+    # every row carries a captured flag that agrees with the rule -> clean
+    db.execute(
+        "UPDATE league_player_state SET injured = "
+        "CASE WHEN injury_status IN ('OUT','INJURY_RESERVE') THEN 1 ELSE 0 END")
+    db.commit()
+    plan = _plan(db)
+    assert plan.ir_rule is not None and plan.ir_rule.has_news is False
+    assert not any("IR RULE CHECK" in n for n in plan.notes)
+
+    # a designation this league has never served appears -> exactly one note
+    db.execute("UPDATE league_player_state SET injury_status = 'DOUBTFUL', injured = 0 "
+               "WHERE player = 'Fifth Catcher'")
+    db.commit()
+    plan2 = _plan(db)
+    assert plan2.ir_rule.has_news is True
+    assert sum("IR RULE CHECK" in n for n in plan2.notes) == 1
+    assert any("DOUBTFUL" in n for n in plan2.notes)
+
+
+# ==================================== item 3.8a audit fixes (waiver / legality)
+
+
+def test_the_espn_flag_BEATS_the_tag_when_the_two_DISAGREE():
+    """The ONLY rows that can prove flag-first are the ones where the tag says the
+    OPPOSITE. Both shipped tests used agreeing pairs — (injured=1,
+    INJURY_RESERVE) and (injured=0, QUESTIONABLE) — so a mutant that ignores
+    ``injured`` entirely, i.e. exactly the pre-3.8a code, passed the FULL suite
+    (measured: 2,702 passed, identical to control). The item's headline behaviour
+    change was pinned by nothing.
+
+    CATCHES: reverting ``_ir_status`` to the designation proxy.
+    """
+    # flag TRUE over an IR-INELIGIBLE tag: the proxy would call him ineligible and
+    # make this roster illegal at 17 active. ESPN's own flag says he may sit on IR.
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy", injured=1)]
+    v = check_legality(rows)
+    assert v.legal is True and v.active_count == 16 and v.ir_ineligible == ()
+    assert "reads TRUE, so we treat him as IR-ELIGIBLE" in " | ".join(v.ir_flag_notes)
+
+    # flag FALSE over an IR-ELIGIBLE tag: the proxy would pass an ILLEGAL roster
+    # as legal — every transaction blocked in the app with no explanation here.
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="OUT", eid="ir", name="IR Guy", injured=0)]
+    v = check_legality(rows)
+    assert v.legal is False and v.active_count == 17
+    assert [o.player for o in v.ir_ineligible] == ["IR Guy"]
+
+
+def test_a_flagged_player_with_a_blank_tag_is_eligible_not_unknown():
+    """The third discriminating row: no tag at all. The proxy returns UNKNOWN and
+    owes a "could not verify" advisory; the flag answers outright, so none is due.
+    """
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury=None, eid="ir", name="IR Guy", injured=1)]
+    v = check_legality(rows)
+    assert v.legal is True and v.ir_unverified == ()
+
+
+def test_the_violation_and_the_required_move_name_the_signal_that_DECIDED():
+    """``_ir_status`` is flag-first, so on the only rows where the flag changes an
+    answer the injury TAG is not the evidence — and both operator-facing sentences
+    still quoted it. The page then said "ESPN lists him OUT, not IR-eligible"
+    directly above a label stating that OUT is exactly the IR-ELIGIBLE
+    designation, with nothing anywhere saying the two ESPN fields DISAGREE.
+
+    CATCHES: rebuilding either sentence from ``o.injury_status`` alone.
+    """
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="OUT", eid="ir", name="IR Guy", injured=0)]
+    v = check_legality(rows)
+    blob = " | ".join(v.violations + v.ir_advisories)
+    assert "`injured` flag reads FALSE" in blob
+    assert "DISAGREE" in blob
+    assert "ESPN lists him OUT, not IR-eligible" not in blob
+
+    # the PROXY path keeps the tag wording — there the tag really did decide
+    proxy = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy")]
+    pblob = " | ".join(check_legality(proxy).ir_advisories)
+    assert "ESPN lists him QUESTIONABLE" in pblob and "PROXY" in pblob
+
+
+def test_a_blocked_page_renders_every_note_it_holds(db, marginal_world):
+    """The blocked branch of ``format_waiver_plan`` returned BEFORE the notes
+    loop, so every disclosure routed into ``plan.notes`` was unreachable text on
+    the one page where ESPN is blocking all transactions — the IR RULE CHECK
+    headline, the undroppable-skip note, item 3.4's alternative-fix option, and
+    the board's own "no projections are knowable" caveat.
+
+    CATCHES: re-introducing an early return above the loop.
+    """
+    _world(marginal_world, injury="QUESTIONABLE")
+    plan = _plan(db)
+    assert plan.blocked is True and plan.notes
+    text = waiver.format_waiver_plan(plan)
+    for note in plan.notes:
+        assert note in text, "a blocked plan must render every note it holds"
+
+
+def test_an_all_undroppable_roster_is_refused_WITH_a_reason(db, marginal_world):
+    """The new no-fix outcome the item itself introduced: when every priceable row
+    is undroppable, ``forced_drop`` is None, and if no IR-eligible body exists the
+    IR move is empty too. The page printed the ILLEGAL banner, the violation and
+    "No claims are planned until the roster is legal." — an alarm with no fix and
+    no reason. Refuse-and-propose became refuse-and-say-nothing.
+
+    CATCHES: a page that names neither a fix nor the reason it cannot.
+    """
+    specs = [dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    for s in specs:
+        s["droppable"] = 0
+    marginal_world(specs, retrieved=PULL)
+    plan = _plan(db)
+    assert plan.blocked is True
+    assert plan.forced_drop is None
+    text = waiver.format_waiver_plan(plan)
+    assert "NO FIX THIS TOOL CAN NAME" in text
+    assert "UNDROPPABLE" in text.upper()
+    # ...and it no longer points at a section this page does not have
+    assert "CANNOT VALUE" not in text
+
+
+def test_no_blocked_note_tells_you_to_drop_an_undroppable_player(db, marginal_world):
+    """THE FIFTH DROP PATH (item 3.8a audit). ``marginal.py``'s own enumeration
+    closed with "A fifth path is a fifth fence" — and there was one, unfenced: the
+    blocked page's "you may instead DROP {occupant} himself" note names an
+    IR-ineligible occupant in PROSE, so neither the matrix fence nor the
+    forced-drop fence covers it. ESPN's undroppable list is composed of elite
+    players and the Tuesday crux is a player hurt enough to occupy IR, so obeying
+    it means the app refuses, the roster stays illegal, and every claim stays
+    blocked.
+
+    The assertion is an INVARIANT over the whole notes list, not a string match on
+    one sentence, so a sixth path added later is caught too.
+    """
+    specs = [dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    for s in specs:
+        if s["name"] == "IR Guy":
+            s["droppable"] = 0
+    marginal_world(specs, retrieved=PULL)
+    plan = _plan(db)
+    assert plan.blocked is True
+    fenced = {d.player for d in plan.drop_board if d.undroppable}
+    assert "IR Guy" in fenced
+    for note in plan.notes:
+        if "DROP" in note.upper() and "UNDROPPABLE" not in note.upper():
+            assert not any(name in note for name in fenced), \
+                f"a note names a drop ESPN refuses: {note!r}"
+    assert any("UNDROPPABLE list, so dropping HIM is not an option" in n
+               for n in plan.notes)
+
+    # CONTROL: a droppable occupant still gets the option — the fence must not
+    # over-block, and NULL ("not captured") is never a refusal.
+    db.execute("DELETE FROM league_player_state")
+    db.execute("DELETE FROM projections")
+    db.execute("DELETE FROM players")
+    db.commit()
+    marginal_world([dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")]
+                   + _POOL_SPECS, retrieved=PULL)
+    plan2 = _plan(db)
+    assert any("you may instead DROP IR Guy himself" in n for n in plan2.notes)
+
+
+def test_a_cap_blocked_leftover_names_the_LEAGUE_limit_when_that_fence_bound():
+    """The LEAGUE branch of ``describe_cap`` never reached rendered text in any
+    test: its only coverage was a pure unit call, and the one test that exercised
+    the wiring ended in an ``or`` whose right disjunct is satisfied by the
+    ``effective_position_caps`` NOTE — which the classifier does not produce — so
+    replacing the interpolation with the module-guard literal left the suite green.
+
+    Asserts on the ``ChainRejection`` object rather than the page, so no other
+    sentence can satisfy it by accident.
+    """
+    class _LeagueCapped(_FakeBoard):
+        position_caps = dict(waiver.POSITION_CAPS, QB=2)
+        league_limits = {"QB": 2}
+
+    one = _fs("One Thrower", 10.0, "Sierra Rusher", add_id="1", drop_id="s", add_pos="QB")
+    two = _fs("Two Thrower", 9.0, "Tango Rusher", add_id="2", drop_id="t", add_pos="QB")
+    V = {frozenset(): 0.0, frozenset({"One Thrower"}): 10.0,
+         frozenset({"Two Thrower"}): 9.0,
+         frozenset({"One Thrower", "Two Thrower"}): 19.0}
+    chain = waiver._select_claims(
+        [one, two], board=_LeagueCapped(V), claim_budget=10, waiver_rank=None,
+        team_count=None, open_slots=0, candidate_notes={}, dup_names=set(),
+        position_counts={"QB": 1, "RB": 5},
+    )
+    assert [r.add for r in chain.chain_capped] == ["Two Thrower"]
+    reason = chain.chain_capped[0].reason
+    assert "the binding limit is 2" in reason
+    assert "your LEAGUE's own roster limit (ESPN positionLimits)" in reason
+    assert "modelling guard" not in reason
+    # ...and the page says TWO fences applied, because they really were both read
+    notes = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=15))
+    assert "TWO fences apply" in notes
+    assert "Only ONE fence applied" not in notes
+
+
+def test_faab_being_on_changes_what_a_claim_line_says_it_costs(db, marginal_world):
+    """"it is free and non-FAAB" was a hard-coded literal in every WAIVERS claim
+    reason — a league rule asserted from a string, in a recommendation. If a
+    commissioner flips FAAB on, `settings_verdicts` holds the correct verdict in a
+    command the weekly cadence never runs, while the claim line keeps telling the
+    operator submitting costs nothing.
+
+    CATCHES: an unconditional cost sentence.
+    """
+    swap = _fs("Free Catcher", 5.0, "Fourth Catcher", add_id="9", drop_id="4",
+               add_pos="WR", status="WAIVERS")
+    free = waiver._claim_reasons(
+        swap, kind=waiver.KIND_WAIVER, waiver_rank=None, team_count=None,
+        is_pure_add=False, candidate_notes=(), faab=0)
+    assert any("free and non-FAAB" in r for r in free)
+
+    paid = waiver._claim_reasons(
+        swap, kind=waiver.KIND_WAIVER, waiver_rank=None, team_count=None,
+        is_pure_add=False, candidate_notes=(), faab=1)
+    assert any("FAAB IS ON" in r and "COSTS BID DOLLARS" in r for r in paid)
+    assert not any("free and non-FAAB" in r for r in paid)
+
+    unknown = waiver._claim_reasons(
+        swap, kind=waiver.KIND_WAIVER, waiver_rank=None, team_count=None,
+        is_pure_add=False, candidate_notes=(), faab=None)
+    assert any("NOT CAPTURED" in r and "UNKNOWN" in r for r in unknown)
+
+
+def test_a_changed_league_roster_shape_is_disclosed_rather_than_priced_through():
+    """Migration 014's stated purpose is that a mid-season settings change stops
+    being invisible to every module that prices a claim. ``positionLimits`` was
+    duly wired; ``lineupSlotCounts`` was stored, printed, and consumed by nothing,
+    so ``check_legality`` keeps blocking (or permitting) on 16 active / 1 IR while
+    `ziggurat league settings` prints the new shape — two commands, one database,
+    silently contradicting each other on the check that decides whether ESPN will
+    process ANY transaction.
+
+    Reconciled by DISCLOSURE, not by deriving the structure: ``RosterStructure``
+    also drives replacement levels and the weekly seater.
+    """
+    from ziggurat.core.valuation import DEFAULT_ROSTER
+    same = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1, "D/ST": 1, "K": 1,
+            "BE": 7, "IR": 1}
+    assert waiver._roster_shape_mismatch({"lineup_slot_counts": same},
+                                         DEFAULT_ROSTER) is None
+    grown = {**same, "BE": 8, "IR": 2}
+    note = waiver._roster_shape_mismatch({"lineup_slot_counts": grown}, DEFAULT_ROSTER)
+    assert note and "17 active + 2 IR" in note and "16 active + 1 IR" in note
+    # nothing to say when the settings row was never captured
+    assert waiver._roster_shape_mismatch(None, DEFAULT_ROSTER) is None

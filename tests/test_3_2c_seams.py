@@ -208,9 +208,11 @@ def test_every_table_with_an_as_of_accessor_is_covered(db):
         # version match (not select_as_of) — the ghost-link fix; leakage-tested
         # transitively through recent_news (see the _ACCESSORS note above).
         "player_news_links",
-        # Item 3.1 owns the league tables and their own accessors/tests.
+        # Item 3.1 owns the league tables and their own accessors/tests;
+        # item 3.8a's league_settings joins them (get_league_settings /
+        # league_position_limits, leakage-tested in tests/test_league_state.py).
         "league_teams", "league_matchups", "league_player_state",
-        "league_transactions",
+        "league_transactions", "league_settings",
     }
     tables = {
         r[0] for r in db.execute(

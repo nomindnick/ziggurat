@@ -343,7 +343,13 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   IR-legality fix model ship as labelled hypotheses** (`IR_ELIGIBLE_STATUSES`,
   `IR_FIX_MODEL_LABEL`) — ESPN's `eligibleSlots` is not ingested and no draft has
   happened, so they are disclosed as UNVERIFIED on every plan, to confirm in-app
-  post-draft (same discipline as scoring §3.8). Three verified workflows (recon →
+  post-draft (same discipline as scoring §3.8). **AMENDED 2026-09-02 by item
+  3.8a: the two halves separated.** The DESIGNATION half is settled — ESPN's own
+  `injured` boolean is now ingested and marks exactly `IR_ELIGIBLE_STATUSES`
+  (n=1,036, 0 exceptions), re-checked on every snapshot — so "UNVERIFIED" and
+  "confirm post-draft" left `IR_ELIGIBLE_LABEL`. The IR-SLOT MECHANISM half is
+  still unverified and keeps the word: no roster in this league has ever used the
+  slot. `eligibleSlots` was never the signal — it lists IR for all 1,036 players. Three verified workflows (recon →
   build+green-gate → 7-dimension adversarial audit, 29 agents). **The audit found
   the seam clean (no leakage, no rules/boundary violations) and 18 real defects (6
   major), all fixed. Headline: the legality FIX was non-restorative and
@@ -471,6 +477,129 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   **Standing lesson this round paid for: a search that MEASURES something and then
   drops it is worse than one that never looked — it makes the tool's own stop
   sentence a lie, and the sentence is the part a novice cannot check.**
+
+- **3.8 wave A — ground-truth reconciliation (roster mechanics) — built &
+  tested 2026-09-02.** Three item-3.4/1.5 hypotheses met the post-draft league
+  and were replaced by machine truth stored PER SNAPSHOT (migration `014`,
+  `schema_version` 13→**14**; new `league_settings` table + three nullable
+  `league_player_state` columns). **The plan's own premise was false and is
+  annotated inline: `eligibleSlots` carries NO IR information** — slot 21 (IR)
+  is listed for **1,036 of 1,036** players alongside slot 20 (BE); it is a
+  POSITIONAL map. It is deliberately NOT stored, because a column that means
+  nothing is worse than an absent one. What IS stored: ESPN's own per-player
+  `injured` boolean, which marks **exactly** `{OUT, INJURY_RESERVE}` with 0
+  exceptions (n=1,036 universe / 160 rostered) — so `IR_ELIGIBLE_LABEL` is now a
+  SETTLED sentence and `state.ir_rule_check` / `ziggurat league ir-check` re-run
+  the comparison on every snapshot; `player.droppable`, because this league runs
+  an undroppable list (19 of 1,036, **two on the operator's own roster**) and
+  ESPN REFUSES those drops; and the roster ENTRY's own `injuryStatus`, stored raw
+  and interpreted nowhere as the most plausible ALTERNATIVE IR gate.
+  **`acquisitionBudget = 100` is CLOSED as INERT** (`isUsingAcquisitionBudget:
+  false`, every acquisition/move limit at ESPN's −1) — with a counter finding
+  recorded on the mapper so nothing ever misreads it: **`transactionCounter.acquisitions`
+  did NOT increment for three won waiver claims**, so `league_teams.acquisitions`
+  is not a count of claims won. **The trade deadline localises to Wed 2026-12-02
+  09:00 PST**, and the NFL week it precedes (13) is a JOIN against `schedules`,
+  not arithmetic — 2026's Week 1 opens on a Wednesday. **The waiver batch runs
+  00:01–01:13 PACIFIC** (n=29 from ESPN's own `waiverProcessStatus`), not the
+  "3–4 AM" Eastern figure this file carried; the cadence now states the ~23:59 PT
+  Tuesday submission deadline that follows from it.
+  **What did NOT get settled, and says so:** the IR-SLOT MECHANISM. `injured`
+  and `injury_status` are two encodings of ONE fact agreeing — that is a
+  tautology, not evidence about what ESPN's IR slot accepts, and **0 of 10
+  rosters have ever occupied it**. So `IR_FIX_MODEL_LABEL` keeps the word
+  UNVERIFIED, narrowed to exactly the mechanics, and names the two things that
+  settle it (the first occupant, or a 30-second app check). **Half-observed
+  2026-09-03, on the ESPN website (the operator has no app):** a player's MOVE
+  button lists only the moves ESPN accepts, and it offered IR to nobody on a
+  roster with no OUT/IR player — an ineligible body cannot be put on IR, and the
+  "refusal" is an absent option, not a message. Still open: whether an OUT/IR
+  player IS offered the slot (open his MOVE menu the first time one is on the
+  roster), and what ESPN does when an occupant heals (needs a real occupant).
+  The label, the renderer disclosure and the `ir-check` ask say exactly that.
+  DOUBTFUL/PUP/NFI
+  remain UNOBSERVED → INELIGIBLE, watched rather than confirmed: the report fires
+  the first time a designation this league has never served appears.
+  **Two fences now exist where the code said there was one:** the league's own
+  `positionLimits` are ingested and composed with `POSITION_CAPS` at ONE seam
+  (`marginal.effective_position_caps`, resolved inside `build_board`, exposed as
+  `board.position_caps` and read by all three cap check points) — `min()` alone
+  would have been a bug twice over (ESPN's −1 "unlimited" becomes a cap of −1 and
+  refuses every add; "D/ST" never meets "DST"). Today `POSITION_CAPS` is at or
+  below the league's everywhere, so this changes nothing live and is proved
+  synthetically. **The undroppable fence sits at the TWO `swaps.append` sites,
+  not at the loop head** — the drop board must still price and TAG him — and the
+  illegal-roster forced drop, a second path that picks a BOARD row, is fenced
+  separately. New `ziggurat league {settings,ir-check}`; `league status` gains an
+  always-on waiver-batch line and an IR line that is SILENT when clean. Suite
+  green (**2,714 passed, 4 skipped**; +30). Details: `IMPLEMENTATION_PLAN.md`
+  3.8 + gitignored `intel/research/ground-truth-3.8a.md`.
+  **Standing lesson this item paid for: two encodings of one field agreeing is a
+  tautology, not a confirmed mechanism.** Retiring "UNVERIFIED" on the strength
+  of it would have removed the label from a claim exactly as unverified as it was
+  the day it was written — which is why the label was SPLIT rather than deleted,
+  and why the standing check watches for the case the rule has never been tested
+  on rather than re-printing the case it always passes.
+
+- **3.8A audit-fix round — done 2026-09-02, same day.** A multi-lens adversarial
+  audit (50 raw findings across 5 lenses, deduped to 30, every one verified by
+  three refute-first agents) returned **30 confirmed defects, 0 refuted (14
+  major, 16 minor)**; all are fixed and **no recommendation, number or ordering
+  moves** — every fix is a disclosure the build swallowed, a fence it lacked, or a
+  sentence it asserted without measuring. No schema change (`014` stays frozen; no
+  `015` was needed). The workflow's fix pass closed 29 and reported "26" in its
+  own narrative — a count that did not match its own list; the 30th (minor: the
+  zero-drop IR-move fix named its DESTINATION player "(IR-eligible)" with no
+  per-player evidence, while flag-first lets that player carry a visible ACTIVE
+  tag) was fixed by hand afterwards — `_zero_drop_reslot` now returns the
+  `_ir_reason` line for each moved player and the fix splices them before
+  `IR_FIX_MODEL_LABEL` — and pinned in `test_waiver.py`.
+  **The headline is that the fence's own enumeration was wrong about itself:**
+  `marginal.py` listed the four places a drop can be named and closed "A fifth path
+  is a fifth fence" — and there was a fifth, unfenced: the blocked page's "you may
+  instead DROP {occupant} himself" note names an IR-ineligible occupant in PROSE,
+  which neither the matrix fence nor the forced-drop fence covers, on exactly the
+  Tuesday crux the module exists for. **Two RENDERERS of the one scan disagreed
+  too**: `ziggurat marginal` printed NO undroppable tag at any verbosity while the
+  same board tagged two rows on `ziggurat waivers`, and told the operator to "drop
+  him and add X and you would GAIN N" — both now build from one `UNDROPPABLE_TAG`
+  and a fenced row's reason is a valuation, not an instruction.
+  **Second: the blocked waiver page discarded every note it held** (`format_waiver_plan`
+  returned before the notes loop), including the ONLY explanation of the new
+  no-fix outcome this item introduced — the page printed an alarm, no fix and no
+  reason. **Third: cap attribution was INFERRED from a strict inequality**, so a
+  binding league limit that TIES the guard (RB 8, WR 8, TE 3 — this league) read
+  "not a league rule", and a database with no settings row still claimed "TWO
+  fences apply"; the league map is now CARRIED (`board.league_limits`, None = not
+  read). **Fourth: the flag-first rewrite was pinned by nothing** — a mutant that
+  ignores `injured` entirely, i.e. the pre-3.8a code, passed the full suite; and on
+  the only rows where the flag changes an answer, the violation and the REQUIRED
+  ROSTER MOVE still quoted the injury TAG as the evidence. **Fifth: the watch
+  LATCHED** — a frozen `OBSERVED_INJURY_STATUSES` meant the first DOUBTFUL would
+  print the same headline every day for the rest of the season; "never seen before"
+  is now derived from this league's own earlier snapshots, `has_news`'s coverage
+  clause is scoped to rows that can decide something for the reader, and the first
+  IR occupant is a TRANSITION rather than a standing state.
+  Also fixed: a zero-comparison snapshot reported as agreement; the coverage
+  disclosure naming only the IR consequence and pointing at the wrong remedy;
+  NOT-CAPTURED acquisition fields printing a definitive FAAB verdict; the FAAB
+  verdict reaching no daily surface while the claim line asserted "free and
+  non-FAAB" from a literal; the trade deadline stated backwards; a Monday-night
+  waiver deadline this league never runs; and the league's own roster SHAPE stored,
+  printed and consumed by nothing (reconciled by disclosure). Docs: the Tuesday
+  step quoted a stop sentence this item had deleted (now pinned by test), the
+  schema transition and suite count were wrong in this file, the "05:15 snapshot
+  persists" claim is false (day-granular partitions), and §3.4's Update block
+  carries the M1 amendment.
+  Suite green (**2,743 passed, 4 skipped**; +29 over the wave-A count, all of them
+  pins for the defects above). The A/B against the pre-sync copy and the live run
+  both reproduce the wave-A chain EXACTLY — #1 Downs ← Mitchell +3.3, #2 Love ←
+  Rodriguez Jr. +1.0 (+2.2 alone), joint **+4.3**, 5 streaming, 3 refused, 3
+  capped — at 24.1 s / 24.0 s against a 24.36 s baseline.
+  **Standing lesson this round paid for: an enumeration of the places a rule must
+  be enforced is itself a claim, and it needs a test.** The same shape produced the
+  unpinned flag-first rewrite — a mechanism is not pinned by a test that cannot
+  distinguish it from the mechanism it replaced.
 
 - **3.5 lineup support & streaming — built, audited & fixed 2026-07-26.** Two new
   **permanent** core modules, pure composition over existing as-of accessors (no
@@ -957,6 +1086,8 @@ scripts/install-push.sh                   # item 3.6 — Wed briefing + 20-min a
 #   ziggurat brief run --no-push --no-llm   ;   ziggurat alerts run --no-push
 loginctl enable-linger "$USER"            # or every timer dies at logout
 .venv/bin/ziggurat league status          # last run + UNRECOVERABLE missing days
+.venv/bin/ziggurat league settings        # item 3.8a — the league's own rulebook (once, and on any change)
+.venv/bin/ziggurat league ir-check        # item 3.8a — ESPN's own `injured` flag vs our IR-eligible rule
 .venv/bin/ziggurat ingest status          # per-source last successful pull + staleness
 .venv/bin/ziggurat brief status           # item 3.6 — last briefing runs
 .venv/bin/ziggurat alerts status          # item 3.6 — last alert ticks ('empty' is healthy)
@@ -1021,13 +1152,24 @@ The in-season loop, keyed by day. "Run the Tuesday workflow" means: do the
 steps under **Tuesday**, in order, and journal the result — each day below is
 executable by a fresh session from this file alone. Two ESPN facts shape the
 rhythm (re-verified against the live `mSettings` pull 2026-08-27): waivers
-process ~3–4 AM PT **every morning except Tuesday** (`waiverProcessDays`; the
+process **every morning except Tuesday** (`waiverProcessDays`; the
 Wednesday run is the week's big batch because the weekend's locked players
 clear then), and the waiver order **resets every week to inverse standings**
 (`waiverOrderReset` — NOT rolling move-to-back), so priority is
 use-it-or-lose-it within the week and **Tuesday claims are free — queue
 liberally**; what clears waivers is first-come-first-served, so **Wednesday
 morning is when speed matters**.
+
+**The batch runs just after MIDNIGHT PACIFIC, not "3–4 AM" — measured, item
+3.8a.** ESPN's own `waiverProcessStatus` map holds every batch it has ever run:
+29 of them (28 in 2025 + 2026-09-02) span **00:01–01:13 PT**. The 3–4 AM figure
+that was in circulation here was the EASTERN clock. Two consequences: a claim
+must be **queued before ~23:59 PT** to make that night's batch, and Tuesday's
+23:15 sync is the last run before it while Wednesday's 05:15 run is the first
+after — so TUESDAY's stored snapshot is the pre-batch state and WEDNESDAY's is
+the post-batch one. Snapshots are day-granular and each sync replaces its whole
+day, so what persists is "Tuesday's" and "Wednesday's", never a named clock time. `ziggurat league status` prints the observed last-execution
+time on every run, so this is checkable rather than remembered.
 
 **Division of labor:** the tools recommend and explain; only the operator acts
 in the ESPN app (claims, adds, lineup changes, IR moves). Every workflow ends
@@ -1101,8 +1243,8 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    "the next-best add is worth nothing or less once these have won" is a
    verdict: a SHORT list is the answer, not a truncation, and queueing past it
    is how you end up reversing your own moves the next morning. "the priced
-   add/drop pairs ran out", "every remaining add would put you over this
-   board's limit for its position" and "pricing hit this module's ceiling" are
+   add/drop pairs ran out", "would put you over the binding limit for" its (or
+   their) position and "pricing hit this module's ceiling" are
    BOOKKEEPING — a further claim was never measured, so journal that rather
    than report a short list as a verdict. Re-running deeper helps ONLY in the
    one case the plan names the budget.
@@ -1116,10 +1258,19 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    INSTEAD OF that move — its "alone" number is what it is then worth — never
    alongside it. A row under "POSITIVE AFTER THE CHAIN" is the opposite case:
    the search reached it too late to rank, and it is worth queueing AFTER the
-   list. The operator submits in the app before the overnight batch.
+   list. **The operator submits in the app before ~23:59 PT TUESDAY** — the
+   batch runs 00:01–01:13 PT (measured, item 3.8a), so "before the overnight
+   batch" means tonight, not before breakfast.
 5. Journal each claim: add, drop, the tool's stated reasons verbatim, and what
    would make it wrong. A no-claim Tuesday is journaled as the decision not to
-   claim.
+   claim. Wednesday's "which claims won" compares TUESDAY's stored snapshot —
+   final once Tuesday's 23:15 run lands, and durable because no later run shares
+   that date — against TODAY's. `league_player_state` keeps ONE snapshot per
+   calendar DAY and every sync DELETES and rewrites the whole day, so today's
+   partition is only ever the most recent pull: do that comparison in Wednesday
+   step 2, right after the sync and BEFORE any step-3 grab. ESPN stamps a won
+   claim `ADD` on the day it processed, exactly like a grab you make yourself, so
+   after a grab the journal is the only thing that tells them apart.
 
 ### Wednesday — post-waiver scan
 1. The 06:00 PT briefing (timer) is on the phone; the full text is in

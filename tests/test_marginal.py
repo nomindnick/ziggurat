@@ -1701,3 +1701,222 @@ def test_value_after_hands_the_model_a_CANONICALLY_SORTED_key_list(db, world):
     assert seen, "value_after did not reach the model"
     for keys in seen:
         assert keys == sorted(keys), keys
+
+
+# ============================================ item 3.8a — ESPN's undroppable list
+
+
+def _board_with(db, marginal_world, specs, **kwargs):
+    roster, pool = marginal_world(specs)
+    return marginal.build_board(
+        db, as_of=PULL, season=SEASON, roster=roster, pool=pool, weeks=WEEKS,
+        pool_limit=None, **kwargs)
+
+
+def test_an_undroppable_player_is_priced_and_tagged_but_never_a_swap_drop(
+        db, marginal_world):
+    """ESPN REFUSES a drop of a player on its undroppable list, so a swap naming
+    one is an instruction the operator cannot follow (item 3.8a).
+
+    CATCHES the two halves of the fence together, which is why they are one test:
+    (a) no swap row may name him as the DROP — measured live, this league runs an
+        undroppable list and two of the operator's own players are on it;
+    (b) he must STILL appear on the drop board, priced, with the tag. Fencing at
+        the loop head instead of at the two ``swaps.append`` sites would delete
+        his board row, silently answering "what is he worth?" with nothing.
+    """
+    specs = [dict(s) for s in ALL_SPECS]
+    for s in specs:
+        if s["name"] == "Depth Runner":
+            s["droppable"] = 0
+    board = _board_with(db, marginal_world, specs)
+
+    assert all(s.drop != "Depth Runner" for s in board.swaps), \
+        "ESPN refuses this drop — no swap may name him"
+    row = next(r for r in board.rows if r.player == "Depth Runner")
+    assert row.undroppable is True
+    assert not row.unvalued and row.marginal_points != 0.0, \
+        "he is still PRICED — 'what is he worth' is a fair question"
+    # everyone else is unaffected: the fence is per-player, not a board-wide mode
+    assert any(s.drop == "Second Runner" for s in board.swaps)
+    assert all(r.undroppable is False for r in board.rows if r.player != "Depth Runner")
+
+
+def test_a_not_captured_droppable_flag_is_not_a_refusal(db, marginal_world):
+    """NULL means NOT CAPTURED, never "undroppable" (item 3.8a).
+
+    CATCHES a truthiness test (``if not d.droppable``) in place of ``== 0``: all
+    41 pre-014 snapshot days carry NULL in this column, so a truthiness fence
+    would silently empty the entire swap matrix on any historical read.
+    """
+    board = _board_with(db, marginal_world, ALL_SPECS)   # no droppable key at all
+    assert all(r.undroppable is False for r in board.rows)
+    assert board.swaps, "a NULL flag must not empty the matrix"
+
+
+def test_the_league_own_position_limit_binds_when_it_is_tighter(db, marginal_world):
+    """Two fences now exist and the TIGHTER one binds (item 3.8a).
+
+    Live this changes nothing — the league allows QB 4 / RB 8 / WR 8 / TE 3 /
+    K 3 / D/ST 3 and POSITION_CAPS is at or below every one — so the path can only
+    be proved synthetically, and it must be: an unexercised fence is not a fence.
+    """
+    caps, notes = marginal.effective_position_caps({"WR": 2, "RB": 8})
+    assert caps["WR"] == 2 and caps["RB"] == 8
+    assert any("tighter than this board's guard" in n and "WR 2" in n for n in notes)
+
+    board = _board_with(db, marginal_world, ALL_SPECS, position_caps=caps)
+    assert board.position_caps["WR"] == 2
+    # the roster already holds 4 WRs, so no WR add can pass a cap of 2
+    assert all(s.add_position != "WR" for s in board.swaps)
+    assert marginal.describe_cap("WR", 2) == "your LEAGUE's own roster limit (ESPN positionLimits)"
+
+
+def test_espn_unlimited_and_zero_sentinels_never_become_a_cap(db, marginal_world):
+    """``min(POSITION_CAPS, league_limit)`` is a BUG twice over (item 3.8a).
+
+    ESPN's sentinel for "no limit" is -1, so ``min(3, -1) == -1`` would refuse
+    EVERY add at that position and report it through the CAPPED bucket as though
+    it were a roster rule; a 0 is what a zeroed/degraded settings row looks like
+    and gets a NOTE, not a silent shutout. And the label spaces do not meet —
+    ESPN says "D/ST", POSITION_CAPS says "DST" — so a raw join drops the defense
+    limit with no error anywhere.
+    """
+    caps, notes = marginal.effective_position_caps(
+        {"QB": -1, "RB": 0, "WR": 8, "TE": 3, "K": 3, "D/ST": 3})
+    assert caps["QB"] == marginal.POSITION_CAPS["QB"], "-1 is unlimited, not a cap of -1"
+    assert caps["RB"] == marginal.POSITION_CAPS["RB"], "0 is a degraded row, not a shutout"
+    assert any("reads 0" in n for n in notes)
+    # THE LABEL BRIDGE. A raw join keeps ESPN's own spelling, which lands a "D/ST"
+    # key the scan never looks up — silently, with no error anywhere. Asserting a
+    # VALUE cannot catch that (D/ST's module cap is already 1, so a wrong key
+    # leaves the right answer sitting there by luck); assert the KEY SPACE.
+    caps2, _ = marginal.effective_position_caps({"D/ST": 1, "K": 1})
+    assert "D/ST" not in caps2, "ESPN's label must be canonicalised, not carried through"
+    assert set(caps2) == set(marginal.POSITION_CAPS)
+    assert caps2["DST"] == 1
+    caps3, notes3 = marginal.effective_position_caps({"D/ST": 3, "QB": 2})
+    assert "D/ST" not in caps3
+    assert caps3["QB"] == 2 and caps3["DST"] == marginal.POSITION_CAPS["DST"]
+    assert any("QB 2" in n for n in notes3)
+
+
+def test_build_board_reads_the_league_limits_when_none_are_passed(db, marginal_world):
+    """Every production caller (the waiver plan, `ziggurat marginal`, the
+    briefing) goes through the SAME composition, because ``build_board`` resolves
+    it — a per-call-site composition is how three read points end up with three
+    different numbers."""
+    roster, pool = marginal_world(ALL_SPECS)
+    board = marginal.build_board(
+        db, as_of=PULL, season=SEASON, roster=roster, pool=pool, weeks=WEEKS,
+        pool_limit=None)
+    assert dict(board.position_caps) == dict(marginal.POSITION_CAPS)   # no settings row
+
+    db.execute(
+        "INSERT INTO league_settings (season, acquisition_type, lineup_slot_counts, "
+        "position_limits, retrieved_as_of, knowable_as_of) VALUES (?,?,?,?,?,?)",
+        (SEASON, "WAIVERS_TRADITIONAL", '{"QB": 1}',
+         '{"QB": 1, "RB": 8, "WR": 8, "TE": 3, "K": 3, "D/ST": 3}', PULL, PULL),
+    )
+    db.commit()
+    board2 = marginal.build_board(
+        db, as_of=PULL, season=SEASON, roster=roster, pool=pool, weeks=WEEKS,
+        pool_limit=None)
+    assert board2.position_caps["QB"] == 1
+    assert any("tighter than this board's guard" in n for n in board2.notes)
+
+
+# ==================================== item 3.8a audit fixes (marginal drop board)
+
+
+def test_the_marginal_page_renders_the_undroppable_tag_at_BOTH_verbosities(
+        db, marginal_world):
+    """`ziggurat marginal` is the SECOND drop board and it rendered no tag at all.
+
+    ``MarginalRow.undroppable`` is a FIELD rather than a reason string precisely
+    so it shows on the DEFAULT page where the drop is proposed — and only
+    ``waiver.drop_line`` honoured that. Two renderers of ONE scan silently
+    disagreeing is the exact failure sharing the scan exists to prevent: the same
+    board tagged two rows on `ziggurat waivers` and none here.
+
+    The fixture makes the CHEAPEST body undroppable, which is the dangerous
+    ordering — he lands at the TOP of a "lowest value is the most droppable"
+    board with a populated `best add`.
+
+    CATCHES: a tag rendered only under ``--reasons``, and a drop-board renderer
+    that reads the field on one page and not the other.
+    """
+    specs = [dict(s) for s in ALL_SPECS]
+    for s in specs:
+        if s["name"] == "Depth Runner":
+            s["droppable"] = 0
+    board = _board_with(db, marginal_world, specs)
+
+    plain = marginal.format_marginal(board)
+    verbose = marginal.format_marginal(board, reasons=True)
+    assert "UNDROPPABLE" in plain, "the tag must survive the DEFAULT page"
+    assert "UNDROPPABLE" in verbose
+    assert marginal.UNDROPPABLE_TAG in plain
+
+    # ...and the fenced row's reason is a VALUATION, not an instruction ESPN
+    # refuses. It used to read "drop him and add X and you would GAIN N".
+    row = next(r for r in board.rows if r.player == "Depth Runner")
+    assert not any(r.startswith("drop him and add") for r in row.reasons)
+    assert any("ESPN refuses this drop" in r for r in row.reasons)
+    # a clean board carries no tag and no empty column
+    clean = marginal.format_marginal([r for r in board.rows if not r.undroppable])
+    assert "UNDROPPABLE" not in clean
+
+
+def test_describe_cap_names_BOTH_fences_when_they_agree_and_neither_when_unread(
+        db):
+    """Attribution is CARRIED, not inferred from ``cap < POSITION_CAPS[pos]``.
+
+    That inequality is wrong in both directions on the real board. This league's
+    limits are QB 4 / RB 8 / WR 8 / TE 3 / K 3 / D/ST 3, so at RB, WR and TE the
+    two fences TIE — and a refusal there printed "the binding limit is 3. That is
+    a modelling guard ..., not a league rule", which a novice reads as "the app
+    will let me do this anyway" and hand-queues a claim ESPN refuses. With NO
+    settings row read at all, the same code asserted a league fence nobody had
+    looked at.
+
+    CATCHES: reverting to the two-branch classifier.
+    """
+    live = {"D/ST": 3, "K": 3, "QB": 4, "RB": 8, "TE": 3, "WR": 8}
+    caps, _notes = marginal.effective_position_caps(live)
+    canon = marginal.canon_league_limits(live)
+    assert canon == {"DST": 3, "K": 3, "QB": 4, "RB": 8, "TE": 3, "WR": 8}
+
+    # EQUAL at TE: both fences sit at 3 and the app enforces it
+    tie = marginal.describe_cap("TE", caps["TE"], league_limit=canon["TE"])
+    assert "BOTH fences at 3" in tie
+    assert "not a league rule" not in tie
+
+    # LOOSER at D/ST: the module guard binds, and the sentence says what the
+    # league itself allows rather than implying the league has no view
+    loose = marginal.describe_cap("DST", caps["DST"], league_limit=canon["DST"])
+    assert "not a league rule" in loose and "allows up to 3" in loose
+
+    # TIGHTER: the league rule binds
+    tight_caps, _ = marginal.effective_position_caps({"WR": 2})
+    tight_canon = marginal.canon_league_limits({"WR": 2})
+    assert "your LEAGUE's own roster limit" in marginal.describe_cap(
+        "WR", tight_caps["WR"], league_limit=tight_canon["WR"])
+
+    # NOT READ: a third state, and it must not be reported as either fence
+    unread = marginal.describe_cap("TE", 3, limits_read=False)
+    assert "NOT CAPTURED" in unread
+    assert "not a league rule" not in unread
+
+
+def test_a_board_records_whether_league_limits_were_read_at_all(db, marginal_world):
+    """``position_caps`` alone cannot tell "both fences agree at 3" from "no
+    settings row exists", because the NUMBER is identical. Every stored snapshot
+    day before 2026-09-02, any backtest database and the A/B copy are all in the
+    second state, and the page asserted the first.
+    """
+    roster, pool = marginal_world(ALL_SPECS)
+    board = marginal.build_board(db, as_of=PULL, season=SEASON, roster=roster,
+                                 pool=pool, weeks=WEEKS, pool_limit=None)
+    assert board.league_limits is None, "no league_settings row in this fixture"
+    assert board.position_caps["TE"] == marginal.POSITION_CAPS["TE"]

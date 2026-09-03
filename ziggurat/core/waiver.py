@@ -28,11 +28,19 @@ recounts IR itself from the RAW rows, independent of ``build_board`` (which
 RAISES ``WeekResolutionError`` on any state with ``scoring_period==0`` and no
 resolvable schedule — i.e. the live DB and every synthetic test state).
 
-IR ELIGIBILITY IS A LABELLED HYPOTHESIS. ESPN's authoritative ``eligibleSlots``
-(slot 21 = IR) is NOT ingested (``state.map_player_entry`` stores
-``injury_status`` only), so eligibility is inferred from the injury designation
-and disclosed as UNVERIFIED ("confirm in the ESPN app post-draft"). See
-``IR_ELIGIBLE_STATUSES`` / ``IR_ELIGIBLE_LABEL``.
+IR ELIGIBILITY — WHAT IS SETTLED AND WHAT IS NOT (item 3.8a, 2026-09-02). ESPN
+serves a per-player ``injured`` boolean, now ingested (migration 014), and it
+marks EXACTLY the OUT/INJURY_RESERVE designations this module treats as
+IR-eligible — 0 exceptions over the 1,036-player universe. That half is settled
+and is re-checked on every snapshot by ``state.ir_rule_check`` /
+``ziggurat league ir-check``. What is NOT settled is what ESPN's IR SLOT accepts:
+NO roster in this league has ever used the slot (0 of 10), so the mechanism
+behind ``IR_FIX_MODEL_LABEL`` is still UNVERIFIED and says so on every plan that
+rests on an IR occupant.
+
+(``eligibleSlots`` was the plan's assumed source of machine truth and is NOT one:
+slot 21 (IR) is listed for 1,036 of 1,036 players, alongside slot 20 (BE). It is
+a POSITIONAL map. It is deliberately not ingested.)
 
 CLAIMS ARE A CHAIN, NOT A LIST (item 3.4b, 2026-09-02). Every ``SwapRow.gain`` is
 priced as if that swap were the ONLY one you make. Ranking them and printing the
@@ -76,9 +84,11 @@ from ziggurat.core.marginal import (
     STREAMED_POSITIONS,
     MarginalRow,
     SwapRow,
+    UNDROPPABLE_TAG,
     WeekResolutionError,
     build_board,
     classify_acquisition,
+    describe_cap,
 )
 from ziggurat.core.valuation import DEFAULT_ROSTER, RosterStructure
 from ziggurat.data.asof import normalize_as_of
@@ -87,27 +97,25 @@ from ziggurat.league import state as league_state
 
 # --------------------------------------------------------------------- constants
 
-# ESPN's authoritative IR-slot eligibility signal is ``eligibleSlots`` (slot 21),
-# which league_player_state does NOT ingest (state.map_player_entry stores
-# injury_status only). So eligibility is a PROXY on the injury designation — a
-# LABELLED HYPOTHESIS, disclosed as unverified on every plan (Rule 6).
-#
-# The set is deliberately {OUT, INJURY_RESERVE} and NOTHING else:
-#   * NOT state.HARD_OUT_STATUSES (an availability boundary, a different concept);
-#   * NOT marginal's hard_out set (it includes SUSPENSION/NOT_ACTIVE — not IR
-#     designations);
-#   * DOUBTFUL / PUP / NFI are the UNCONFIRMED EDGE — treated as INELIGIBLE here,
-#     never silently included (open TODO: confirm post-draft).
-# The Tuesday-reset crux flips an IR occupant OUT -> QUESTIONABLE; QUESTIONABLE is
-# not in this set, so he becomes IR-ineligible and the roster goes oversized.
-IR_ELIGIBLE_STATUSES = frozenset({"OUT", "INJURY_RESERVE"})
+# The IR-eligible designation set now lives in ``league/state.py`` — an
+# ESPN-FACING definition, and ``league/`` cannot import ``core/`` while
+# ``sync.format_status`` needs the standing check (item 3.8a). Re-exported here so
+# ``waiver.IR_ELIGIBLE_STATUSES`` still resolves for every existing caller.
+IR_ELIGIBLE_STATUSES = league_state.IR_ELIGIBLE_STATUSES
+
+# THE SETTLED HALF (item 3.8a, measured 2026-09-02). ESPN's own per-player
+# ``injured`` boolean is ingested and it marks exactly this set. The words
+# "UNVERIFIED" and "confirm in the ESPN app post-draft" LEFT this label on that
+# date and moved to IR_FIX_MODEL_LABEL, which is the half that is still unverified.
 IR_ELIGIBLE_LABEL = (
-    "hypothesis: a player is treated as IR-slot eligible only when ESPN lists him "
-    "OUT or INJURY_RESERVE. ESPN's authoritative per-player eligibility "
-    "(eligibleSlots) is NOT ingested — this is inferred from his injury "
-    "designation and is UNVERIFIED; confirm in the ESPN app post-draft. "
-    "DOUBTFUL/PUP/NFI are an unconfirmed edge and are treated as INELIGIBLE (item "
-    "3.4 open TODO)."
+    "ESPN's own `injured` flag marks exactly the OUT/INJURY_RESERVE designations "
+    "this system treats as IR-slot eligible — measured 2026-09-02 with 0 exceptions "
+    "(n=1,036 across the whole player universe; n=160 rostered, where only one "
+    "player carried it), and re-checked on EVERY snapshot by `ziggurat league "
+    "ir-check`. `ziggurat league status` says so only when it changes. DOUBTFUL / "
+    "PUP / NFI have never appeared in this league and remain treated as "
+    "INELIGIBLE — that is a watch, not a confirmation: the first one to appear is "
+    "reported with the flag ESPN gave it."
 )
 
 # Acquisition kinds — the claims-vs-FCFS distinction, keyed ONLY on roster_status
@@ -117,16 +125,40 @@ KIND_WAIVER = ACQ_WAIVER            # roster_status 'WAIVERS': a queued, priorit
 KIND_FREE_AGENT = ACQ_FREE_AGENT    # roster_status 'FREEAGENT': first-come-first-served
 KIND_UNKNOWN = ACQ_UNKNOWN          # anything else (incl. a leaked 'ONTEAM'): verify, never silent FCFS
 
-# The whole IR-legality FIX MODEL — the block condition, the sub-16-not-blocked
-# call, and the move-vs-drop preference — rests on ASSUMPTIONS about ESPN's exact
-# IR mechanics that are not yet confirmed against a live post-draft app (item 3.4
-# audit F1). Shipped as a LABELLED HYPOTHESIS, same discipline as IR_ELIGIBLE_LABEL.
+# THE HALF THAT IS STILL UNVERIFIED (item 3.8a). The `injured` flag settles which
+# DESIGNATIONS we call IR-eligible; it says nothing about what ESPN's IR SLOT
+# actually accepts, or when ESPN blocks a transaction. Nothing in this league has
+# shown us either: 0 of 10 rosters have ever occupied the IR slot, every roster
+# entry reads injuryStatus NORMAL, and every team reads isTransactionLocked false.
+# ESPN's IR eligibility is additionally a league-level UI setting we have NOT
+# located anywhere in `settings`. So this stays a LABELLED HYPOTHESIS (Rule 6),
+# narrowed to exactly the mechanics, and it is printed only when a verdict rests
+# on an IR occupant.
+#
+# FIRST OBSERVATION, 2026-09-03 (operator, ESPN WEBSITE — there is no app on this
+# side): the roster page exposes moves ONLY through a per-player MOVE button that
+# lists the destinations ESPN will accept, and on a 16/16 roster with 0/1 IR and
+# no OUT/INJURY_RESERVE player (ten ACTIVE, five QUESTIONABLE, one DAY_TO_DAY),
+# NO player was offered IR — only starter<->bench swaps. So the eligibility gate
+# is enforced by ESPN on the way IN, and the "refusal" the old ask told the
+# operator to read is an ABSENT option, not a message. That settles the NEGATIVE
+# half of (b): an ineligible body cannot be put on IR. It does NOT settle the
+# positive half (that an OUT/IR player IS offered the slot — the roster carried
+# none to try), nor (a) or (c), which need a real occupant who heals.
 IR_FIX_MODEL_LABEL = (
     "hypothesis: this IR-legality fix model assumes ESPN (a) forces an IR-ineligible "
     "player onto your active roster, (b) accepts an IR-eligible bench body moved into "
     "a freed IR slot, and (c) only blocks transactions when your ACTIVE roster is "
-    "oversized or your IR slot is over capacity. UNVERIFIED — confirm ESPN's exact "
-    "IR-legality behavior in the app post-draft."
+    "oversized or your IR slot is over capacity. UNVERIFIED — no roster in this "
+    "league has ever used the IR slot (0 of 10 as of 2026-09-03) and ESPN's IR "
+    "eligibility is a league-level setting we have not found in `settings`. One "
+    "half is now observed (2026-09-03, ESPN website): a player's MOVE button lists "
+    "only the moves ESPN accepts, and it offered IR to NOBODY on a roster with no "
+    "OUT/INJURY_RESERVE player — so an ineligible body cannot be put on IR. Still "
+    "open: whether an OUT/IR player IS offered the slot (open his MOVE menu the "
+    "first time one is on your roster — ~30 s), and what ESPN does when an occupant "
+    "heals — (a) and (c) need the first real occupant, which `ziggurat league "
+    "ir-check` reports with ESPN's own flag."
 )
 
 # The staleness banner shouts past this many days between the data's pull date and
@@ -195,24 +227,80 @@ def _slot(row: Mapping) -> str:
 
 
 def _ir_eligible(row: Mapping) -> bool:
-    return str(row.get("injury_status") or "").strip().upper() in IR_ELIGIBLE_STATUSES
+    return _ir_status(row) == "ELIGIBLE"
 
 
 def _ir_status(row: Mapping) -> str:
-    """Three-way IR-slot classification (item 3.4 audit F7).
+    """Three-way IR-slot classification (item 3.4 audit F7; flag-first since 3.8a).
 
-    ELIGIBLE  — ESPN lists him OUT / INJURY_RESERVE, a legitimate IR occupant.
-    UNKNOWN   — his injury_status is blank/None: we CANNOT say he is ineligible, so
-                he does NOT re-count against the active cap; we surface a verify note.
-    INELIGIBLE — any other explicit status (QUESTIONABLE, ACTIVE, ...): ESPN forces
-                him onto the active roster, so he DOES re-count.
+    ELIGIBLE  — ESPN's own ``injured`` flag is set, or (when the flag was not
+                captured) ESPN lists him OUT / INJURY_RESERVE.
+    UNKNOWN   — no flag AND a blank injury_status: we CANNOT say he is ineligible,
+                so he does NOT re-count against the active cap; we surface a
+                verify note.
+    INELIGIBLE — the flag is explicitly false, or (uncaptured) any other explicit
+                status (QUESTIONABLE, ACTIVE, ...): ESPN forces him onto the
+                active roster, so he DOES re-count.
+
+    ESPN'S OWN FLAG WINS WHEN WE HAVE IT. It is the same field the app reads, and
+    on 2026-09-02 it agreed with the designation rule on all 1,036 players — but
+    "agrees today" is why we prefer it, not a reason to keep inferring. When it is
+    absent (a pre-014 snapshot, or a rostered player missing from ESPN's pool
+    response) the designation PROXY still answers, and ``_ir_proxy_note`` attaches
+    a PER-PLAYER disclosure — never a blanket one, because the two cases are
+    different and only one of them is about the migration.
     """
+    flag = row.get("injured")
+    if flag is not None:
+        return "ELIGIBLE" if flag else "INELIGIBLE"
     tok = str(row.get("injury_status") or "").strip().upper()
     if not tok:
         return "UNKNOWN"
     if tok in IR_ELIGIBLE_STATUSES:
         return "ELIGIBLE"
     return "INELIGIBLE"
+
+
+def _ir_reason(row: Mapping) -> str:
+    """How we decided this player's IR-slot eligibility, per player (Rule 6)."""
+    name = str(row.get("player") or row.get("espn_player_id") or "?")
+    status = _ir_status(row)
+    if row.get("injured") is not None:
+        return (
+            f"{name}: ESPN's own `injured` flag reads "
+            f"{'TRUE' if row['injured'] else 'FALSE'}, so we treat him as "
+            f"IR-{'ELIGIBLE' if status == 'ELIGIBLE' else 'INELIGIBLE'} "
+            f"(his injury tag is {row.get('injury_status') or 'blank'})."
+        )
+    return (
+        f"{name}: ESPN's `injured` flag was NOT captured for this player in this "
+        f"snapshot, so his IR eligibility is a PROXY on his injury tag "
+        f"({row.get('injury_status') or 'blank'}) -> {status}. Re-run `ziggurat "
+        f"league sync` and re-check; confirm in the app before acting on it."
+    )
+
+
+def _ir_ineligible_because(o: "IRIneligible") -> str:
+    """WHY this occupant is not IR-eligible, naming the signal that DECIDED it.
+
+    ``_ir_status`` is flag-first, so on the only rows where the flag changes an
+    answer — the divergence case — quoting the injury TAG contradicts the page's
+    own label three lines away. Say which field decided, and say plainly when the
+    two disagree: this league has never served that case, so it is not something
+    to state in passing (audit fix).
+    """
+    tag = o.injury_status or "no injury designation"
+    if o.injured is None:
+        return (f"ESPN lists him {tag}, not IR-eligible (his `injured` flag was not "
+                f"captured, so this is the injury-tag PROXY)")
+    tag_says_eligible = str(o.injury_status or "").strip().upper() in IR_ELIGIBLE_STATUSES
+    if not o.injured and tag_says_eligible:
+        return (f"ESPN's own `injured` flag reads FALSE for him even though his injury "
+                f"tag says {tag} — those two ESPN fields DISAGREE, which this league "
+                f"has never shown us before, and we follow the FLAG, so he is not "
+                f"IR-eligible")
+    return (f"ESPN's own `injured` flag reads FALSE for him (his injury tag says "
+            f"{tag}), so he is not IR-eligible")
 
 
 # ------------------------------------------------------------------- output rows
@@ -227,6 +315,17 @@ class IRIneligible:
     position: str | None
     espn_id: str | None
     injury_status: str | None
+    # ESPN's own ``injured`` flag for this occupant, or None when it was not
+    # captured. Carried because ``_ir_status`` is FLAG-FIRST since item 3.8a, so
+    # the tag is NOT the evidence the verdict rested on — quoting it in the
+    # violation and the REQUIRED ROSTER MOVE produced a page that said "ESPN lists
+    # him OUT, not IR-eligible" three lines under a label saying OUT is exactly the
+    # IR-eligible designation (audit fix).
+    injured: int | None = None
+    # ESPN's undroppable flag, read from the RAW row. ``check_legality`` stays pure
+    # and independent of pricing, so this comes from the roster row and never from
+    # a ``MarginalRow``. ``== 0`` is a refusal; None is "not captured".
+    droppable: int | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +348,11 @@ class LegalityVerdict:
     ir_unverified: tuple[str, ...]   # blank-status IR occupants we could not verify (F7)
     violations: tuple[str, ...]
     reasons: tuple[str, ...]
+    # Per-occupant: WHICH signal decided his eligibility — ESPN's own `injured`
+    # flag, or the injury-tag proxy when the flag was not captured for him
+    # (item 3.8a). A per-player line, never a blanket one: on a post-014 snapshot
+    # most rows have the flag and one may not.
+    ir_flag_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,6 +367,10 @@ class DropRec:
     horizon_weeks: int              # 1 for a streamed slot, else the window
     unpriceable: bool
     reasons: tuple[str, ...]
+    # ESPN's own undroppable list — the app REFUSES this drop (item 3.8a). A
+    # FIELD, not a reason string: reasons only render under --reasons, and this
+    # has to be on the default page where the drop board is read.
+    undroppable: bool = False
 
 
 @dataclass(frozen=True)
@@ -357,6 +465,16 @@ class WaiverPlan:
     chain_capped: tuple[ChainRejection, ...] = ()    # blocked by POSITION_CAPS, not value
     chain_not_repriced: int = 0     # genuinely UNMEASURED against the finished chain
     chain_stop: str = ""            # STOP_* — why the chain ended
+    # The position fence actually enforced (item 3.8a): this board's own guard
+    # tightened by the LEAGUE's own roster limits, wherever the league's is tighter.
+    position_caps: Mapping[str, int] = POSITION_CAPS
+    # The LEAGUE's own limits behind those caps, or None when no settings row was
+    # readable at this as_of — the difference between "both fences agree at 3" and
+    # "only one fence was ever checked" (audit fix).
+    league_limits: Mapping[str, int] | None = None
+    # The IR ground-truth report for this as_of (item 3.8a). Always computed;
+    # its note is added to ``notes`` ONLY when it has news.
+    ir_rule: league_state.IRRuleReport | None = None
 
     @property
     def blocked(self) -> bool:
@@ -400,6 +518,8 @@ def check_legality(
             position=r.get("position"),
             espn_id=(str(r["espn_player_id"]) if r.get("espn_player_id") is not None else None),
             injury_status=r.get("injury_status"),
+            injured=r.get("injured"),
+            droppable=r.get("droppable"),
         )
         for r in ir_rows
         if _ir_status(r) == "INELIGIBLE"
@@ -419,9 +539,8 @@ def check_legality(
         cause = ""
         if ineligible:
             names = "; ".join(
-                f"{o.player} (ESPN lists him "
-                f"{o.injury_status or 'with no injury designation'}, not IR-eligible, "
-                f"so he counts on your active roster)"
+                f"{o.player} ({_ir_ineligible_because(o)}, so he counts on your "
+                f"active roster)"
                 for o in ineligible
             )
             cause = f" — this count includes {names}"
@@ -438,9 +557,8 @@ def check_legality(
     # slot even when the roster is legal (ESPN will bench him) (F1).
     ir_advisories = tuple(
         f"REQUIRED ROSTER MOVE: move {o.player} out of your IR slot to the bench — "
-        f"ESPN lists him {o.injury_status or 'with no injury designation'} and will "
-        f"not let an IR-ineligible player stay on IR (he counts against your "
-        f"{structure.active_slots} active slots)"
+        f"{_ir_ineligible_because(o)}, and ESPN will not let an IR-ineligible player "
+        f"stay on IR (he counts against your {structure.active_slots} active slots)"
         for o in ineligible
     )
     # Blank-status IR occupants: UNKNOWN, not a proof of illegality (F7).
@@ -465,10 +583,16 @@ def check_legality(
             "until it is fixed."
         )
         reasons.extend(violations)
+    # How each occupant's eligibility was decided — ESPN's own flag, or the proxy
+    # (item 3.8a). Rule 6: a destructive instruction ships the evidence behind it.
+    ir_flag_notes = tuple(_ir_reason(r) for r in ir_rows)
+
     reasons.extend(ir_advisories)
     reasons.extend(ir_unverified)
     if ir_count:
-        # Surface the eligibility hypothesis whenever IR is in play (Rule 6).
+        # Surface the eligibility evidence and the still-unverified mechanism
+        # whenever IR is in play (Rule 6).
+        reasons.extend(ir_flag_notes)
         reasons.append(IR_ELIGIBLE_LABEL)
 
     return LegalityVerdict(
@@ -482,6 +606,7 @@ def check_legality(
         ir_unverified=ir_unverified,
         violations=tuple(violations),
         reasons=tuple(reasons),
+        ir_flag_notes=ir_flag_notes,
     )
 
 
@@ -497,16 +622,17 @@ def _drop_rec(row: MarginalRow, *, extra_reasons: Sequence[str] = ()) -> DropRec
         marginal_points=row.marginal_points,
         horizon_weeks=row.horizon_weeks,
         unpriceable=row.unvalued,
+        undroppable=row.undroppable,
         reasons=tuple(extra_reasons) + tuple(row.reasons),
     )
 
 
 def _zero_drop_reslot(
     roster_rows: Sequence[Mapping], structure: RosterStructure
-) -> tuple[list[str], list[str]] | None:
+) -> tuple[list[str], list[str], list[str]] | None:
     """The PREFERRED, zero-drop fix (item 3.4 audit F1): can a pure re-slot make the
-    roster legal? Returns ``(benched_names, moved_to_ir_names)`` when it can, else
-    ``None`` (a drop is genuinely required).
+    roster legal? Returns ``(benched_names, moved_to_ir_names, moved_to_ir_reasons)``
+    when it can, else ``None`` (a drop is genuinely required).
 
     Restorative by construction: it simulates the moves and only returns them when
     ``check_legality`` on the result is legal.
@@ -519,6 +645,10 @@ def _zero_drop_reslot(
     rows = [dict(r) for r in roster_rows]
     benched: list[str] = []
     moved_to_ir: list[str] = []
+    # WHY each destination player is IR-eligible, per player — the fix names him
+    # "(IR-eligible)" and under flag-first that word can sit beside a visible
+    # ACTIVE tag, so the evidence travels with the instruction (audit fix).
+    moved_reasons: list[str] = []
 
     def name(r: Mapping) -> str:
         return str(r.get("player") or r.get("espn_player_id") or "?")
@@ -540,8 +670,11 @@ def _zero_drop_reslot(
             break
         cand["lineup_slot"] = "IR"
         moved_to_ir.append(name(cand))
+        moved_reasons.append(_ir_reason(cand))
 
-    return (benched, moved_to_ir) if check_legality(rows, structure=structure).legal else None
+    if not check_legality(rows, structure=structure).legal:
+        return None
+    return benched, moved_to_ir, moved_reasons
 
 
 def _cause_phrase(verdict: LegalityVerdict) -> str:
@@ -589,6 +722,7 @@ def _claim_reasons(
     gain: float | None = None,
     gain_alone: float | None = None,
     chain_rank: int = 0,
+    faab: int | None = 0,
 ) -> tuple[str, ...]:
     shown = swap.gain if gain is None else gain
     if is_pure_add:
@@ -634,11 +768,30 @@ def _claim_reasons(
             "one is listed it lands before any claim clears overnight.)"
         )
     if kind == KIND_WAIVER:
-        out.append(
-            "WAIVERS claim — queue it, do not click: it is free and non-FAAB, "
-            "processed in ESPN's overnight batch. Submitting costs nothing, but "
-            "each claim you WIN resets your waiver priority to worst-in-league."
-        )
+        # Whether a claim COSTS anything is a league rule, and this sentence used
+        # to assert it from a literal (audit fix). ``faab`` is ESPN's own
+        # ``isUsingAcquisitionBudget``: 0 = inert (this league, measured), 1 = FAAB
+        # is on, None = the settings row did not carry it.
+        if faab:
+            out.append(
+                "WAIVERS claim — queue it, do not click. FAAB IS ON in this league, so "
+                "this claim COSTS BID DOLLARS and NOTHING here tracks your budget: "
+                "re-read `ziggurat league settings` before you queue it. Each claim you "
+                "WIN also resets your waiver priority to worst-in-league."
+            )
+        elif faab is None:
+            out.append(
+                "WAIVERS claim — queue it, do not click, and note that ESPN's "
+                "acquisition settings were NOT CAPTURED at this as-of, so whether the "
+                "claim costs FAAB is UNKNOWN here. Each claim you WIN resets your "
+                "waiver priority to worst-in-league."
+            )
+        else:
+            out.append(
+                "WAIVERS claim — queue it, do not click: it is free and non-FAAB, "
+                "processed in ESPN's overnight batch. Submitting costs nothing, but "
+                "each claim you WIN resets your waiver priority to worst-in-league."
+            )
         if waiver_rank is not None:
             denom = f" of {team_count}" if team_count else ""
             out.append(
@@ -746,6 +899,7 @@ def _add_espn_id(s: SwapRow, dup_names: set[str]) -> tuple[str | None, str | Non
 def _swap_rec(
     s: SwapRow, *, waiver_rank, team_count, candidate_notes, dup_names, is_pure_add: bool,
     gain: float | None = None, gain_alone: float | None = None, chain_rank: int = 0,
+    faab: int | None = 0,
 ) -> ClaimRec:
     """One ``ClaimRec``. ``gain`` defaults to the standalone swap gain (the
     streaming lane, which is not part of the season-long chain); the chain passes
@@ -771,7 +925,7 @@ def _swap_rec(
             is_pure_add=is_pure_add,
             candidate_notes=candidate_notes.get(espn_id or "", ()),
             annotation_caveat=caveat,
-            gain=shown, gain_alone=alone, chain_rank=chain_rank,
+            gain=shown, gain_alone=alone, chain_rank=chain_rank, faab=faab,
         ),
         gain_alone=alone,
         chain_rank=chain_rank,
@@ -799,6 +953,87 @@ class _ChainResult:
     phase_a_truncated: bool = False  # phase A stopped on cost, NOT on economics
     exhaust_reused: int = 0         # drain skips caused by a spent add/drop identity
     exhaust_capped: int = 0         # drain skips caused by POSITION_CAPS
+    # The caps actually enforced — board guard tightened by the league's own
+    # roster limits (item 3.8a). Carried so the notes name real numbers.
+    position_caps: Mapping[str, int] = POSITION_CAPS
+    # The LEAGUE's own limits behind those caps, or None when no settings row was
+    # readable. Carried, not inferred: without it the notes cannot tell "both
+    # fences agree at 3" from "no league limit was ever read" (audit fix).
+    league_limits: Mapping[str, int] | None = None
+
+
+def _caps_phrase(caps: Mapping[str, int], league_limits: Mapping[str, int] | None = None) -> str:
+    """"max 3 QB, 8 RB, ..." from the caps that were actually enforced (3.8a).
+
+    Built from the mapping rather than written as a literal: the sentence used to
+    hard-code "max 3 QB, 3 TE, 8 RB, 8 WR, one K, one D/ST", which stops being
+    true the moment a league limit is the tighter fence.
+
+    Each entry names its SOURCE when the league's limits were read (audit fix):
+    printing "max 1 DST" under a sentence that credits ESPN's positionLimits
+    presented a module-only guard as a league rule, on a league whose real D/ST
+    limit is 3.
+    """
+    if league_limits is None:
+        return ", ".join(f"max {caps[p]} {p}" for p in sorted(caps))
+    out = []
+    for p in sorted(caps):
+        own = POSITION_CAPS.get(p)
+        lim = league_limits.get(p)
+        if lim is not None and lim == caps[p] and own == caps[p]:
+            src = "both fences agree"
+        elif lim is not None and lim == caps[p]:
+            src = "your league's limit"
+        elif lim is not None:
+            src = f"this board's guard; your league allows {lim}"
+        else:
+            src = "this board's guard; your league sets no limit here"
+        out.append(f"max {caps[p]} {p} ({src})")
+    return ", ".join(out)
+
+
+def _roster_shape_mismatch(settings, structure: RosterStructure) -> str | None:
+    """One note when ESPN's own roster shape no longer matches the one in force.
+
+    Compared on the two TOTALS ``check_legality`` actually uses, which sidesteps
+    the slot-label mismatch that has bitten this seam before ("D/ST" vs "DST"):
+    every non-IR slot count summed, and the IR count.
+    """
+    slots = (settings or {}).get("lineup_slot_counts")
+    if not isinstance(slots, dict) or not slots:
+        return None
+    try:
+        active = sum(int(v) for k, v in slots.items() if str(k).upper() != "IR")
+        ir = int(slots.get("IR", 0))
+    except (TypeError, ValueError):
+        return None
+    if active == structure.active_slots and ir == structure.ir_slots:
+        return None
+    return (
+        f"your league's roster SHAPE changed: ESPN now serves {active} active + {ir} "
+        f"IR slot(s), but this plan's legality check, its open-slot count and the "
+        f"valuation board behind it are all still using {structure.active_slots} "
+        f"active + {structure.ir_slots} IR. Its legal/illegal verdict is stale until "
+        f"that is reconciled — check `ziggurat league settings`."
+    )
+
+
+def _fences_phrase(league_limits: Mapping[str, int] | None) -> str:
+    """How MANY fences actually applied — a fact about this snapshot, not a rule.
+
+    The page used to assert "TWO fences apply" unconditionally. On any database
+    with no ``league_settings`` row (every stored day before 2026-09-02, a
+    backtest DB, a degraded settings row) exactly ONE applied, and the header
+    credited ESPN for numbers it had never read (audit fix).
+    """
+    if league_limits is None:
+        return ("Only ONE fence applied here: this board's own modelling guard (item "
+                "3.2). Your LEAGUE's own roster limits were NOT CAPTURED in this "
+                "snapshot, so ESPN's positionLimits were not checked — see "
+                "`ziggurat league settings`.")
+    return ("TWO fences apply and the tighter one binds: this board's own modelling "
+            "guard (item 3.2) and your LEAGUE's own roster limits (ESPN "
+            "positionLimits, ingested by item 3.8a).")
 
 
 def _add_key(s: SwapRow) -> str:
@@ -836,6 +1071,7 @@ def _select_claims(
     candidate_notes: Mapping[str, list[str]],
     dup_names: set[str],
     position_counts: Mapping[str, int],
+    faab: int | None = 0,
 ) -> _ChainResult:
     """SEQUENTIAL (chain) selection over the swap matrix (item 3.4b).
 
@@ -890,6 +1126,13 @@ def _select_claims(
     move against a season-long roster, and ``value_after`` raises rather than try.
     """
     budget = max(int(claim_budget), 0)
+    # The caps THIS board was filtered with (item 3.8a) — this board's own guard
+    # already tightened by the league's own positionLimits. Read from the board so
+    # the matrix filter, the per-step re-check below and the refusal reason cannot
+    # name three different numbers. Bound before the early returns so every
+    # _ChainResult reports the caps that were really in force.
+    position_caps = board.position_caps
+    league_limits = getattr(board, "league_limits", None)
     streamed = [s for s in swaps if _is_streamed(s)]
     seasonal = [s for s in swaps if not _is_streamed(s)]
 
@@ -898,6 +1141,7 @@ def _select_claims(
         _swap_rec(
             s, waiver_rank=waiver_rank, team_count=team_count,
             candidate_notes=candidate_notes, dup_names=dup_names, is_pure_add=False,
+            faab=faab,
         )
         for s in stream_sorted[:budget]
     )
@@ -907,12 +1151,14 @@ def _select_claims(
         # this feeds must never claim the pool holds nothing worth having.
         return _ChainResult(
             (), (), stream_recs, 0.0, (), 0, STOP_BUDGET, 0,
-            streamed_hidden=streamed_hidden,
+            streamed_hidden=streamed_hidden, position_caps=position_caps,
+            league_limits=league_limits,
         )
     if not seasonal:
         return _ChainResult(
             (), (), stream_recs, 0.0, (), 0, STOP_NO_CANDIDATES, 0,
-            streamed_hidden=streamed_hidden,
+            streamed_hidden=streamed_hidden, position_caps=position_caps,
+            league_limits=league_limits,
         )
 
     caps = dict(position_counts)
@@ -938,7 +1184,7 @@ def _select_claims(
     phase_a_ceiling = max(CHAIN_EVAL_BUDGET - PHASE_B_EVAL_RESERVE, 1)
 
     def cap_ok(s: SwapRow, pure: bool) -> bool:
-        cap = POSITION_CAPS.get(s.add_position)
+        cap = position_caps.get(s.add_position)
         if cap is None:
             return True
         after = caps.get(s.add_position, 0) + 1
@@ -1126,8 +1372,13 @@ def _select_claims(
             if not cap_ok(s, False):
                 # A roster-cap refusal, not a valuation. Saying "winning him too
                 # would undo part of them" here would blame the chain for a cap.
-                cap = POSITION_CAPS.get(s.add_position)
+                cap = position_caps.get(s.add_position)
                 held = caps.get(s.add_position, 0)
+                which_fence = describe_cap(
+                    s.add_position, cap,
+                    league_limit=(league_limits or {}).get(s.add_position),
+                    limits_read=league_limits is not None,
+                )
                 capped.append(ChainRejection(
                     add=s.add, add_position=s.add_position,
                     drop=s.drop, drop_position=s.drop_position,
@@ -1135,10 +1386,9 @@ def _select_claims(
                     reason=(
                         f"{s.add} is not available to you once the moves above win: "
                         f"your roster would hold {held + 1} at {s.add_position} and "
-                        f"this board caps that at {cap}. That is a modelling guard "
-                        f"(item 3.2's POSITION_CAPS), not a league rule and not a "
-                        f"judgement about his value ({g:+.1f} after the chain, "
-                        f"{s.gain:+.1f} today). He becomes possible again only if a "
+                        f"the binding limit is {cap}. That is {which_fence}. It is "
+                        f"NOT a judgement about his value ({g:+.1f} after the chain, "
+                        f"{s.gain:+.1f} today) — he becomes possible again only if a "
                         f"move above him does not land."
                     ),
                 ))
@@ -1189,7 +1439,7 @@ def _select_claims(
         _swap_rec(
             s, waiver_rank=waiver_rank, team_count=team_count,
             candidate_notes=candidate_notes, dup_names=dup_names, is_pure_add=pure,
-            gain=g, gain_alone=alone, chain_rank=idx + 1,
+            gain=g, gain_alone=alone, chain_rank=idx + 1, faab=faab,
         )
         for idx, (s, g, alone, pure) in enumerate(accepted)
     ]
@@ -1207,6 +1457,7 @@ def _select_claims(
         streamed_hidden=streamed_hidden, phase_a_skipped=phase_a_skipped,
         phase_a_truncated=phase_a_truncated,
         exhaust_reused=exhaust_reused, exhaust_capped=exhaust_capped,
+        position_caps=position_caps, league_limits=league_limits,
     )
 
 
@@ -1285,6 +1536,38 @@ def build_waiver_plan(
 
     freshness = tuple(_freshness_lines(conn, season=season, as_of=as_of, today=today))
 
+    # Item 3.8a: re-run the IR ground-truth comparison on THIS as_of, and speak
+    # ONLY when it has news — a divergence, an injury designation this league has
+    # never served before, an IR occupant whose ESPN flag says he does not belong
+    # there, or a snapshot where the flag was not captured. A line that says
+    # "nothing changed" on every plan is how the operator learns to skip the one
+    # report that matters (the operator-attention contract).
+    ir_rule = league_state.ir_rule_check(
+        conn, as_of=as_of, season=season, own_team_id=own_team_id, view=view)
+    if ir_rule.has_news:
+        notes.append(ir_rule.headline)
+
+    # Item 3.8a audit: the ONE settings change that alters what this module owes
+    # had no daily surface at all — `settings_verdicts` was reachable only from
+    # `ziggurat league settings`, a command the cadence never runs. FAAB being ON
+    # (or its flag not being captured) makes every "queue liberally, claims are
+    # free" sentence on this page wrong, so it speaks HERE. Silent when ESPN says
+    # the budget is inert, which is the measured state of this league.
+    settings = league_state.get_league_settings(
+        conn, as_of=as_of, season=season, view=view)
+    faab_flag = (settings or {}).get("is_using_acquisition_budget")
+    faab_note = league_state.faab_verdict(settings)
+    if faab_note is not None:
+        notes.append(faab_note)
+    # The league's own roster SHAPE is ingested and printed by `league settings`
+    # but consumed by nothing: `check_legality` runs on DEFAULT_ROSTER. Reconcile
+    # by DISCLOSURE rather than by deriving the structure — RosterStructure also
+    # drives replacement levels and the weekly seater, and re-shaping those from a
+    # live snapshot is a far larger blast radius than the gap (audit fix).
+    shape_note = _roster_shape_mismatch(settings, roster_structure)
+    if shape_note:
+        notes.append(shape_note)
+
     if not verdict.legal:
         # REFUSE to plan claims. Offer fixes in PREFERENCE ORDER (item 3.4 audit F1):
         # (a) the ZERO-DROP IR-move if a pure re-slot restores legality — PRIMARY;
@@ -1294,12 +1577,15 @@ def build_waiver_plan(
         ir_move = _zero_drop_reslot(roster_rows, roster_structure)
         ir_move_fix: tuple[str, ...] = ()
         if ir_move is not None:
-            benched, moved_to_ir = ir_move
+            benched, moved_to_ir, moved_reasons = ir_move
             if moved_to_ir:
                 ir_move_fix = (
                     f"BEST FIX (no drop): move {'; '.join(benched)} out of your IR slot "
                     f"to the bench and move {'; '.join(moved_to_ir)} (IR-eligible) into "
                     f"your IR slot — this makes you legal with NO drop.",
+                    # the per-player evidence for that "(IR-eligible)" — the same
+                    # `_ir_reason` the occupant lines carry (Rule 6, audit fix)
+                    *moved_reasons,
                     IR_FIX_MODEL_LABEL,
                 )
             elif benched:
@@ -1324,6 +1610,11 @@ def build_waiver_plan(
         forced_drop: DropRec | None = None
         drop_board: tuple[DropRec, ...] = ()
         blocked_weeks: tuple[int, ...] = resolved_weeks
+        # Default to the module guard for the branches that build NO board (an
+        # IR-only overcount, or a WeekResolutionError): those enforced nothing, so
+        # the plan must not report caps that came from somewhere else.
+        blocked_caps: Mapping[str, int] = POSITION_CAPS
+        blocked_limits: Mapping[str, int] | None = None
         if verdict.active_count > roster_structure.active_slots:
             try:
                 board = build_board(
@@ -1331,19 +1622,60 @@ def build_waiver_plan(
                     weeks=weeks, last_week=last_week, roster_structure=roster_structure,
                     pool_limit=pool_limit, source=source, view=view, today=today,
                 )
+                # The board's own disclosures (no projections knowable, the
+                # static-roster caveat, a tighter league limit, a degraded settings
+                # row) qualify the forced drop this branch is about to NAME — they
+                # were being dropped on the one page that recommends a destructive,
+                # un-workaroundable move (audit fix).
+                notes.extend(board.notes)
+                blocked_caps = board.position_caps
+                blocked_limits = board.league_limits
                 drop_board = tuple(_drop_rec(r) for r in board.ranked)
                 blocked_weeks = tuple(board.weeks)   # the window that PRICED the drop (F11)
-                if board.ranked:
+                # THE SECOND DROP PATH (item 3.8a). This picks a BOARD row, not a
+                # swap, so the matrix fence does not cover it — and this is the one
+                # instruction the operator cannot work around: obeying a drop ESPN
+                # refuses leaves the roster illegal and every claim blocked.
+                droppable_ranked = [r for r in board.ranked if not r.undroppable]
+                if droppable_ranked:
                     forced_drop = _drop_rec(
-                        board.ranked[0],
+                        droppable_ranked[0],
                         extra_reasons=(_forced_drop_reason(
-                            board.ranked[0], verdict, secondary=bool(ir_move_fix)),),
+                            droppable_ranked[0], verdict, secondary=bool(ir_move_fix)),),
+                    )
+                    # ONLY the rows actually passed over. The board is ordered
+                    # cheapest-drop-first and ESPN's undroppable list is a list of
+                    # elite players, so an unfiltered sweep told the operator the
+                    # tool had considered dropping his two BEST players — about
+                    # rows that were never candidates, in a sentence whose verb did
+                    # not agree with its subject (audit fix). Every row before the
+                    # chosen one is undroppable by construction.
+                    idx = board.ranked.index(droppable_ranked[0])
+                    skipped = [r.player for r in board.ranked[:idx]]
+                    if skipped:
+                        n = len(skipped)
+                        notes.append(
+                            f"{n} cheaper drop(s) on your board could not be named "
+                            f"({', '.join(skipped)}): "
+                            f"{'they are' if n > 1 else 'he is'} on ESPN's UNDROPPABLE "
+                            f"list, so the app refuses "
+                            f"{'those drops' if n > 1 else 'that drop'} and naming "
+                            f"{'one' if n > 1 else 'him'} would leave you illegal. The "
+                            f"drop named above is the cheapest one ESPN will accept."
+                        )
+                elif board.ranked:
+                    notes.append(
+                        "ESPN will REFUSE every drop this board can price: all "
+                        f"{len(board.ranked)} priceable player(s) on your roster are on "
+                        f"ESPN's undroppable list. The fix has to be an IR move, or a "
+                        f"drop of a player this board could not price (he is not on the "
+                        f"drop board below) — check the app."
                     )
                 else:
                     notes.append(
                         "could not name a single forced drop: every priceable player is "
-                        "unvalued at this as-of (see CANNOT VALUE) — verify manually and "
-                        "drop your lowest-value body to reach "
+                        "unvalued at this as-of (this board could price nobody) — verify "
+                        "manually and drop your lowest-value body to reach "
                         f"{roster_structure.active_slots}."
                     )
             except WeekResolutionError as exc:
@@ -1359,18 +1691,34 @@ def build_waiver_plan(
                     f"body to reach {roster_structure.active_slots}. Active bodies: "
                     f"{reslot_names}."
                 )
-        # The ineligible IR occupant himself is an explicit drop/keep candidate (F1).
+        # The ineligible IR occupant himself is an explicit drop/keep candidate (F1)
+        # — and this is the FIFTH place the system can name a drop (item 3.8a audit).
+        # It names one in PROSE rather than through a swap or a board row, so the
+        # matrix fence and the forced-drop fence both miss it, and ESPN's undroppable
+        # list is composed of exactly the elite players most likely to occupy IR.
         for o in verdict.ir_ineligible:
-            notes.append(
-                f"you may instead DROP {o.player} himself (the IR-ineligible occupant) "
-                f"— dropping him also frees the active slot he now counts against."
-            )
+            if o.droppable == 0:
+                notes.append(
+                    f"{o.player} is on ESPN's UNDROPPABLE list, so dropping HIM is not "
+                    f"an option either — the app refuses it. The fix has to be the IR "
+                    f"move above, or another body."
+                )
+            else:
+                notes.append(
+                    f"you may instead DROP {o.player} himself (the IR-ineligible "
+                    f"occupant) — dropping him also frees the active slot he now "
+                    f"counts against."
+                )
         if verdict.ir_count > roster_structure.ir_slots and ir_move_fix == ():
-            names = "; ".join(o.player for o in verdict.ir_ineligible) or "one IR occupant"
+            droppable_names = [o.player for o in verdict.ir_ineligible if o.droppable != 0]
+            fenced = [o.player for o in verdict.ir_ineligible if o.droppable == 0]
+            names = "; ".join(droppable_names) or "one IR occupant"
             notes.append(
                 f"your IR slot holds {verdict.ir_count} players (max "
                 f"{roster_structure.ir_slots}); drop or bench "
                 f"{verdict.ir_count - roster_structure.ir_slots} of them ({names})."
+                + (f" {', '.join(fenced)} can only be BENCHED, not dropped — ESPN's "
+                   f"undroppable list refuses that drop." if fenced else "")
             )
 
         return WaiverPlan(
@@ -1390,6 +1738,9 @@ def build_waiver_plan(
             season=int(season),
             team_id=own_team_id,
             weeks=blocked_weeks,
+            position_caps=blocked_caps,
+            league_limits=blocked_limits,
+            ir_rule=ir_rule,
         )
 
     # --- legal path: ONE scan, then compose. -------------------------------------
@@ -1437,7 +1788,7 @@ def build_waiver_plan(
         swaps, board=board, claim_budget=claim_budget, waiver_rank=waiver_priority,
         team_count=team_count, open_slots=open_slots,
         candidate_notes=candidate_notes, dup_names=dup_names,
-        position_counts=board.roster_position_counts,
+        position_counts=board.roster_position_counts, faab=faab_flag,
     )
     claims, grabs, streaming = chain.claims, chain.grabs, chain.streaming
 
@@ -1505,6 +1856,9 @@ def build_waiver_plan(
         chain_capped=chain.chain_capped,
         chain_not_repriced=chain.chain_not_repriced,
         chain_stop=chain.chain_stop,
+        position_caps=board.position_caps,
+        league_limits=board.league_limits,
+        ir_rule=ir_rule,
     )
 
 
@@ -1580,17 +1934,21 @@ def _chain_notes(chain: _ChainResult, *, claim_budget: int, weeks: int) -> list[
     elif chain.chain_stop == STOP_EXHAUSTED:
         if chain.exhaust_capped and not chain.exhaust_reused:
             out.append(
-                "the list ended because every remaining add would put you over this "
-                "board's limit for its position (max 3 QB, 3 TE, 8 RB, 8 WR, one K, "
-                "one D/ST — a modelling guard from item 3.2, not a league rule). That "
-                "is a LIMIT, not a measurement that the next claim was worthless."
+                f"the list ended because every remaining add would put you over the "
+                f"binding limit for its position "
+                f"({_caps_phrase(chain.position_caps, chain.league_limits)}). "
+                + _fences_phrase(chain.league_limits)
+                + " That is a LIMIT, not a measurement that the next claim was "
+                  "worthless."
             )
         elif chain.exhaust_capped:
             out.append(
                 f"the list ended on bookkeeping, NOT on value: of the pairs left, "
                 f"{chain.exhaust_reused} reuse a player already spent above and "
-                f"{chain.exhaust_capped} would put you over this board's limit for "
-                f"their position (a modelling guard from item 3.2, not a league rule)."
+                f"{chain.exhaust_capped} would put you over the binding limit for "
+                f"their position "
+                f"({_caps_phrase(chain.position_caps, chain.league_limits)}). "
+                + _fences_phrase(chain.league_limits)
             )
         elif n:
             out.append(
@@ -1802,15 +2160,22 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
         out.append(line)
     out.append("")
 
-    # The IR-eligibility disclosure is load-bearing for a destructive action, so it
-    # renders UNCONDITIONALLY whenever an IR occupant is present (item 3.4 audit F2).
+    # The IR disclosure is load-bearing for a destructive action, so it renders
+    # UNCONDITIONALLY whenever an IR occupant is present (item 3.4 audit F2) — and
+    # since item 3.8a it is SPLIT, because only half of it is still unverified.
+    # Line 1 per occupant: which signal decided (ESPN's own flag, or the proxy).
+    # Line 2: the IR-SLOT MECHANISM, which no roster in this league has exercised.
     def ir_disclosure() -> list[str]:
         if v.ir_count <= 0:
             return []
-        return [
-            "  NOTE: IR eligibility is INFERRED from the injury tag and is UNVERIFIED "
-            "— confirm in the ESPN app before you drop or bench anyone."
-        ]
+        out = [f"  NOTE: {note}" for note in v.ir_flag_notes]
+        out.append(
+            "  NOTE: what ESPN's IR SLOT itself accepts, and exactly when ESPN blocks "
+            "a transaction, is UNVERIFIED — no roster in this league has ever used the "
+            "IR slot. Confirm on the ESPN roster page (each player's MOVE button lists "
+            "only the moves ESPN accepts) before you drop or bench anyone."
+        )
+        return out
 
     # --- legality FIRST -------------------------------------------------------
     v = plan.legality
@@ -1838,6 +2203,23 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
             if reasons:
                 out.extend(f"        - {r}" for r in fd.reasons)
         out.extend(ir_disclosure())          # UNCONDITIONAL (F2)
+        # When NEITHER fix could be named, the page used to print an alarm, no
+        # fix, and no reason — refuse-and-propose became refuse-and-say-nothing on
+        # the one page where ESPN is blocking every transaction (audit fix). The
+        # explanation is in the notes; promote it into the FIX block so it cannot
+        # read as an omission.
+        if not plan.ir_move_fix and plan.forced_drop is None:
+            out.append("")
+            out.append("  NO FIX THIS TOOL CAN NAME — why:")
+            for note in plan.notes:
+                out.append(f"    {note}")
+        else:
+            # The blocked branch returns before the legal path's notes loop, so
+            # every disclosure routed into notes — the IR RULE CHECK headline, the
+            # undroppable-skip note, the board's own caveats, item 3.4's
+            # alternative-fix option — was unreachable text (audit fix).
+            for note in plan.notes:
+                out.append(f"! {note}")
         out.append("")
         out.append("  No claims are planned until the roster is legal.")
         if reasons:
@@ -1936,8 +2318,9 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
         out.append("")
         out.append(
             f"BLOCKED BY A POSITION LIMIT, not by value ({len(plan.chain_capped)}) — "
-            f"this board caps how many of one position it will recommend carrying "
-            f"(item 3.2's guard, not a league rule):"
+            + _fences_phrase(plan.league_limits)
+            + f" In force here: "
+              f"{_caps_phrase(plan.position_caps, plan.league_limits)}."
         )
         for r in plan.chain_capped:
             out.append(_rejection_line(r))
@@ -1994,7 +2377,15 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
 
     def drop_line(d: DropRec) -> str:
         tag = ""
-        if d.player in spent_drops:
+        # ESPN's undroppable list first (item 3.8a): it is the only tag here that
+        # says the move is IMPOSSIBLE rather than merely priced against something.
+        # He is still listed and still priced — "what he is worth" is a fair
+        # question — but no claim, chain step or forced drop can name him.
+        if d.undroppable:
+            # ONE shared stem with `marginal.format_marginal` (audit fix) plus the
+            # tail that is only true on THIS page, which has a claim list above it.
+            tag = f"   {UNDROPPABLE_TAG}, so no move above can use him]"
+        elif d.player in spent_drops:
             tag = "   [already spent — a move above drops him; not a separate move]"
         elif d.player in refused_drops:
             tag = (f"   [the chain REFUSES this drop once the moves above win — the "

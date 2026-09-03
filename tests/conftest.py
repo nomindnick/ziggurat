@@ -63,8 +63,13 @@ def league_world():
     POSITION_IDS = {"QB": 1, "RB": 2, "WR": 3, "TE": 4, "K": 5, "D/ST": 16}
 
     def _make(*, holdings=None, pool_size=40, scoring_period=3, season=2026,
-              slots=None, acquisitions=None, drop_from_pool=()):
+              slots=None, acquisitions=None, drop_from_pool=(),
+              injured=None, droppable=None, entry_injury=None,
+              settings=True, position_limits=None):
         holdings = dict(holdings or {})
+        injured = dict(injured or {})
+        droppable = dict(droppable or {})
+        entry_injury = dict(entry_injury or {})
         slots = dict(slots or {})
         acquisitions = dict(acquisitions or {})
         cycle = ["QB", "RB", "WR", "TE", "K", "D/ST"]
@@ -85,6 +90,11 @@ def league_world():
                     "defaultPositionId": POSITION_IDS[position],
                     "proTeamId": 1 + (i % 32),
                     "injuryStatus": "ACTIVE" if i % 7 else "QUESTIONABLE",
+                    # ESPN's own flags (item 3.8a). Absent unless the test asks —
+                    # a pre-014 snapshot really does serve neither, and the None
+                    # path (the injury-tag proxy) has to stay the default here.
+                    **({"injured": injured[pid]} if pid in injured else {}),
+                    **({"droppable": droppable[pid]} if pid in droppable else {}),
                     "ownership": {
                         "percentOwned": max(0.0, 99.0 - i * 2.3),
                         "percentStarted": max(0.0, 90.0 - i * 2.5),
@@ -100,6 +110,9 @@ def league_world():
                 "lineupSlotId": slots.get(pid, 20),  # 20 = BE
                 "acquisitionType": acquisitions.get(pid, "DRAFT"),
                 "acquisitionDate": 1788000000000,
+                # The ROSTER ENTRY's own injuryStatus — a different field from
+                # player.injuryStatus (item 3.8a); live it reads NORMAL.
+                "injuryStatus": entry_injury.get(pid, "NORMAL"),
             })
 
         teams = [{
@@ -139,13 +152,65 @@ def league_world():
                              "gamesPlayed": 1 if played else 0},
                 })
 
+        # The league RULEBOOK (item 3.8a). Synthetic, but SHAPED like the live
+        # 2026 payload verified in the 3.8a recon: ESPN's -1 "unlimited" sentinel
+        # on the acquisition/move limits, a positionLimits map whose keys are
+        # defaultPositionId STRINGS (with unmapped ids present, including id "0"
+        # carrying a real 0), and a lineupSlotCounts map that carries a zero-count
+        # slot id LINEUP_SLOTS does not map. Every one of those was a decoding trap.
+        # ``settings=False`` drops the whole block — the degrade path.
+        limits = {"1": 4, "2": 8, "3": 8, "4": 3, "5": 3, "16": 3, "0": 0, "6": -1}
+        if position_limits is not None:
+            limits = dict(position_limits)
+        settings_block = {
+            "name": "Synthetic League",
+            "acquisitionSettings": {
+                "acquisitionType": "WAIVERS_TRADITIONAL",
+                "isUsingAcquisitionBudget": False,
+                "acquisitionBudget": 100,
+                "acquisitionLimit": -1,
+                "matchupAcquisitionLimit": -1.0,
+                "waiverHours": 24,
+                "waiverProcessDays": ["MONDAY", "WEDNESDAY"],
+                "waiverProcessHour": 11,
+                "waiverOrderReset": True,
+            },
+            "rosterSettings": {
+                # NESTED here, not at the settings top level — the live shape.
+                # Reading it from the top level stored NULL and printed "off" for
+                # a list that is ON (caught by the 3.8a live smoke run).
+                "isUsingUndroppableList": True,
+                "moveLimit": -1,
+                "lineupSlotCounts": {"0": 1, "2": 2, "4": 2, "6": 1, "16": 1,
+                                     "17": 1, "20": 7, "21": 1, "23": 1, "22": 0},
+                "positionLimits": limits,
+            },
+            "tradeSettings": {
+                "deadlineDate": 1796230800000,
+                "vetoVotesRequired": 4,
+                "revisionHours": 24,
+            },
+            "scheduleSettings": {
+                "matchupPeriodCount": 14,
+                "playoffTeamCount": 6,
+                "playoffSeedingRule": "TOTAL_POINTS_SCORED",
+                # Commissioner free text, stripped before storage (Rule 5).
+                "divisions": [{"id": 0, "size": 10, "name": "Synthetic Division"}],
+            },
+        }
         payload = {
             "seasonId": season,
             "scoringPeriodId": scoring_period,
-            "status": {"currentMatchupPeriod": scoring_period, "finalScoringPeriod": 17},
+            "status": {
+                "currentMatchupPeriod": scoring_period, "finalScoringPeriod": 17,
+                "waiverLastExecutionDate": 1788332772958,
+                "waiverProcessStatus": {"2026-09-02T07:06:12.958Z": 4},
+            },
             "teams": teams,
             "schedule": schedule,
         }
+        if settings:
+            payload["settings"] = settings_block
         return payload, pool
 
     return _make
@@ -190,7 +255,8 @@ def marginal_world(db):
       test roster and the live roster are the same shape.
 
     Each spec is ``{"name", "pos", "team", "pts", "bye", "on_team", "slot",
-    "owned", "injury", "weeks", "forecast", "proj_team"}``; ``pts`` is HOUSE points
+    "owned", "injury", "injured", "droppable", "entry_injury", "weeks",
+    "forecast", "proj_team"}``; ``pts`` is HOUSE points
     per playing week (offense via rushing yards at 0.1/yd, K via extra points at
     1.0, D/ST via sacks at 1.0 — no bracket keys, so no phantom shutout points),
     and ``weeks`` overrides individual weeks.
@@ -273,6 +339,12 @@ def marginal_world(db):
                 "acquisition_type": "DRAFT" if spec.get("on_team") else None,
                 "acquisition_date": "2026-08-20" if spec.get("on_team") else None,
                 "injury_status": spec.get("injury", "ACTIVE"),
+                # ESPN's own flags (item 3.8a). Default None = NOT CAPTURED, which
+                # is what every pre-014 snapshot really holds and what keeps the
+                # injury-tag proxy the default path in these fixtures.
+                "injured": spec.get("injured"),
+                "droppable": spec.get("droppable"),
+                "entry_injury_status": spec.get("entry_injury"),
                 "percent_owned": spec.get("owned", 10.0 + i),
                 "percent_started": 0.0,
                 "percent_change": 0.0,

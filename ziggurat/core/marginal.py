@@ -33,6 +33,31 @@ disagree — item 3.4 consumes the add side and this module owns the drop side.
 **marginal(p|R) is allowed to be negative, and negative is the actionable add
 signal** ("drop Godwin, add A.J. Brown, gain 2.1"). It is never clamped.
 
+WHERE A DROP CAN BE NAMED (item 3.8a — read this before adding a fourth path).
+ESPN runs an undroppable list in this league and REFUSES a drop of a listed
+player, so every place this system can name one needs the same fence:
+
+  1. the swap matrix — fenced in ``_scan``, at the two ``swaps.append`` sites (not
+     at the loop head: the DROP BOARD must still price and TAG him);
+  2. ``waiver.build_waiver_plan``'s forced drop on an illegal roster — fenced
+     there, on ``MarginalRow.undroppable``, because it picks a BOARD row rather
+     than a swap;
+  3. the streaming lane — safe by construction: those rows come out of
+     ``board.swaps`` and inherit (1);
+  4. phase-A open-slot adds — safe by construction: a pure add drops nobody;
+  5. ``waiver.build_waiver_plan``'s blocked-path NOTES, which name an
+     IR-ineligible occupant as an alternative drop in PROSE rather than through a
+     swap or a board row — fenced on ``IRIneligible.droppable``. Found by audit
+     AFTER this list claimed to be complete, which is why it is enumerated here.
+
+Two RENDERING surfaces owe the tag as well, and they are not the same code:
+``format_marginal`` (the `ziggurat marginal` page) and ``waiver.drop_line`` (the
+`ziggurat waivers` page). Both build from ``UNDROPPABLE_TAG`` so they cannot
+drift; a third page owes the same.
+
+``core/lineup_support.py`` and ``core/streaming.py`` never name a drop at all.
+A sixth path is a sixth fence.
+
 TWO LOAD-BEARING ASSUMPTIONS, stated because they are false in interesting ways
 -----------------------------------------------------------------------------
 **A1 — STATIC ROSTER.** ``V(K)`` assumes you hold exactly ``K`` for every
@@ -100,6 +125,155 @@ from ziggurat.league import state as league_state
 POSITION_CAPS: Mapping[str, int] = MappingProxyType(
     {"QB": 3, "RB": 8, "WR": 8, "TE": 3, "DST": 1, "K": 1}
 )
+
+
+def effective_position_caps(league_limits=None, *, caps: Mapping[str, int] = POSITION_CAPS):
+    """``(caps, notes)`` — this board's own guard tightened by the LEAGUE's own
+    roster limits, item 3.8a.
+
+    TWO FENCES NOW EXIST and they are not the same thing. ``POSITION_CAPS`` is a
+    modelling guard (it exists so the scan cannot propose a 9-RB roster); ESPN's
+    ``positionLimits`` is a rule the app enforces. Until item 3.8a the second one
+    was not ingested at all, and the plan's own reason text said "not a league
+    rule" as though no league rule existed.
+
+    THE NAIVE ``min()`` IS A BUG, twice over, which is why this is a function and
+    not an expression at the call site:
+
+    * ESPN's sentinel for "no limit" is **-1**, and ``min(3, -1) == -1`` would
+      refuse EVERY add at that position and report it through the CAPPED bucket as
+      though it were a roster rule. A **0** is likewise not a real limit — it is
+      what a zeroed/degraded settings row looks like, and it gets a NOTE rather
+      than a silent shutout.
+    * The label spaces do not meet. ``league_position_limits`` returns DEFPOS
+      labels ("D/ST"), ``POSITION_CAPS`` is keyed on the valuation canon ("DST").
+      A raw join drops D/ST silently, with no error anywhere — precisely the
+      failure mode item 3.8a exists to end. ``canon_position`` is the one bridge.
+
+    Today this changes NOTHING live: measured 2026-09-02, the league allows
+    QB 4 / RB 8 / WR 8 / TE 3 / K 3 / D/ST 3 and ``POSITION_CAPS`` is at or below
+    every one of them. That is why the tighter-league-limit case is proved
+    synthetically rather than by the live run.
+    """
+    out = dict(caps)
+    notes: list[str] = []
+    if not league_limits:
+        return out, tuple(notes)
+    bound: list[str] = []
+    for label, limit in dict(league_limits).items():
+        pos = canon_position(label)
+        if pos is None or limit is None:
+            continue
+        if limit < 0:
+            continue                    # ESPN's -1: no league limit at all
+        if limit == 0:
+            notes.append(
+                f"your league's own roster limit for {label} reads 0, which would mean "
+                f"you may not carry ANY of them. That is what a degraded settings row "
+                f"looks like, so it is IGNORED here and this board's own cap "
+                f"({out.get(pos)}) still applies — check `ziggurat league settings`."
+            )
+            continue
+        current = out.get(pos)
+        if current is None or limit < current:
+            out[pos] = limit
+            bound.append(f"{label} {limit}")
+    if bound:
+        notes.append(
+            f"your LEAGUE's own roster limit is tighter than this board's guard at "
+            f"{', '.join(sorted(bound))} — the league rule is what fences those "
+            f"positions below, not item 3.2's POSITION_CAPS."
+        )
+    return out, tuple(notes)
+
+
+# The ONE undroppable tag stem. BOTH drop-board renderers build from it — this
+# module's `ziggurat marginal` page and `waiver.drop_line` — because two renderers
+# of ONE scan silently disagreeing is exactly the failure sharing the scan exists
+# to prevent (audit fix: `ziggurat marginal` rendered no tag at any verbosity).
+UNDROPPABLE_TAG = "[UNDROPPABLE — on ESPN's undroppable list; the app refuses this drop"
+
+
+def canon_league_limits(league_limits):
+    """The league's own limits in the VALUATION canon, or None when none were read.
+
+    ``None`` and ``{}`` are different answers and both are needed: ``None`` means
+    no settings row was visible at this as_of (so only ONE fence applied and the
+    page must not claim two), while ``{}`` means the row was read and carries no
+    real limit at any position. Sentinels (-1 "unlimited", a degraded 0) are
+    dropped here for the same reason ``effective_position_caps`` ignores them.
+    """
+    if league_limits is None:
+        return None
+    out: dict[str, int] = {}
+    for label, limit in dict(league_limits).items():
+        pos = canon_position(label)
+        if pos is None or limit is None or limit <= 0:
+            continue
+        out[pos] = int(limit)
+    return out
+
+
+def describe_cap(position: str, cap: int, *, league_limit: int | None = None,
+                 limits_read: bool = True) -> str:
+    """Which of the two fences is the binding one at ``position`` (item 3.8a).
+
+    One classifier, so the chain's refusal reason, the section header and the
+    plan note can never name different rules for the same number.
+
+    ATTRIBUTION IS CARRIED, NOT INFERRED (audit fix). Reconstructing it from
+    ``cap < POSITION_CAPS[position]`` is wrong in both directions on the real
+    board: at RB, WR and TE this league's own limit EQUALS the guard, so a strict
+    inequality reported a binding league rule as "not a league rule" — which a
+    novice reads as "the app will let me do this anyway" — and with no settings
+    row read at all it asserted a fence nobody had looked at.
+    """
+    own = POSITION_CAPS.get(position)
+    if not limits_read:
+        return ("a modelling guard (item 3.2's POSITION_CAPS); your league's own roster "
+                "limit for this position was NOT CAPTURED in this snapshot, so it was "
+                "not checked here")
+    if league_limit is not None and league_limit == cap:
+        if own is not None and own == cap:
+            return (f"BOTH fences at {cap}: your LEAGUE's own roster limit (ESPN "
+                    f"positionLimits) AND this board's guard (item 3.2). The app "
+                    f"enforces this one, so queueing it by hand will not work")
+        return "your LEAGUE's own roster limit (ESPN positionLimits)"
+    if own is not None and cap < own:
+        return "your LEAGUE's own roster limit (ESPN positionLimits)"
+    if league_limit is not None:
+        return (f"a modelling guard (item 3.2's POSITION_CAPS), not a league rule — "
+                f"your league itself allows up to {league_limit} here")
+    return ("a modelling guard (item 3.2's POSITION_CAPS), not a league rule — your "
+            "league sets no limit at this position")
+
+
+def describe_league_limits(league_limits) -> str:
+    """One clause naming which fence actually binds, per position (item 3.8a).
+
+    Built on the same ``effective_position_caps`` + ``describe_cap`` pair every
+    other cap surface reads, so `ziggurat league settings` and `ziggurat waivers`
+    cannot say different things about the same number.
+    """
+    canon = canon_league_limits(league_limits)
+    if canon is None:
+        return ("your league's own roster limits were NOT CAPTURED at this as-of, so "
+                "only this board's own guard (item 3.2) fences a position")
+    caps, _notes = effective_position_caps(league_limits)
+    bound = sorted(
+        f"{label} {caps[pos]}"
+        for label, limit in dict(league_limits).items()
+        if (pos := canon_position(label)) is not None
+        and pos in caps
+        and canon.get(pos) is not None
+        and canon[pos] <= caps[pos]
+    )
+    if not bound:
+        return ("none of these is the binding fence today — this board's own guard "
+                "(item 3.2) is at or below every one of them; `ziggurat waivers` names "
+                "the binding limit per position")
+    return ("the fence actually enforced is the tighter of this and item 3.2's own "
+            "guard; the league limit is at or below the guard at " + ", ".join(bound))
 
 # Valued on a CURRENT-WEEK horizon only, because you stream them weekly. Without
 # this, 3.2 prices a kicker over 17 weeks while 3.5 recommends replacing him this
@@ -442,6 +616,10 @@ class MarginalRow:
     reasons: tuple[str, ...]
     weeks_projected: int = 0        # window weeks the feed actually forecasts
     weeks_projectable: int = 0      # window weeks his team plays
+    # ESPN's own undroppable list says the app will REFUSE this drop (item 3.8a).
+    # A FIELD, not a reason string: reasons render only under --reasons, and this
+    # has to be visible on the default page, where the drop is proposed.
+    undroppable: bool = False
 
     @property
     def per_week(self) -> float:
@@ -516,6 +694,17 @@ class MarginalBoard:
     freshness: tuple[str, ...]
     as_of: str
     season: int
+    # The caps this scan actually enforced (item 3.8a). Exposed so the chain's
+    # per-step re-check, the rejection reason and the section header all read the
+    # SAME numbers the matrix was filtered with — three read points that used to
+    # each reach for the module constant on their own.
+    position_caps: Mapping[str, int] = POSITION_CAPS
+    # The LEAGUE's own limits that went into ``position_caps``, in the valuation
+    # canon — or None when no settings row was readable at this as_of (audit fix).
+    # Attribution has to be carried: a cap of 3 at TE is BOTH fences agreeing on
+    # this board and only the module guard on a database with no settings row, and
+    # nothing downstream can tell those apart from the number.
+    league_limits: Mapping[str, int] | None = None
 
     @property
     def swaps(self) -> tuple[SwapRow, ...]:
@@ -966,6 +1155,11 @@ class _Entry:
     lineup_slot: str | None
     on_roster: bool
     unvalued: bool
+    # ESPN's own droppable flag (item 3.8a). TRI-STATE and it must stay so:
+    # None = not captured (a pre-014 snapshot, or a rostered player absent from
+    # ESPN's pool response), which is NOT "undroppable". Every fence tests
+    # ``== 0``, never truthiness.
+    droppable: int | None = None
     weeks_projected: int = 0        # window weeks with a REAL forecast row
     weeks_projectable: int = 0      # window weeks his team actually plays
     no_projection_at_all: bool = False
@@ -1345,6 +1539,7 @@ def _entry_from_row(row: Mapping, lines, byes: ByeMap, weeks: Sequence[int],
         lineup_slot=row.get("lineup_slot"),
         on_roster=on_roster,
         unvalued=unvalued,
+        droppable=(None if row.get("droppable") is None else int(row["droppable"])),
         weeks_projected=len(covered),
         weeks_projectable=len(playable),
         no_projection_at_all=line is None or not covered,
@@ -1682,10 +1877,23 @@ def _row_reasons(
 
     if best is not None:
         verb = "you would GAIN" if marginal < 0 else "you would LOSE"
-        reasons.append(
-            f"drop him and add {best.player} ({best.position}) and {verb} "
-            f"{abs(marginal):.1f} house pts over {_plural(len(horizon_weeks), 'week')}"
-        )
+        if entry.droppable == 0:
+            # NOT an instruction on a fenced row (audit fix). The number is still
+            # worth printing — "what is he worth" is a fair question and it is what
+            # explains the `best add` column — but ESPN refuses the move, so it is
+            # a VALUATION, not something the operator can do.
+            reasons.append(
+                f"ESPN refuses this drop, so this is a valuation and not a move: "
+                f"swapping him for {best.player} ({best.position}) would be worth "
+                f"{-marginal:+.1f} house pts over "
+                f"{_plural(len(horizon_weeks), 'week')}"
+            )
+        else:
+            reasons.append(
+                f"drop him and add {best.player} ({best.position}) and {verb} "
+                f"{abs(marginal):.1f} house pts over "
+                f"{_plural(len(horizon_weeks), 'week')}"
+            )
         acq = classify_acquisition(best.roster_status)
         if acq == ACQ_WAIVER:
             reasons.append(
@@ -1794,7 +2002,7 @@ def build_board(
     roster_structure: RosterStructure = DEFAULT_ROSTER,
     availability: AvailabilityModel | None = None,
     handcuffs: HandcuffModel | None = None,
-    position_caps: Mapping[str, int] = POSITION_CAPS,
+    position_caps: Mapping[str, int] | None = None,
     playoff_weight: float = 1.0,
     pool_limit: int | None = DEFAULT_POOL_LIMIT,
     swap_limit: int | None = 200,
@@ -1824,6 +2032,21 @@ def build_board(
     availability = availability or DEFAULT_AVAILABILITY
     handcuffs = handcuffs or DEFAULT_HANDCUFFS
     notes: list[str] = []
+
+    # ONE place the position fence is composed (item 3.8a). ``position_caps=None``
+    # (the default, i.e. every production caller: the waiver plan, `ziggurat
+    # marginal`, the Wednesday briefing) means "read the league's own limits and
+    # tighten this board's guard with them"; an explicit mapping overrides both and
+    # is what tests inject. Resolving it HERE rather than at each call site is what
+    # keeps the matrix filter, the chain's per-step re-check and the refusal reason
+    # reading the same numbers — they used to each reach for the module constant.
+    league_limits = None
+    if position_caps is None:
+        raw_limits = league_state.league_position_limits(
+            conn, as_of=as_of, season=season, view=view)
+        position_caps, cap_notes = effective_position_caps(raw_limits)
+        league_limits = canon_league_limits(raw_limits)
+        notes.extend(cap_notes)
 
     window = resolve_weeks(conn, as_of=as_of, season=season, weeks=weeks,
                            last_week=last_week, view=view)
@@ -2009,6 +2232,8 @@ def build_board(
         freshness=tuple(freshness),
         as_of=str(as_of),
         season=int(season),
+        position_caps=dict(position_caps),
+        league_limits=league_limits,
     )
 
 
@@ -2083,6 +2308,21 @@ def _scan(
 
     for drop_key in roster_set:
         d = entries[drop_key]
+        # ESPN's undroppable list (item 3.8a). This league runs one
+        # (isUsingUndroppableList: true) and 19 of 1,036 players were on it on
+        # 2026-09-02, two of them on the operator's own roster — the app REFUSES
+        # a drop of those, so a swap naming one is an instruction he cannot follow.
+        #
+        # The fence sits at the two ``swaps.append`` sites BELOW, not here at the
+        # loop head, and that is deliberate: skipping the whole iteration would
+        # also delete his DROP BOARD row, and the board must still price him (with
+        # the tag) — "what he is worth" is a fair question even when the answer
+        # cannot be acted on. ``roster_set`` and the base value are untouched: he
+        # is still on the roster and still contributes to V(K).
+        #
+        # ``== 0``, never truthiness: None means ESPN's flag was not captured for
+        # this row, which is not a refusal.
+        undroppable = d.droppable == 0
         streamed = d.position in STREAMED_POSITIONS
         model = model_now if streamed else model_full
         base = base_now if streamed else base_full
@@ -2102,7 +2342,7 @@ def _scan(
                 continue
             v = model.value(remaining + [f.key])
             gain = v - base
-            if gain > 0.0:
+            if gain > 0.0 and not undroppable:
                 swaps.append(SwapRow(
                     add=f.player, drop=d.player, gain=gain,
                     add_position=f.position, drop_position=d.position,
@@ -2136,7 +2376,7 @@ def _scan(
         # without it a row can report "drop him and GAIN 1.4" while the swap matrix
         # 3.4 reads contains no such move — the add board and the drop board
         # disagreeing, which is the one thing sharing the scan is meant to prevent.
-        if best is not None and (drop_key, best.key) not in {
+        if best is not None and not undroppable and (drop_key, best.key) not in {
             (dk, ak) for dk, ak, _r in swap_keys
         }:
             swaps.append(SwapRow(
@@ -2173,6 +2413,7 @@ def _scan(
                 replacement_status=None, tiebreak_rung=None, unvalued=True,
                 weeks_projected=d.weeks_projected,
                 weeks_projectable=d.weeks_projectable,
+                undroppable=undroppable,
                 reasons=_unpriceable_reasons(d, window),
             ))
             continue
@@ -2222,6 +2463,7 @@ def _scan(
             replacement_status=best.roster_status if best is not None else None,
             tiebreak_rung=None, unvalued=False,
             weeks_projected=d.weeks_projected, weeks_projectable=d.weeks_projectable,
+            undroppable=undroppable,
             reasons=_row_reasons(
                 d, marginal=marginal, lineup_c=lineup_c, bye_c=bye_c,
                 contingent_c=contingent_c, playoff_subtotal=playoff_sub,
@@ -2525,8 +2767,15 @@ def _table(rows, *, reasons: bool) -> list[str]:
     out = ["  ".join(f"{label:<{width}}" for _, label, width in _COLUMNS),
            "  ".join("-" * width for _, _, width in _COLUMNS)]
     for row in rows:
-        out.append("  ".join(
-            f"{_fmt(getattr(row, attr)):<{width}}" for attr, _, width in _COLUMNS))
+        line = "  ".join(
+            f"{_fmt(getattr(row, attr)):<{width}}" for attr, _, width in _COLUMNS)
+        # A SUFFIX, not a column: a fixed-width column would print an empty cell on
+        # every clean board. It renders at BOTH verbosities, because this is the
+        # page where the drop is proposed and `reasons` are behind a flag.
+        if getattr(row, "undroppable", False):
+            line += (f"   {UNDROPPABLE_TAG}; this row is priced for reference only, "
+                     f"it is not a move you can make]")
+        out.append(line)
         if reasons:
             out.extend(f"      - {reason}" for reason in row.reasons)
     return out

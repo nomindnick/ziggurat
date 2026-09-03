@@ -17,6 +17,7 @@ from ziggurat.core.marginal import (
     DEFAULT_POOL_LIMIT,
     WeekResolutionError,
     build_board,
+    describe_league_limits,
     format_marginal,
 )
 from ziggurat.core.lineup_support import build_lineup, format_lineup_recommendation
@@ -69,12 +70,18 @@ from ziggurat.data.store import apply_schema, connect, migration_alerts, open_db
 from ziggurat.league.state import (
     OwnTeamUnresolved,
     format_free_agents,
+    format_ir_rule_report,
     format_roster,
+    format_settings,
     format_timeline,
     get_free_agents,
+    get_league_settings,
     get_player_state,
     holder_timeline,
+    ir_rule_check,
+    league_position_limits,
     resolve_own_team,
+    settings_verdicts,
 )
 from ziggurat.league.sync import format_run, format_status, run_sync
 from ziggurat.llm import Router
@@ -884,6 +891,47 @@ def league_free_agents(
     rows = get_free_agents(conn, as_of=as_of or _today(), season=_season(season), position=position)
     conn.close()
     typer.echo(format_free_agents(rows, limit=limit))
+
+
+@league_app.command("settings")
+def league_settings(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Print this league's own rulebook as ESPN serves it (item 3.8a).
+
+    Every verdict — whether the acquisition budget is real, whether any
+    transaction cap binds, which NFL week the trade deadline precedes — lives in
+    ``league/state.py``; this command parses, calls, and prints (rule 3).
+    """
+    day = as_of or _today()
+    resolved_season = _season(season)
+    conn = open_db(path)
+    settings = get_league_settings(conn, as_of=day, season=resolved_season)
+    verdicts = settings_verdicts(settings, conn=conn, as_of=day)
+    limits = league_position_limits(conn, as_of=day, season=resolved_season)
+    conn.close()
+    typer.echo(format_settings(settings, verdicts=verdicts,
+                               limits_note=describe_league_limits(limits)))
+
+
+@league_app.command("ir-check")
+def league_ir_check(
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Re-run the IR ground-truth check against the newest snapshot (item 3.8a).
+
+    Prints ESPN's own ``injured`` flag cross-tabbed against this system's
+    IR-eligible designation set, the watch for designations this league has never
+    served, and every IR-slot occupant league-wide.
+    """
+    conn = open_db(path)
+    report = ir_rule_check(conn, as_of=as_of or _today(), season=_season(season))
+    conn.close()
+    typer.echo(format_ir_rule_report(report))
 
 
 @league_app.command("holdings")

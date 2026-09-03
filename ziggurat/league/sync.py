@@ -17,7 +17,7 @@ not capture is gone permanently. Two consequences are built in here:
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ziggurat.data.asof import normalize_as_of
 from ziggurat.league import source, state
@@ -99,6 +99,11 @@ def run_sync(
         )
 
         counts.update(state.ingest_league_state(conn, payload, retrieved_as_of=stamp, season=season))
+        # A missing or half-decoded settings block never costs us the snapshot, but
+        # it is never silent either: a warning here makes the run `partial` (item
+        # 3.8a). A stored half-decoded rulebook looks healthy and changes decisions.
+        if counts.get("settings_warning"):
+            warnings.append(counts["settings_warning"])
         player_counts = state.ingest_player_state(
             conn, pool, retrieved_as_of=stamp, season=season,
             roster=roster, scoring_period=scoring_period, allow_shrink=allow_shrink,
@@ -165,6 +170,28 @@ def format_run(summary: dict) -> str:
     )
 
 
+def _batch_deadline(settings, through) -> str:
+    """When to queue by, derived from the league's OWN ``waiverProcessDays``.
+
+    A batch labelled day X runs ~00:0x PT ON day X (measured: 2026-09-02 00:06 PT
+    is a WEDNESDAY and WEDNESDAY is in this league's process days), so today's
+    batch — if it had one — already ran by the time this report is read. This
+    league has no TUESDAY batch, so a flat "queue before ~23:59 PT" was wrong on
+    Monday evenings: nothing processes that night (audit fix).
+    """
+    days = {str(d).strip().upper() for d in ((settings or {}).get("waiver_process_days") or [])}
+    if not days:
+        return "queue claims before ~23:59 PT the evening before a batch"
+    day = normalize_as_of(through)
+    for step in range(1, 8):
+        nxt = day + timedelta(days=step)
+        if nxt.strftime("%A").upper() in days:
+            prior = nxt - timedelta(days=1)
+            return (f"next batch {nxt.strftime('%a')} {nxt.isoformat()} ~00:0x PT — "
+                    f"queue by ~23:59 PT {prior.strftime('%a')} {prior.isoformat()}")
+    return "queue claims before ~23:59 PT the evening before a batch"
+
+
 def format_status(conn, *, season: int, through) -> str:
     """The operational health report: last run, snapshot coverage, and the days
     that are permanently missing.
@@ -193,6 +220,42 @@ def format_status(conn, *, season: int, through) -> str:
         if last_ok is not None else "  last success : NONE"
     )
     lines.append(f"  snapshots    : {len(days)} days, {days[0] if days else '—'} → {days[-1] if days else '—'}")
+
+    # --- item 3.8a: two standing ground-truth lines ---------------------------
+    # The waiver-batch time is ALWAYS printed: it is the deadline the Tuesday
+    # workflow's last step depends on, and this league's batches run 00:01-01:13
+    # PACIFIC, not the "3-4 AM" (Eastern) figure that was in circulation.
+    settings = state.get_league_settings(conn, as_of=through, season=season)
+    executed = (settings or {}).get("waiver_last_execution")
+    if executed:
+        lines.append(f"  waivers last : {executed} (local) — {_batch_deadline(settings, through)}")
+    elif settings is None:
+        lines.append(
+            "  waivers last : no league settings captured at this as-of (capture began "
+            "2026-09-02, item 3.8a) — run a sync"
+        )
+    else:
+        # A settings row EXISTS and simply carries no waiverLastExecutionDate. A
+        # sync will not add one, so telling the operator to run one is a false
+        # instruction about a live gap dressed as a pre-014 capture gap (audit fix).
+        lines.append(
+            "  waivers last : the captured settings row carries no "
+            "waiverLastExecutionDate — ESPN served none (no batch has run yet this "
+            "season, or the field was dropped); a sync will NOT fill this in"
+        )
+    # The IR ground-truth check is SILENT when clean. `league status` is in every
+    # day's preflight, which is the only surface a standing check gets looked at —
+    # and a line that says "nothing changed" every day is how the operator learns
+    # to skip the report (the operator-attention contract).
+    ir = state.ir_rule_check(conn, as_of=through, season=season)
+    if ir.has_news:
+        lines.append(f"  {ir.headline}")
+    # The one settings change that invalidates the claim list, on the surface
+    # every day's preflight runs. Silent when the budget is inert (audit fix).
+    faab = state.faab_verdict(settings)
+    if faab:
+        lines.append(f"  {faab}")
+
     if gaps:
         shown = ", ".join(gaps[:10]) + (f", … (+{len(gaps) - 10} more)" if len(gaps) > 10 else "")
         lines.append(f"  MISSING DAYS : {len(gaps)} — {shown}")
