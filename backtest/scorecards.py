@@ -55,6 +55,7 @@ import statistics
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from backtest import stats
 from backtest.decisions import (
@@ -79,6 +80,7 @@ from ziggurat.data.nfl.sleeper_ownership import (
 from ziggurat.data.nfl.weekly_stats import get_weekly_stats
 
 __all__ = [
+    "COND_LEAD2_LABEL",
     "DEPTH_BANDS",
     "DEPTH_LABEL",
     "HIT_PLACES_DEFAULT",
@@ -88,15 +90,23 @@ __all__ = [
     "NULL_LABEL",
     "OWNED_DELTA_DEFAULT",
     "OWNED_DELTA_SENSITIVITY",
+    "DepthLifts",
     "GradeInputError",
     "MarketScorecard",
     "MarketSpec",
+    "NullRate",
+    "PickGrade",
     "Reference",
     "ReferenceCache",
+    "Summary",
     "build_scorecard",
     "depth_band",
+    "depth_matched_lifts",
+    "null_rate",
     "read_reference",
     "render",
+    "season_band_totals",
+    "split_pooled_band_totals",
 ]
 
 
@@ -641,6 +651,18 @@ class NullRate:
     can be measured against lines that started as deep as it did.
     ``precedes`` counts lines excluded because the T+1 page was scraped at or
     before the decision clock — the same rule the picks are refused under.
+
+    The CONDITIONAL lead-2 counters (item 4.2, pre-registration §9.1) answer
+    "of the lines the market had NOT already re-ranked at r1, how many did it
+    re-rank at r2?" — the raw lead-2 rate is structurally depressed because a
+    lead-1 hit consumes the denominator.  Two forms, symmetric with the pick
+    side: PRIMARY (``l1_rankable`` / ``lead2_conditional``) keeps a line whose
+    r1 status is ``miss`` or ``absent`` — the r1 page COULD have ranked him
+    and did not; a bye at r1 is excluded because the page could not have,
+    and a missing r1 page (``no_page``) because a lead-1 hit was structurally
+    impossible.  SECONDARY (``*_incl_bye``) keeps the bye-at-r1 lines in.
+    ``by_band_conditional`` is the PRIMARY form per DEPTH band, so the
+    conditional lift can be depth-matched like the raw one.
     """
 
     season: int
@@ -658,6 +680,14 @@ class NullRate:
     corroboration_covered: int
     by_band: tuple[tuple[str, int, int], ...] = ()
     precedes: int = 0
+    #: PRIMARY conditional lead-2 (bye at r1 EXCLUDED): denominator / hits
+    l1_rankable: int = 0
+    lead2_conditional: int = 0
+    #: SECONDARY conditional lead-2 (bye at r1 INCLUDED): denominator / hits
+    l1_rankable_incl_bye: int = 0
+    lead2_conditional_incl_bye: int = 0
+    #: (band, lead2_conditional, l1_rankable) — the PRIMARY form per DEPTH band
+    by_band_conditional: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def rate(self) -> float | None:
@@ -669,6 +699,21 @@ class NullRate:
             if b == label:
                 return h, g
         return 0, 0
+
+    def band_conditional(self, label: str) -> tuple[int, int]:
+        """``(lead2_conditional, l1_rankable)`` for one DEPTH band this week
+        — the PRIMARY (bye-excluded) conditional form."""
+        for b, h, g in self.by_band_conditional:
+            if b == label:
+                return h, g
+        return 0, 0
+
+
+#: r1 statuses under which the market COULD have re-ranked the player and did
+#: not: the PRIMARY conditional lead-2 denominator (pre-registration §9.1).
+L1_RANKABLE_STATUSES = frozenset({S_MISS, S_ABSENT})
+#: ... and the SECONDARY form, which keeps a bye at r1 in the denominator.
+L1_RANKABLE_INCL_BYE_STATUSES = L1_RANKABLE_STATUSES | {S_BYE}
 
 
 def null_universe(
@@ -718,8 +763,11 @@ def null_rate(
 ) -> NullRate:
     universe = null_universe(conn, season=season, week=week, as_of=refs.as_of, positions=positions)
     eligible = gradeable = hits = lead1 = lead2 = deferred = corr = covered = precedes = 0
+    l1_rankable = lead2_cond = l1_rankable_bye = lead2_cond_bye = 0
     band_hits: Counter = Counter()
     band_n: Counter = Counter()
+    band_cond_hits: Counter = Counter()
+    band_cond_n: Counter = Counter()
     for gsis, pos, team in universe:
         elig_ref = refs.get(eligibility_market, season, week, pos, not_after=as_of)
         if elig_ref is not None:
@@ -757,6 +805,17 @@ def null_rate(
             lead2 += 1
         elif lead == LEAD_BYE_DEFERRED:
             deferred += 1
+        # conditional lead-2 (§9.1), from the s1/s2 already in hand — no extra read
+        if s1 in L1_RANKABLE_STATUSES:
+            l1_rankable += 1
+            band_cond_n[band] += 1
+            if s2 == S_HIT:
+                lead2_cond += 1
+                band_cond_hits[band] += 1
+        if s1 in L1_RANKABLE_INCL_BYE_STATUSES:
+            l1_rankable_bye += 1
+            if s2 == S_HIT:
+                lead2_cond_bye += 1
         status, _delta, _imp = owned.corroboration(season, week, gsis, owned_delta=owned_delta)
         if status in (C_YES, C_NO):
             covered += 1
@@ -769,6 +828,11 @@ def null_rate(
         corroborated=corr, corroboration_covered=covered,
         by_band=tuple((b, band_hits[b], band_n[b]) for b in DEPTH_BAND_LABELS if band_n[b]),
         precedes=precedes,
+        l1_rankable=l1_rankable, lead2_conditional=lead2_cond,
+        l1_rankable_incl_bye=l1_rankable_bye, lead2_conditional_incl_bye=lead2_cond_bye,
+        by_band_conditional=tuple(
+            (b, band_cond_hits[b], band_cond_n[b]) for b in DEPTH_BAND_LABELS if band_cond_n[b]
+        ),
     )
 
 
@@ -824,6 +888,74 @@ class Summary:
     #: (band, hits, n) over the graded picks and over the null lines
     picks_by_band: tuple[tuple[str, int, int], ...] = ()
     null_by_band: tuple[tuple[str, int, int], ...] = ()
+    #: the per-week vector behind ``lift_depth_pooled`` (item 4.2 §5.2):
+    #: ((season, week), mean of that week's per-pick depth-matched lifts),
+    #: weeks with no depth-matched pick ABSENT — the SAME ``depth_matched_lifts``
+    #: call that produced the pooled interval, so the two cannot drift
+    per_week_lift_depth: tuple[tuple[tuple[int, int], float], ...] = ()
+    #: CONDITIONAL lead-2 (item 4.2 §9.1).  PRIMARY form (bye at r1 EXCLUDED):
+    #: graded picks whose r1 status is miss/absent, and how many of those hit
+    #: at r2; the STRICT variant additionally requires an r2 page; the
+    #: SECONDARY form (bye at r1 INCLUDED) beside it.  Null counters mirror
+    #: the pick side line for line.
+    cond_l2_rankable: int = 0
+    cond_l2_hits: int = 0
+    cond_l2_rankable_strict: int = 0
+    cond_l2_hits_strict: int = 0
+    cond_l2_rankable_incl_bye: int = 0
+    cond_l2_hits_incl_bye: int = 0
+    null_l1_rankable: int = 0
+    null_lead2_conditional: int = 0
+    null_l1_rankable_incl_bye: int = 0
+    null_lead2_conditional_incl_bye: int = 0
+    #: DEPTH-matched conditional lead-2 lift (PRIMARY form): per rankable
+    #: pick, 1[hit at r2] minus the null's conditional rate in the pick's own
+    #: r0 band that week (season band-rate fallback, counted)
+    lift_cond_l2_depth_pooled: stats.Interval | None = None
+    lift_cond_l2_depth_block: stats.Interval | None = None
+    cond_l2_depth_fallbacks: int = 0
+    cond_l2_depth_unmatched: int = 0
+    #: The SAME conditional lift matched against the SPLIT-POOLED conditional
+    #: band table instead of the pick's own (season, week) band cell.  Both are
+    #: printed because they are two different nulls and they do not agree: the
+    #: primary field above matches per (season, week, band) — the kernel §5.2
+    #: fixes for the PRIMARY metric — while the frozen §9.1 measured block
+    #: ("+19.01pp [+0.62, +37.39] n=29") was computed against the split-pooled
+    #: band table this field reproduces.  §9.1's own wording ("the null
+    #: conditional rate of that pick's own r0 band") does not fix the matching
+    #: level, so neither reading is a defect and BOTH ship: the note quotes
+    #: this field beside the per-week one and says which is which, rather than
+    #: quoting one number the other entry point contradicts.
+    lift_cond_l2_depth_bandpooled: stats.Interval | None = None
+
+    def cond_lead2_rate(self, *, form: str = "primary") -> stats.Interval:
+        """Wilson interval on the conditional lead-2 rate: ``form`` is
+        ``primary`` (bye at r1 excluded), ``strict`` (primary + an r2 page
+        required) or ``incl_bye`` (the secondary, bye-included form)."""
+        if form == "primary":
+            return stats.wilson_interval(self.cond_l2_hits, self.cond_l2_rankable)
+        if form == "strict":
+            return stats.wilson_interval(self.cond_l2_hits_strict, self.cond_l2_rankable_strict)
+        if form == "incl_bye":
+            return stats.wilson_interval(self.cond_l2_hits_incl_bye, self.cond_l2_rankable_incl_bye)
+        raise GradeInputError(
+            f"conditional lead-2 form must be primary, strict or incl_bye, got {form!r}"
+        )
+
+    @property
+    def null_cond_lead2_rate(self) -> float | None:
+        """The null's PRIMARY conditional lead-2 rate (bye at r1 excluded)."""
+        return (
+            self.null_lead2_conditional / self.null_l1_rankable
+            if self.null_l1_rankable else None
+        )
+
+    @property
+    def null_cond_lead2_rate_incl_bye(self) -> float | None:
+        return (
+            self.null_lead2_conditional_incl_bye / self.null_l1_rankable_incl_bye
+            if self.null_l1_rankable_incl_bye else None
+        )
 
     def precision_at(self, k: int) -> stats.Interval:
         if k not in PRECISION_KS:
@@ -850,6 +982,128 @@ class Summary:
             self.null_corroborated / self.null_corroboration_covered
             if self.null_corroboration_covered else None
         )
+
+
+class DepthLifts(NamedTuple):
+    """The depth-matched lift vector: ``per_pick`` in graded-pick order (the
+    observations ``lift_depth_pooled`` is the t-interval of), ``per_week``
+    keyed ``(season, week)`` — the same observations grouped by week, a week
+    with no matched pick ABSENT — and the two counts of picks that fell back
+    to the season band rate or could not be matched at all."""
+
+    per_pick: list[float]
+    per_week: dict[tuple[int, int], list[float]]
+    fallbacks: int
+    unmatched: int
+
+
+def season_band_totals(
+    nulls: Mapping[tuple[int, int], NullRate] | Sequence[NullRate],
+    *,
+    conditional: bool = False,
+) -> dict[tuple[int, str], tuple[int, int]]:
+    """Season-pooled ``(hits, n)`` per ``(season, band)`` over the null weeks
+    — the fallback table for a band the pick's own week never populated.
+    ``conditional`` pools ``by_band_conditional`` (the PRIMARY conditional
+    lead-2 form) instead of ``by_band``."""
+    rows = nulls.values() if isinstance(nulls, Mapping) else nulls
+    out: dict[tuple[int, str], list[int]] = {}
+    for n in rows:
+        for b, h, g_ in (n.by_band_conditional if conditional else n.by_band):
+            t = out.setdefault((n.season, b), [0, 0])
+            t[0] += h
+            t[1] += g_
+    return {key: (h, g_) for key, (h, g_) in out.items()}
+
+
+def split_pooled_band_totals(
+    nulls: Mapping[tuple[int, int], NullRate] | Sequence[NullRate],
+    *,
+    conditional: bool = False,
+) -> dict[tuple[int, str], tuple[int, int]]:
+    """The band table pooled over the WHOLE split (every season together),
+    returned in the ``(season, band)`` shape :func:`_band_matched_lifts` reads
+    so every season maps to the one pooled pair.
+
+    Used for the §9.1 conditional variant, where the pre-registered measured
+    block was computed against a split-pooled table rather than per
+    (season, week) — see ``Summary.lift_cond_l2_depth_bandpooled``."""
+    rows = list(nulls.values() if isinstance(nulls, Mapping) else nulls)
+    pooled: dict[str, list[int]] = {}
+    for n in rows:
+        for b, h, g_ in (n.by_band_conditional if conditional else n.by_band):
+            t = pooled.setdefault(b, [0, 0])
+            t[0] += h
+            t[1] += g_
+    seasons = {n.season for n in rows}
+    return {(s, b): (h, g_) for b, (h, g_) in pooled.items() for s in seasons}
+
+
+def _band_matched_lifts(
+    picks: Sequence[PickGrade],
+    nulls: Mapping[tuple[int, int], NullRate],
+    *,
+    hit_of,
+    week_band,
+    totals: Mapping[tuple[int, str], tuple[int, int]],
+) -> DepthLifts:
+    """The ONE matching kernel: per pick, ``hit_of(pick)`` minus the null rate
+    of the pick's OWN r0-depth band that week (``week_band(null, band)`` ->
+    ``(hits, n)``); a band the week's null never populated falls back to the
+    season-pooled rate in ``totals`` (counted); a band with no line all
+    season is unmatched (counted, excluded)."""
+    per_pick: list[float] = []
+    per_week: dict[tuple[int, int], list[float]] = {}
+    fallbacks = unmatched = 0
+    for p in picks:
+        n = nulls.get((p.season, p.week))
+        b = p.depth_band
+        rate: float | None = None
+        if n is not None:
+            h, g_ = week_band(n, b)
+            if g_:
+                rate = h / g_
+        if rate is None:
+            h, g_ = totals.get((p.season, b), (0, 0))
+            if g_:
+                rate = h / g_
+                fallbacks += 1
+        if rate is None:
+            unmatched += 1
+            continue
+        lift = hit_of(p) - rate
+        per_pick.append(lift)
+        per_week.setdefault((p.season, p.week), []).append(lift)
+    return DepthLifts(per_pick, per_week, fallbacks, unmatched)
+
+
+def depth_matched_lifts(
+    graded: Sequence[PickGrade],
+    nulls: Mapping[tuple[int, int], NullRate],
+    *,
+    band_totals: Mapping[tuple[int, str], tuple[int, int]] | None = None,
+) -> DepthLifts:
+    """THE definition of the depth-matched lift (item 4.1 STAT-2; the item-4.2
+    primary metric, pre-registration §5): per graded pick, ``hit`` minus the
+    null hit rate of the pick's OWN r0-depth band that week, falling back to
+    the season-pooled band rate when the week's band has no gradeable line
+    (counted in ``fallbacks``) and skipping the pick when no line in that
+    band exists all season (counted in ``unmatched``).
+
+    ``_summarise`` averages ``per_pick`` into ``Summary.lift_depth_pooled`` and
+    stores ``per_week`` as ``Summary.per_week_lift_depth``; the search runner
+    reads those — nothing else computes this number.  ``band_totals`` is the
+    fallback table (``season_band_totals(nulls)`` when omitted; it is keyed by season,
+    so passing a superset of seasons changes nothing).  Ungradeable picks are
+    the caller's to exclude: ``graded`` is taken as given.
+    """
+    totals = band_totals if band_totals is not None else season_band_totals(nulls)
+    return _band_matched_lifts(
+        graded, nulls,
+        hit_of=lambda p: 1.0 if p.hit else 0.0,
+        week_band=lambda n, b: n.band(b),
+        totals=totals,
+    )
 
 
 def _summarise(
@@ -909,41 +1163,18 @@ def _summarise(
         per_season[s] = sum(1 for p in g if p.hit) / len(g) - sum(n.hits for n in ns) / ng
     lift_block = stats.season_block_interval(per_season) if per_season else None
     # DEPTH-matched lift (STAT-2): hit minus the null rate of the pick's OWN
-    # r0-depth band that week.  A band the week's null never populated falls
-    # back to the season-pooled rate for that band (counted); a band with no
-    # gradeable line all season is unmatched (counted, excluded).
-    band_totals: dict[tuple[int, str], list[int]] = {}
-    for n in season_nulls:
-        for b, h, g_ in n.by_band:
-            t = band_totals.setdefault((n.season, b), [0, 0])
-            t[0] += h
-            t[1] += g_
-    per_pick_depth: list[float] = []
+    # r0-depth band that week — ONE definition, `depth_matched_lifts`, whose
+    # per-pick vector is averaged here and whose per-week grouping is stored
+    # on the Summary for the item-4.2 paired comparison.
+    totals = season_band_totals(season_nulls)
+    depth = depth_matched_lifts(graded, nulls, band_totals=totals)
     per_season_depth_obs: dict[int, list[float]] = {}
-    depth_fallbacks = 0
-    depth_unmatched = 0
-    for p in graded:
-        n = nulls.get((p.season, p.week))
-        b = p.depth_band
-        rate: float | None = None
-        if n is not None:
-            h, g_ = n.band(b)
-            if g_:
-                rate = h / g_
-        if rate is None:
-            h, g_ = band_totals.get((p.season, b), (0, 0))
-            if g_:
-                rate = h / g_
-                depth_fallbacks += 1
-        if rate is None:
-            depth_unmatched += 1
-            continue
-        lift = (1.0 if p.hit else 0.0) - rate
-        per_pick_depth.append(lift)
-        per_season_depth_obs.setdefault(p.season, []).append(lift)
+    for (s, _w), lifts in depth.per_week.items():
+        per_season_depth_obs.setdefault(s, []).extend(lifts)
+    depth_fallbacks, depth_unmatched = depth.fallbacks, depth.unmatched
     lift_depth_pooled = (
-        stats.t_interval(per_pick_depth, kind="pooled per-pick depth-matched")
-        if per_pick_depth else None
+        stats.t_interval(depth.per_pick, kind="pooled per-pick depth-matched")
+        if depth.per_pick else None
     )
     per_season_depth = {
         s: statistics.fmean(v) for s, v in per_season_depth_obs.items() if v
@@ -951,16 +1182,57 @@ def _summarise(
     lift_depth_block = (
         stats.season_block_interval(per_season_depth) if per_season_depth else None
     )
+    per_week_depth = tuple(
+        (key, statistics.fmean(v)) for key, v in sorted(depth.per_week.items()) if v
+    )
     picks_by_band: dict[str, list[int]] = {}
     for p in graded:
         t = picks_by_band.setdefault(p.depth_band, [0, 0])
         t[0] += 1 if p.hit else 0
         t[1] += 1
     null_by_band: dict[str, list[int]] = {}
-    for (_s, b), (h, g_) in band_totals.items():
+    for (_s, b), (h, g_) in totals.items():
         t = null_by_band.setdefault(b, [0, 0])
         t[0] += h
         t[1] += g_
+    # CONDITIONAL lead-2 (item 4.2 §9.1) — pick side from the statuses already
+    # on each PickGrade, null side from the NullRate counters; both forms
+    rankable = [p for p in graded if p.status_l1 in L1_RANKABLE_STATUSES]
+    rankable_bye = [p for p in graded if p.status_l1 in L1_RANKABLE_INCL_BYE_STATUSES]
+    strict = [p for p in rankable if p.status_l2 != S_NO_PAGE]
+    cond_totals = season_band_totals(season_nulls, conditional=True)
+    cond_depth = _band_matched_lifts(
+        rankable, nulls,
+        hit_of=lambda p: 1.0 if p.status_l2 == S_HIT else 0.0,
+        week_band=lambda n, b: n.band_conditional(b),
+        totals=cond_totals,
+    )
+    cond_per_season: dict[int, list[float]] = {}
+    for (s, _w), lifts in cond_depth.per_week.items():
+        cond_per_season.setdefault(s, []).extend(lifts)
+    lift_cond_pooled = (
+        stats.t_interval(cond_depth.per_pick, kind="pooled per-pick depth-matched conditional")
+        if cond_depth.per_pick else None
+    )
+    # the same conditional lift against the SPLIT-pooled band table (§9.1's own
+    # measured block): nulls={} sends every pick to the table, which is the
+    # pooled rate for its band, so the two forms differ only in the null's
+    # matching level and both are reported (Summary.lift_cond_l2_depth_bandpooled)
+    cond_depth_bandpooled = _band_matched_lifts(
+        rankable, {},
+        hit_of=lambda p: 1.0 if p.status_l2 == S_HIT else 0.0,
+        week_band=lambda n, b: (0, 0),
+        totals=split_pooled_band_totals(season_nulls, conditional=True),
+    )
+    lift_cond_bandpooled = (
+        stats.t_interval(cond_depth_bandpooled.per_pick,
+                         kind="pooled per-pick split-pooled-band conditional")
+        if cond_depth_bandpooled.per_pick else None
+    )
+    cond_season_means = {s: statistics.fmean(v) for s, v in cond_per_season.items() if v}
+    lift_cond_block = (
+        stats.season_block_interval(cond_season_means) if cond_season_means else None
+    )
     # corroboration is a rate over GRADED picks (STAT-3): an ungradeable pick
     # has no hit to corroborate, so it is not in the denominator
     corr = sum(1 for p in graded if p.corroboration == C_YES)
@@ -999,6 +1271,24 @@ def _summarise(
             (b, null_by_band[b][0], null_by_band[b][1])
             for b in DEPTH_BAND_LABELS if b in null_by_band
         ),
+        per_week_lift_depth=per_week_depth,
+        cond_l2_rankable=len(rankable),
+        cond_l2_hits=sum(1 for p in rankable if p.status_l2 == S_HIT),
+        cond_l2_rankable_strict=len(strict),
+        cond_l2_hits_strict=sum(1 for p in strict if p.status_l2 == S_HIT),
+        cond_l2_rankable_incl_bye=len(rankable_bye),
+        cond_l2_hits_incl_bye=sum(1 for p in rankable_bye if p.status_l2 == S_HIT),
+        null_l1_rankable=sum(n.l1_rankable for n in season_nulls),
+        null_lead2_conditional=sum(n.lead2_conditional for n in season_nulls),
+        null_l1_rankable_incl_bye=sum(n.l1_rankable_incl_bye for n in season_nulls),
+        null_lead2_conditional_incl_bye=sum(
+            n.lead2_conditional_incl_bye for n in season_nulls
+        ),
+        lift_cond_l2_depth_pooled=lift_cond_pooled,
+        lift_cond_l2_depth_block=lift_cond_block,
+        cond_l2_depth_fallbacks=cond_depth.fallbacks,
+        cond_l2_depth_unmatched=cond_depth.unmatched,
+        lift_cond_l2_depth_bandpooled=lift_cond_bandpooled,
     )
 
 
@@ -1065,13 +1355,54 @@ class MarketScorecard:
     generator_failures: tuple[tuple[str, int], ...]
     log_lines: tuple[tuple[str, int], ...]
     hypotheses: tuple[str, ...] = field(default_factory=tuple)
+    #: every NullRate the grade used — one per DECIDED week, in (season, week)
+    #: order, at this card's ``places`` / ``owned_delta`` — carried so a
+    #: reader (the item-4.2 runner) never grades a second time to get them
+    nulls: tuple[NullRate, ...] = ()
 
     @property
     def overall(self) -> Summary:
+        """The ALL split.  On a TRAIN-only run this is byte-identical to the
+        TRAIN Summary and would silently become a blend the moment the seasons
+        change — a reader that means a split reads :meth:`split` by name."""
         for s in self.splits:
             if s.split == "ALL":
                 return s
         raise GradeInputError("scorecard has no ALL split")
+
+    def split(self, name: str) -> Summary:
+        """The Summary whose ``split`` is ``name`` (TRAIN / HOLDOUT / OTHER /
+        ALL).  RAISES when the card holds no such split — it never falls back
+        to ALL, so a TRAIN-only run asked for HOLDOUT fails loudly."""
+        for s in self.splits:
+            if s.split == name:
+                return s
+        present = [s.split for s in self.splits]
+        raise GradeInputError(
+            f"scorecard for {self.strategy}/{self.market} has no {name!r} split; "
+            f"splits present: {present}"
+        )
+
+    def null_at(self, season: int, week: int) -> NullRate:
+        """The NullRate this card graded ``(season, week)`` against.  RAISES
+        for a week the card holds no null for (undecided, or outside the
+        replay) rather than returning an empty rate."""
+        for n in self.nulls:
+            if (n.season, n.week) == (season, week):
+                return n
+        raise GradeInputError(
+            f"scorecard for {self.strategy}/{self.market} holds no null for "
+            f"{season} wk{week} (it graded {len(self.nulls)} decided weeks)"
+        )
+
+    def per_week_depth_lift(self, split: str) -> dict[tuple[int, int], float]:
+        """``{(season, week): L(g, w)}`` — the mean of that week's per-pick
+        depth-matched lifts (pre-registration §5.2), read from the named
+        split's Summary (the same ``depth_matched_lifts`` call that produced
+        its ``lift_depth_pooled``).  A week with no depth-matched pick is
+        ABSENT, never 0.0; the split is resolved by :meth:`split` and raises
+        when missing."""
+        return dict(self.split(split).per_week_lift_depth)
 
 
 def _grade_market(
@@ -1301,6 +1632,7 @@ def build_scorecard(
         sensitivity=tuple(sens), owned_sensitivity=tuple(osens), picks=tuple(picks),
         generator_failures=tuple(sorted(failures.items())),
         log_lines=tuple(sorted(logs.items())), hypotheses=hypotheses,
+        nulls=tuple(n for _key, n in sorted(nulls.items())),
     )
 
 
@@ -1327,6 +1659,40 @@ def _lift(iv: stats.Interval | None) -> str:
     return (
         f"{100.0 * iv.mean:+.1f}pp [{100.0 * iv.lo:+.1f}, {100.0 * iv.hi:+.1f}] "
         f"n={iv.n}{' *' if iv.excludes_zero else ''}"
+    )
+
+
+COND_LEAD2_LABEL = (
+    "conditional lead-2 (the market had not already re-ranked him at r1; bye at r1 excluded)"
+)
+
+
+def _cond_rate(hits: int, n: int) -> str:
+    if not n:
+        return "n/a (0 rankable)"
+    return f"{hits}/{n} = {_rate_iv(stats.wilson_interval(hits, n))}"
+
+
+def _cond_null(hits: int, n: int) -> str:
+    return f"{_pct(hits / n)} ({hits}/{n})" if n else "n/a (0 rankable lines)"
+
+
+def _cond_lead2(s: Summary) -> str:
+    """The ONE conditional lead-2 line: PRIMARY (bye-excluded) rate, its
+    null, the strict variant and the DEPTH-matched lift, then the SECONDARY
+    (bye-included) form in parentheses."""
+    fallback_txt = (
+        f"; {s.cond_l2_depth_fallbacks} fallback(s)" if s.cond_l2_depth_fallbacks else ""
+    ) + (f"; {s.cond_l2_depth_unmatched} unmatched" if s.cond_l2_depth_unmatched else "")
+    return (
+        f"{_cond_rate(s.cond_l2_hits, s.cond_l2_rankable)} (Wilson) vs null "
+        f"{_cond_null(s.null_lead2_conditional, s.null_l1_rankable)}; strict (r2 page required) "
+        f"{_cond_rate(s.cond_l2_hits_strict, s.cond_l2_rankable_strict)}; DEPTH-MATCHED lift "
+        f"{_lift(s.lift_cond_l2_depth_pooled)} (null matched per season/week/band)"
+        f"{fallback_txt}; same lift vs the SPLIT-POOLED band table "
+        f"{_lift(s.lift_cond_l2_depth_bandpooled)} "
+        f"(bye at r1 included: {_cond_rate(s.cond_l2_hits_incl_bye, s.cond_l2_rankable_incl_bye)} "
+        f"vs null {_cond_null(s.null_lead2_conditional_incl_bye, s.null_l1_rankable_incl_bye)})"
     )
 
 
@@ -1373,6 +1739,7 @@ def _render_summary(s: Summary, k: int, out: list[str]) -> None:
                + (f"  bye at lead1={s.bye_at_l1}" if s.bye_at_l1 else "")
                + (f"  (lead2 impossible for {n_r2} truncated_r2 picks)" if n_r2 else "")
                + (f"  (lead1 impossible for {n_r1} truncated_r1 picks)" if n_r1 else ""))
+    out.append(f"    {COND_LEAD2_LABEL}: {_cond_lead2(s)}")
     out.append(f"    base rate ({NULL_LABEL}): {_pct(s.null_rate)} "
                f"({s.null_hits}/{s.null_gradeable} gradeable of {s.null_eligible} eligible "
                f"of {s.null_universe} stat lines; null lead1={s.null_lead1} lead2={s.null_lead2} "

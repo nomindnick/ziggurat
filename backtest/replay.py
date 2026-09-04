@@ -39,6 +39,7 @@ import argparse
 import contextlib
 import datetime as dt
 import io
+import json
 import logging
 import os
 import random
@@ -49,6 +50,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
@@ -361,13 +363,16 @@ def _undecided(
 
 #: The reason text a replay-overridden usage floor carries (Rule 6): a reader
 #: of the frozen decisions must be able to see that the floors were NOT the
-#: shipped hypothesis.
+#: shipped hypothesis but a tuning setting UNDER EVALUATION.  It is stamped
+#: into the frozen JSONL of every 4.2 cell, which is why the wording is pinned
+#: by test (breakout-backtest.md §11.4 item 1): the 4.1 text called an
+#: overridden setting "not tuned", which is the opposite of what it is.
 OVERRIDDEN_BREAKOUT_LABEL = (
-    "hypothesis: usage floors OVERRIDDEN by an item-4.1 replay run (not the shipped "
-    "core/candidates floors, not tuned) — a row qualifies if ANY differenced delta "
-    "clears its floor"
+    "hypothesis: usage floors OVERRIDDEN by a replay run — an item-4.2 tuning setting "
+    "under evaluation on TRAIN seasons, not the shipped core/candidates floors — a row "
+    "qualifies if ANY differenced delta clears its floor"
 )
-OVERRIDDEN_BREAKOUT_SOURCE = "backtest/replay.py --breakout-floor (item 4.1 harness run)"
+OVERRIDDEN_BREAKOUT_SOURCE = "backtest/replay.py --breakout-floor (item 4.2 tuning run)"
 
 
 def generator_thresholds(params: D.ReplayParams) -> tuple[C.BreakoutThresholds, Mapping[str, float]]:
@@ -584,6 +589,75 @@ def generator_setting(
     return tuple(sorted(setting.items()))
 
 
+#: Item 4.2 (breakout-backtest.md §11.4 item 2): the per-week vector file every
+#: graded run leaves beside its freeze.  It is the `signal_topk` / `wp` card's
+#: `per_week_depth_lift` of the run's split — TRAIN, or HOLDOUT on an unlocked
+#: run — keyed "<season>,<week>" -> L(g, w).  The HOLDOUT episode's d_w vectors
+#: are read from THIS file (§8.3), never from a second grade.
+PER_WEEK_FILE = "per-week-lifts.json"
+#: The §6.4 grade log's default basename (under ``--cache-dir``, or wherever
+#: ``--grade-log`` points).  Item 4.2's SEARCH_CACHE_DIR carries the same name.
+GRADE_LOG = "grade-log.jsonl"
+PER_WEEK_STRATEGY = "signal_topk"
+PER_WEEK_MARKET = "wp"
+
+
+def per_week_lifts_payload(
+    card: S.MarketScorecard, params: D.ReplayParams, *, split: str
+) -> dict:
+    """The JSON body of :data:`PER_WEEK_FILE` for ``card`` — pure, so a test
+    can compare the file byte-for-byte against the card it was graded from."""
+    vector = card.per_week_depth_lift(split)
+    return {
+        "cache_key": params.cache_key(),
+        "params_hash": params.params_hash,
+        "split": split,
+        "strategy": card.strategy,
+        "market": card.market,
+        "hit_places": int(card.places),
+        "owned_delta": float(card.owned_delta),
+        "grade_as_of": card.grade_as_of,
+        "seasons": list(params.seasons),
+        "n_weeks": len(vector),
+        "per_week_lift_depth": {
+            f"{season},{week}": float(lift)
+            for (season, week), lift in sorted(vector.items())
+        },
+    }
+
+
+def write_per_week_lifts(
+    freeze_dir: Path,
+    cards: Sequence[S.MarketScorecard],
+    params: D.ReplayParams,
+    *,
+    hit_places: int,
+    owned_delta: float,
+    grade_as_of: str,
+) -> Path | None:
+    """Write :data:`PER_WEEK_FILE` under ``freeze_dir`` for the ``signal_topk``
+    / ``wp`` card of this run at the run's H / owned-delta, atomically (tmp +
+    fsync + rename via :func:`D._write_atomic`).  Returns the path, or ``None``
+    when no such card was graded (the caller prints why).  The split is
+    HOLDOUT iff the run holds a holdout season, else TRAIN — never ALL."""
+    split = "HOLDOUT" if D.holdout_seasons(params.seasons) else "TRAIN"
+    for card in cards:
+        if (card.strategy, card.market) != (PER_WEEK_STRATEGY, PER_WEEK_MARKET):
+            continue
+        if (int(card.places), float(card.owned_delta), card.grade_as_of) != (
+            int(hit_places), float(owned_delta), grade_as_of
+        ):
+            continue
+        payload = per_week_lifts_payload(card, params, split=split)
+        freeze_dir.mkdir(parents=True, exist_ok=True)
+        path = freeze_dir / PER_WEEK_FILE
+        D._write_atomic(
+            path, json.dumps(payload, sort_keys=True, indent=2).encode("utf-8") + b"\n"
+        )
+        return path
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m backtest.replay",
@@ -623,6 +697,10 @@ def build_parser() -> argparse.ArgumentParser:
                    default=",".join(f"{x:g}" for x in S.OWNED_DELTA_SENSITIVITY))
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR),
                    help="where frozen decisions land (gitignored data/ by default)")
+    p.add_argument("--grade-log", default=None,
+                   help=f"grade log to append one line per build_scorecard call to (§6.4; "
+                        f"default <cache-dir>/{GRADE_LOG} — point it at the item-4.2 "
+                        f"SEARCH_CACHE_DIR to keep one file for the whole item)")
     p.add_argument("--no-freeze", action="store_true", help="do not write the cache")
     p.add_argument("--force", action="store_true",
                    help="re-decide and overwrite an existing freeze (without it a verifying "
@@ -724,6 +802,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"EXIT 2: {exc}", file=sys.stderr)
                     return 2
                 print(f"frozen under {target}")
+    grade_log_path = Path(args.grade_log) if args.grade_log else (
+        Path(args.cache_dir) / GRADE_LOG)
     cards: list[S.MarketScorecard] = []
     for strategy in params.strategies:
         for market in markets:
@@ -741,6 +821,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                       file=sys.stderr)
                 return 2
             cards.append(card)
+            # The GRADE LOG (§6.4 / §11.5): "every build_scorecard call made
+            # anywhere in 4.2 — the search, the G6 re-grades (§7.2), the holdout
+            # episode — appends one line ... F8 is otherwise unverifiable after
+            # the fact."  The §8.3 holdout commands and the §7.2 G6 re-grades are
+            # THIS CLI, and `--hit-places` / `--owned-delta` / `--grade-as-of`
+            # live in neither ReplayParams nor the manifest — so a log written
+            # only by the search runner could not see the sweep it exists to
+            # expose (the runner asserts H == 5 before it grades at all).
+            D.append_grade_log(grade_log_path, {
+                "cache_key": params.cache_key(), "strategy": strategy, "market": market,
+                "places": int(args.hit_places), "owned_delta": float(args.owned_delta),
+                "grade_as_of": args.grade_as_of, "timestamp": _utc_now(),
+                "entry_point": "backtest.replay", "unlock_holdout": bool(args.unlock_holdout),
+            })
             print()
             print(S.render(card, reasons=args.reasons))
     if len(params.strategies) > 1:
@@ -748,6 +842,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(S.render_comparison(cards))
     print()
     print(f"total runtime {time.perf_counter() - t0:.1f}s")
+    # Item 4.2 (breakout-backtest.md §11.4 item 2): the per-week vector file,
+    # written after EVERY build_scorecard and BEFORE the ledger row so the
+    # holdout d_w vectors have exactly one sanctioned source (§8.3).
+    if args.no_freeze:
+        print(f"{PER_WEEK_FILE} not written: --no-freeze (nothing lands under {target})")
+    else:
+        vector_path = write_per_week_lifts(
+            target, cards, params, hit_places=args.hit_places,
+            owned_delta=args.owned_delta, grade_as_of=args.grade_as_of,
+        )
+        if vector_path is None:
+            print(f"{PER_WEEK_FILE} not written: no {PER_WEEK_STRATEGY}/{PER_WEEK_MARKET} "
+                  "card was graded in this run")
+        else:
+            print(f"per-week depth-matched lift vector written to {vector_path}")
     if held:
         # publish-then-record: the holdout read AND its grade have completed.
         ledger = D.record_holdout_unlock(

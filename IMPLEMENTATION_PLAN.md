@@ -3733,11 +3733,13 @@ Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 > **The two 4.2 seams, as they now stand.** (a) The **holdout lock is built**
 > (above) — 4.2 tunes on `TRAIN_SEASONS` and reads holdout ONCE with the flag,
 > and the ledger shows how many times it did. (b) **Threshold injection is
-> built and 4.2's first step is to confirm it**: the knobs are the seven
+> built and 4.2's first step is to confirm it**: the knobs are the eight
 > `DEFAULT_BREAKOUT` usage-delta floors (carries 6, targets 4, receptions 3,
 > target_share 0.08, air_yards_share 0.10, offense_pct 0.20, rushing/receiving
 > yards 25) and the four `EMERGENCE_FLOORS` role-emergence floors (carries 10,
-> targets 5, receptions 4, offense_pct 0.55) — eleven numbers, all injectable;
+> targets 5, receptions 4, offense_pct 0.55) — twelve numbers, all injectable
+> (this paragraph originally said "seven" and "eleven"; the enumeration was
+> always eight long — corrected under item 4.2, which counted at the source);
 > the "beneficiary index" is a same-team-same-position usage-uptick
 > MECHANISM, not a floor, and is not a knob today. **Corrected search
 > arithmetic:** TRAIN is **54 weeks (3 × 18), not ~85**; per setting ~0.5
@@ -3799,9 +3801,10 @@ numbers beside them.
 `data/backtest/replay/holdout-unlocks.jsonl`) and threshold injection
 (`build_candidates(thresholds=, emergence_floors=)`, surfaced as
 `--breakout-floor` / `--emergence-floor METRIC=VALUE`, floors in the freeze's
-cache key) — confirm them first, then pre-register. The knobs are the seven
-`DEFAULT_BREAKOUT` floors + four `EMERGENCE_FLOORS` (the beneficiary index is
-a mechanism, not a floor). TRAIN is **54 weeks**, ~27 s per setting (post
+cache key) — confirm them first, then pre-register. The knobs are the eight
+`DEFAULT_BREAKOUT` floors + four `EMERGENCE_FLOORS` = twelve (the handover
+said "seven"; the beneficiary index is a mechanism, not a floor). TRAIN is
+**54 weeks**, ~27 s per setting (post
 COST-1), so the search is an afternoon. **Read every setting on the
 DEPTH-MATCHED lift** — the raw lift rewards picking deeper (4.1 STAT-2). Two
 4.1 deferrals are this item's: **`ff_opportunity` is 4.2's TD-regression
@@ -3811,7 +3814,107 @@ finding above: there is NO in-season file, so it can only ever grade, never
 run live; it is not ingested today) and the conditional bye-corrected lead-2 RATE as one per-strategy
 number with its null (4.1 LEAD-1, partially closed).
 **Update:**
-> _[To be completed]_
+> **Done 2026-09-03 — verdict, in the pre-registered words: "no setting
+> earned a holdout read."** Run as three Opus workflows (build `wf_76dc343d-e54`
+> → the search itself, orchestrator-run → analysis `wf_047bdba1-947`, 19
+> agents, 4 headline claims each surviving 3/3 refute-first verifiers, 0
+> protocol violations). The deployed floors are byte-unchanged; the holdout
+> ledger is **4 rows before and after**; `TUNED` in the pre-registration is
+> blank. Findings, all tables and every gate number in gitignored
+> `intel/research/breakout-backtest.md` (frozen prefix 2,333 lines, sha256
+> `41fad648c1de27e3…`, never edited; results as dated amendments F4-1…F4-3 at
+> the end) with the analysis artefacts beside the data under
+> `data/backtest/replay-4.2/analysis/`.
+>
+> **What was pre-registered, then run.** A coordinate search over the **twelve**
+> labelled floors (8 `DEFAULT_BREAKOUT` + 4 `EMERGENCE_FLOORS` — the plan said
+> eleven; counted at the source and corrected inline above) on a 40-cell
+> label-based family (5 levels × 8 axes, with 4 `emergence_scale` and 5
+> `global_scale` cells, 3 recall floods, a scale-only control, LOO and a
+> forward/reverse round 2), read on `D(g) = M(g) − M(default)` where `M` is the
+> depth-matched lift of `signal_topk` p@3 at HIT = 5 places, paired per week
+> over the 45 common weeks of TRAIN 2021–23, on a frozen DB snapshot
+> (`data/backtest/ziggurat-4.2-snapshot.sqlite`; panel fingerprint and preflight/
+> postflight digest `0a98eff6…` equal on both sides, three ways). Six gates
+> stood between any winner and the ONE ledgered holdout read: G1 `D ≥ +5.4pp`;
+> **G2 a max-null step-down over the whole family (B=10,000)**; G3 the HARD
+> admissibility screen; G4 3-of-3 per-season sign; G5 leave-one-out; G6 sign at
+> HIT = 3 and 8. `backtest/tune.py` refuses the live DB and the canonical cache
+> dir by name, has no holdout flag at all, and raises on a holdout-season
+> fingerprint. Build: 6-lens audit, 34 confirmed defects fixed (the max-null
+> family had been SCREEN-filtered where §5.3 says LABEL-based; the fingerprint
+> recipe did not match Appendix A; a fixture test had been appending rows to the
+> canonical grade log on every suite run — `tests/conftest.py` now redirects
+> both modules' cache default for every test, pinned).
+>
+> **The result.** 47 of the 80-setting cap, ≈7 min elapsed in an 8-way pool
+> (34.4 s per fresh cell; the pre-registered 31.26 s was serial). Winner
+> `carries=1` (shipped 6): **D = +0.05408, clearing G1 by 8e-05 — 1/95th of one
+> hit's quantum — and FAILING G2**: the family-wise null-max bar is 0.07206
+> (adjusted p 0.153, `clearing: []`; 15.3% of pure-noise replicates exceed G1's
+> floor on their own). G3 passes with the A9 (depth) and A12 (position-mix)
+> flags raised; G4 passes; G5 vacuous (single axis); G6 passes as a sign gate
+> only (H=3 +2.1pp, H=8 +5.2pp with 2023 NEGATIVE and p > 0.05 at every H).
+> Round 2 was empty — 0 axes survived the single-cell p < 0.05 entry rule, 8
+> skipped. FLOOD-1 has the largest D on the page (+6.24pp, pool 187) and is
+> argmax-ineligible by construction — **§13.1 predicted every clause of this
+> outcome before the first cell ran.** The 40-cell D histogram: median −0.3pp,
+> 27 of 40 negative, 2 reach G1, 0 reach G2. §7.3 LOSO: three folds, three
+> different winners, LOSO mean +1.2pp vs TRAIN +5.4pp — a **+4.2pp winner's
+> curse, all of it selection switching** (forcing every fold to `carries=1`
+> reproduces TRAIN exactly). The runner-up is 1.26 tie-bands away and would win
+> the closest-to-shipped tie-break.
+>
+> **What the +5.4pp is made of** (the decomposition the pre-registration
+> demanded): `D = D_hit − Δbar` splits **54.8% more hits / 45.2% lower null bar**
+> — near half is the winner picking shallower, not better. `rho(D, pool)` over
+> the grid is −0.10; the pure pool lever is −0.83 (n=6): "recall, not
+> thresholds" is NOT the read, and neither is its opposite. At the pick level
+> the winner swaps 68 RBs in for 61 WRs + 7 TEs out (winner-only hit rate 81.4%
+> vs default-only 75.7%, backup/committee backs), with a Simpson's reversal
+> under position standardisation. And the §9 secondaries say what "better"
+> means here: **genuine one-week leads FALL 10 → 7 (wp) and 20 → 17 (ros)**,
+> the entire +4 hit gain is concurrent or bye-deferred, the conditional lead-2
+> denominator collapses 29 → 19 and loses the default's only interval that
+> excluded zero, and Sleeper corroboration at Δ20 rises 1.74× — `carries=1`
+> agrees with the market sooner and beats it less. The §9.8 pool-invariant
+> read cannot rank settings (its correlation with pool size is carried entirely
+> by the random arm getting worse).
+>
+> **Disclosures owed regardless of outcome, now on record (F4-3):** the
+> twelve floors have exactly four consumers (`ziggurat candidates`, waiver
+> CONTEXT bullets, the briefing SIGNALS block, the backtest); the phone teaser
+> and the 20-min alert tick are NOT consumers; only the usage arm is graded,
+> and a floor change alters injury-arm reason text the grade never sees; a
+> deploy orphans 50 of 51 freeze keys incl. both 4.1 holdout freezes (whose
+> re-creation is a ledger event) and fails six pinned literals in four tests;
+> the null universe is read at the grade clock and the pool at the decision
+> clock (PF-21, identical for every setting). Harness defects found by the
+> analysis, recorded not fixed: `sign_flip_permutation` mis-resolves exact
+> ties (exact-mean observed vs float-summed null — the control's `p_two` logs
+> 1e-04 where the exact value is 0.0625; no gate or ranking touched a tied
+> pattern); `band_table` duplicates its `unranked` row; decide-only trials lack
+> `wall_seconds`; G6 cards' internal counts are not persisted.
+>
+> **Not done, deliberately:** no holdout read (unearned); no second search under
+> a different metric, α, family or weighting from this data (that is the
+> post-hoc search the freeze exists to prevent); `ff_opportunity`
+> (TD-regression source) stays DEFERRED with its recon artefact in the note's
+> §12; K/DST grading and the Odds-API cross-check remain 4.1's deferrals. **If
+> Phase 4 revisits the floors it does so under a NEW pre-registration and,
+> preferably, a new source** — `ff_opportunity`, or 2026's own weeks once they
+> exist. Deployed defaults are unchanged at Checkpoint 4 by this item's own rule.
+>
+> Files: `backtest/{tune,tune_grid}.py` (new), `backtest/{stats,decisions,
+> replay,scorecards}.py`, `backtest/README.md`, `tests/conftest.py`,
+> `tests/test_backtest_{stats,tune,tune_grid}.py` (new),
+> `tests/test_backtest_{replay,scorecards}.py`. `ziggurat/core/candidates.py`
+> untouched. Suite green (**2,854 passed, 4 skipped**; +111 over the 3.8A
+> baseline). **Standing lesson: a search that pre-registers its own null
+> distribution finds out what its instrument can see — here, nothing smaller
+> than ~7pp on 45 weeks — and a winner that clears the practical floor by
+> 8e-05 while sitting 1.8pp under the noise maximum is the noise maximum
+> wearing a label.** The item's value is the number it did NOT change.
 
 ### 4.3 [Build] Podcast pipeline
 **Goal:** RSS archive harvest for a chosen pod slate (must have existed 2021–2025 and still publish), local Whisper with vocabulary biasing + phonetic entity resolution against the player table, claim extraction to the SPEC schema via the routing interface, claim-resolution logic (did the claimed thing happen?).

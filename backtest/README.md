@@ -18,7 +18,9 @@ claim budget).
 | `replay.py` | The weekly replay harness — the DECIDE phase. Runs the production candidate generator (`ziggurat.core.candidates.build_candidates`) at each week's decision clock (the first Tuesday strictly after the week's last REG game) and freezes what it picked. `python -m backtest.replay` is the CLI. |
 | `decisions.py` | The freeze: `ReplayParams` (hashed into the cache key — including the generator's floors), `WeekRecord`/`Decision`, the JSONL + sha256 manifest writer/reader, the TRAIN/HOLDOUT split and the holdout lock. |
 | `scorecards.py` | The GRADE phase, pure over a freeze: precision@k against the FantasyPros weekly (`wp`) and rest-of-season (`ros`) ECR pages, an eligibility-matched null (the whole week-T universe), depth-matched lifts by r0 band, Sleeper ownership corroboration, and the rendered scorecard whose HYPOTHESES block names every threshold and its source. |
-| `stats.py` | Wilson, pooled-t and season-block intervals — one implementation, so no report can quietly print only the flattering one. An interval that collapses to a point never earns the `*`. |
+| `stats.py` | Wilson, pooled-t and season-block intervals — one implementation, so no report can quietly print only the flattering one. An interval that collapses to a point never earns the `*`. Item 4.2 adds the paired machinery: `paired_by_key`, the sign-flip permutation test, the shared-flip `max_null_step_down` multiplicity bar and the exact McNemar fence. Stdlib only. |
+| `tune_grid.py` | Item 4.2's pre-registered grid as LITERAL data: the 31 round-1 single-axis levels, the 5 global-scale, 4 emergence-scale and 3 recall-flood 12-pair maps (every map spelled out, never computed at import time), each with its `cell_id` and `eligible` label, plus the round-2 rules (declaration-order axis list, budgets, cap 80). A test recomputes each scale map from the shipped floors × c and pins the counts (31 / 5 / 4 / 3 + default = 44). |
+| `tune.py` | Item 4.2's search runner over that grid — TRAIN 2021–23 only. `python -m backtest.tune` is the CLI. It has **no holdout flag** (the two holdout commands are `backtest.replay` invocations), it **refuses the live database** and it **refuses the canonical `data/backtest/replay/` as a cache dir**, it asserts every frozen §7.4 value per setting before a byte is read, and it refuses the 81st setting. |
 
 Every read goes through the `ziggurat/data` as-of accessors bound to
 `base.latest_truth` (the bulk-loaded history is invisible under the default
@@ -86,6 +88,37 @@ python -m backtest.replay --seasons 2023 --strategy signal_topk --k 3 --breakout
 Exit codes: 0 graded; 2 refused (holdout locked, a freeze that does not
 verify, a grade-input refusal, or zero decisions for a season) with the
 reason on stderr — never a traceback.
+
+## The 4.2 search
+
+The pre-registration is written and frozen BEFORE the first evaluation (a
+gitignored note under `intel/research/`); the runner only executes it. Two
+things are isolated on purpose: the search reads a **snapshot copy** of the
+database, never the live file the timers write to, and it writes under its own
+cache dir so the canonical `data/backtest/replay/` — which holds the holdout
+ledger — is untouched.
+
+```
+python -m backtest.tune --db data/backtest/ziggurat-4.2-snapshot.sqlite --dry-run
+python -m backtest.tune --db data/backtest/ziggurat-4.2-snapshot.sqlite --jobs 8
+```
+
+`--db` is required, `--cache-dir` defaults to `data/backtest/replay-4.2/`, and
+`--round 1|2|all` picks the phase. Under the cache dir: `results/<cache_key>.json`
+(one atomic file per setting — a setting is done iff its file verifies, so the
+search is resumable and a verifying file is never recomputed), `summary.jsonl`
+(REBUILT from those files by one writer, never appended), `grade-log.jsonl` (one
+line per `build_scorecard` call anywhere in the item — `backtest.replay` appends
+to its own `--grade-log` too, so an undisclosed hit-places or owned-delta sweep
+is visible after the fact), `fingerprint.json` + `fingerprints.jsonl` (the panel
+and generator-input fingerprint before and after each launch — a change means
+results are never pooled across it, and the runner says so and exits non-zero),
+`round2.json` and `max-null.json`. Every graded run also writes
+`per-week-lifts.json` beside its freeze: the per-week depth-matched lift vector,
+the one sanctioned source for the paired comparison. Exit codes: 0 done; 2
+refused (live DB, canonical cache dir, missing snapshot, another search holding
+the lock); 3 aborted (a moved frozen value, a freeze that does not verify, a
+result from another database state, the setting cap); 4 the fingerprint moved.
 
 ## Reading a scorecard
 

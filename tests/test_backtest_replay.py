@@ -20,6 +20,7 @@ import pytest
 from backtest import decisions as D
 from backtest import replay as R
 from backtest import scorecards as S
+from backtest import tune as T
 from ziggurat.core import candidates as C
 from ziggurat.data.nfl import base, injuries, players, schedules, snap_counts, weekly_stats
 from ziggurat.data.store import apply_schema, connect
@@ -377,11 +378,21 @@ def test_grade_clock_must_be_after_the_decision_clock(seeded):
 
 
 def _tightened(mult):
-    """Every shipped floor scaled by ``mult`` — a strictly stricter generator."""
+    """Every shipped floor scaled by ``mult`` — a strictly stricter generator.
+
+    A SHARE floor is capped just below 1.0: at 2x the shipped
+    ``emergence:offense_pct`` (0.55) would reach 1.1, which item 4.2's A1
+    refuses at the parameters because a share can never clear it (the axis
+    would be silently disabled, not tightened — breakout-backtest.md §3.6).
+    """
     shipped = D.default_generator()
+
+    def scaled(m, v):
+        return min(v * mult, 0.95) if m in D.SHARE_FLOORS else v * mult
+
     return R.generator_setting(
-        [(m, v * mult) for m, v in shipped if not m.startswith(D.EMERGENCE_PREFIX)],
-        [(m[len(D.EMERGENCE_PREFIX):], v * mult) for m, v in shipped
+        [(m, scaled(m, v)) for m, v in shipped if not m.startswith(D.EMERGENCE_PREFIX)],
+        [(m[len(D.EMERGENCE_PREFIX):], scaled(m, v)) for m, v in shipped
          if m.startswith(D.EMERGENCE_PREFIX)],
     )
 
@@ -438,6 +449,88 @@ def test_cli_floor_flags_land_in_the_params_and_refuse_bad_metrics(capsys):
     assert R.main(["--db", "/nonexistent.sqlite", "--breakout-floor", "touchdowns=1",
                    "--seasons", "2023"]) == 2
     assert "unknown generator floor" in capsys.readouterr().err
+
+
+# ------------------------------------------- item 4.2: floor admissibility (A1)
+
+
+def _params(**over):
+    return D.ReplayParams(strategies=("signal_topk",), k=3, seasons=(2023,),
+                          generator=R.generator_setting(
+                              over.get("breakout"), over.get("emergence")))
+
+
+@pytest.mark.parametrize("metric, value", [
+    ("carries", 0.0), ("carries", -5.0), ("targets", 0.0), ("receiving_yards", -0.5),
+    ("target_share", 0.0), ("target_share", -0.01), ("offense_pct", 0.0),
+    ("carries", float("nan")),
+])
+def test_a_zero_or_negative_floor_is_refused_at_the_parameters(metric, value):
+    # breakout-backtest.md §3.6: a floor of 0 is a ZeroDivisionError the
+    # generator swallows per week into generator_failed (exit 0 today), and a
+    # negative floor INVERTS that metric's ranking (also exit 0 today).  The
+    # refusal names WHY, and sits at the parameters so no run reaches a key.
+    with pytest.raises(ValueError) as exc:
+        _params(breakout=[(metric, value)])
+    msg = str(exc.value)
+    assert metric in msg and "delta/floor" in msg
+    assert "divides by zero" in msg and "inverts" in msg
+    # the same value through the emergence map is refused too (the prefix is
+    # the only thing that decides which map a name lands in — §3.7)
+    with pytest.raises(ValueError, match="strictly > 0"):
+        _params(emergence=[("carries", value)])
+    # ... and via the CLI it is a sentence and exit 2, not a traceback
+    assert R.main(["--db", "/nonexistent.sqlite", "--seasons", "2023",
+                   "--breakout-floor", f"{metric}={value}"]) == 2
+
+
+@pytest.mark.parametrize("metric, value, emergence", [
+    ("target_share", 1.0, False), ("target_share", 1.5, False),
+    ("air_yards_share", 1.0, False), ("offense_pct", 1.0, False),
+    ("offense_pct", 1.1, True),   # emergence:offense_pct
+])
+def test_a_share_floor_of_one_or_more_is_refused(metric, value, emergence):
+    # a share cannot clear 1.0, so the axis would be silently DISABLED rather
+    # than tightened (measured: emergence:offense_pct=1.1 changes 0 weeks)
+    kw = {"emergence": [(metric, value)]} if emergence else {"breakout": [(metric, value)]}
+    with pytest.raises(ValueError) as exc:
+        _params(**kw)
+    msg = str(exc.value)
+    assert metric in msg and "< 1.0" in msg and "disabled" in msg
+    # a count floor is NOT a share: 1.0 and far above are legal there
+    ok = _params(breakout=[("carries", 1.0), ("targets", 250.0)])
+    assert dict(ok.generator)["targets"] == 250.0
+    # a share strictly below 1.0 is legal, however close
+    close = {"emergence": [(metric, 0.999)]} if emergence else {"breakout": [(metric, 0.999)]}
+    name = (D.EMERGENCE_PREFIX + metric) if emergence else metric
+    assert dict(_params(**close).generator)[name] == 0.999
+    assert D.SHARE_FLOORS == {"target_share", "air_yards_share", "offense_pct",
+                              "emergence:offense_pct"}
+
+
+def test_the_refusal_does_not_move_any_existing_cache_key():
+    # the validation adds no field: the pinned keys of
+    # test_the_default_cache_key_is_pinned_and_a_moved_floor_changes_it hold,
+    # and a legal tightening still hashes as before
+    default = D.ReplayParams(strategies=("signal_topk",), k=3, seasons=(2023,))
+    assert default.cache_key() == "66c0e83d7da3"
+    other = D.ReplayParams(strategies=("signal_topk",), k=3, seasons=(2023,),
+                           generator=R.generator_setting([("targets", 5.0)], None))
+    assert other.cache_key() == "a4ccd4c04a9d"
+
+
+def test_the_overridden_floor_label_says_it_is_a_tuning_setting_under_evaluation():
+    # breakout-backtest.md §11.4 item 1 (PF-15): the label is stamped into the
+    # frozen JSONL of every 4.2 cell, and the 4.1 wording called an overridden
+    # setting "not tuned" — the opposite of what it is
+    label = R.OVERRIDDEN_BREAKOUT_LABEL
+    assert "tuning" in label and "under evaluation" in label and "4.2" in label
+    assert "not tuned" not in label.lower()
+    assert "\n" not in label
+    assert "hypothesis" in label  # Rule 6: still a labelled hypothesis
+    thresholds, _ = R.generator_thresholds(_params(breakout=[("carries", 9.0)]))
+    assert thresholds.label == label
+    assert "4.2" in R.OVERRIDDEN_BREAKOUT_SOURCE
 
 
 # -------------------------------------------------------- determinism
@@ -529,9 +622,37 @@ def test_cli_prints_both_markets_and_exits_2_on_an_empty_season(file_db, tmp_pat
     assert not (tmp_path / "cache" / D.UNLOCK_LEDGER).exists()
     # week 1 has a schedule and no box score: zero decisions is exit 2, not a scorecard of nothing
     assert R.main(["--db", str(file_db), "--seasons", "2023", "--weeks", "1", "--no-freeze",
-                   "--grade-as-of", "2024-02-28"]) == 2
+                   "--grade-as-of", "2024-02-28", "--cache-dir", str(tmp_path / "cache")]) == 2
     err = capsys.readouterr().err
     assert "EXIT 2: zero decisions" in err
+
+
+def test_a_test_that_omits_cache_dir_cannot_reach_the_canonical_caches(file_db, tmp_path,
+                                                                        capsys):
+    # Measured 2026-09-03: the invocation above, run WITHOUT --cache-dir, wrote
+    # two fixture rows to data/backtest/replay/grade-log.jsonl — the item-4.2
+    # audit trail — on every full-suite run (the grade log is appended before
+    # the zero-decision exit, and the parser default is the canonical dir).
+    # conftest.py now redirects both modules' DEFAULT_CACHE_DIR for every test;
+    # this pins the redirect, and pins that the FROZEN names still point at the
+    # real paths so the README / Appendix A checks read the truth.
+    import backtest.tune as T
+    assert R.DEFAULT_CACHE_DIR != REPO_ROOT / "data" / "backtest" / "replay"
+    assert not str(R.DEFAULT_CACHE_DIR).startswith(str(REPO_ROOT))
+    assert T.DEFAULT_CACHE_DIR != T.SEARCH_CACHE_DIR
+    assert T.CANONICAL_CACHE_DIR == REPO_ROOT / "data" / "backtest" / "replay"
+    assert T.SEARCH_CACHE_DIR == REPO_ROOT / "data" / "backtest" / "replay-4.2"
+    assert R.build_parser().get_default("cache_dir") == str(R.DEFAULT_CACHE_DIR)
+    assert T.build_parser().get_default("cache_dir") == str(T.DEFAULT_CACHE_DIR)
+    canonical_log = T.CANONICAL_CACHE_DIR / R.GRADE_LOG
+    before = canonical_log.read_bytes() if canonical_log.exists() else None
+    assert R.main(["--db", str(file_db), "--seasons", "2023", "--weeks", "1", "--no-freeze",
+                   "--grade-as-of", "2024-02-28"]) == 2
+    capsys.readouterr()
+    after = canonical_log.read_bytes() if canonical_log.exists() else None
+    assert after == before
+    rows = (R.DEFAULT_CACHE_DIR / R.GRADE_LOG).read_text().splitlines()
+    assert len(rows) == 2 and {json.loads(r)["market"] for r in rows} == {"wp", "ros"}
 
 
 def _argv(file_db, cache, **over):
@@ -677,6 +798,116 @@ def test_a_train_run_never_touches_the_unlock_ledger(file_db, tmp_path, capsys):
     assert "HOLDOUT unlock" not in out and not (cache / D.UNLOCK_LEDGER).exists()
 
 
+# -------------------------------------------- item 4.2: per-week vector file
+
+
+def _train_params():
+    return D.ReplayParams(strategies=("signal_topk",), k=2, seasons=(2023,), weeks=(6,))
+
+
+def test_main_writes_the_per_week_vector_beside_the_freeze(file_db, tmp_path, capsys):
+    # §11.4 item 2: a TRAIN-only graded run leaves per-week-lifts.json in the
+    # freeze dir, split TRAIN, keyed "<season>,<week>", carrying H / owned-delta /
+    # grade_as_of / cache_key / strategy / market.  Mutant tried: dropping the
+    # write_per_week_lifts call from main() — this test fails on the missing file.
+    cache = tmp_path / "cache"
+    assert R.main(_argv(file_db, cache)) == 0
+    out = capsys.readouterr().out
+    path = D.freeze_dir(cache, _train_params()) / R.PER_WEEK_FILE
+    assert path.exists() and str(path) in out
+    assert not path.with_name(path.name + ".tmp").exists()
+    body = json.loads(path.read_text(encoding="utf-8"))
+    assert body["split"] == "TRAIN" and body["strategy"] == "signal_topk"
+    assert body["market"] == "wp" and body["hit_places"] == S.HIT_PLACES_DEFAULT
+    assert body["owned_delta"] == S.OWNED_DELTA_DEFAULT and body["grade_as_of"] == "2024-02-28"
+    assert body["cache_key"] == _train_params().cache_key()
+    assert set(body["per_week_lift_depth"]) <= {"2023,6"}
+    assert body["n_weeks"] == len(body["per_week_lift_depth"])
+    for key in body["per_week_lift_depth"]:
+        season, week = key.split(",")
+        assert (int(season), int(week)) == (2023, 6)
+    # the extra file does not break the freeze's own verification, and a
+    # --grade-only re-read rewrites it (every graded run writes it)
+    assert D.freeze_status(cache, _train_params()) == D.FREEZE_OK
+    path.unlink()
+    assert R.main(_argv(file_db, cache) + ["--grade-only"]) == 0
+    assert path.exists()
+    # --no-freeze writes no cache, so no vector file either — said so
+    assert R.main(_argv(file_db, tmp_path / "nofreeze") + ["--no-freeze"]) == 0
+    assert f"{R.PER_WEEK_FILE} not written: --no-freeze" in capsys.readouterr().out
+    # --no-freeze writes no FREEZE; the one thing under the cache dir is the §6.4
+    # grade log, which every build_scorecard call owes an auditor (§11.5 F8)
+    assert [p.name for p in (tmp_path / "nofreeze").iterdir()] == [R.GRADE_LOG]
+
+
+def test_per_week_vector_file_matches_the_card_it_was_graded_from(file_db, tmp_path,
+                                                                  monkeypatch):
+    # the file's mapping is the card's own per_week_depth_lift("TRAIN") — no
+    # arithmetic of the CLI's.  Mutant tried: writing the ALL split's vector
+    # (identical on TRAIN-only) is caught by the split label; writing
+    # `lift_depth_pooled.mean` per week instead of per_week_depth_lift is caught
+    # by the equality against the captured card.
+    cache = tmp_path / "cache"
+    cards = []
+    real = S.build_scorecard
+    monkeypatch.setattr(S, "build_scorecard",
+                        lambda *a, **k: (lambda c: (cards.append(c), c)[1])(real(*a, **k)))
+    assert R.main(_argv(file_db, cache, market="wp")) == 0
+    (card,) = cards
+    body = json.loads((D.freeze_dir(cache, _train_params()) / R.PER_WEEK_FILE).read_text())
+    expected = {f"{s},{w}": v for (s, w), v in card.per_week_depth_lift("TRAIN").items()}
+    assert body["per_week_lift_depth"] == expected
+    assert body == R.per_week_lifts_payload(card, _train_params(), split="TRAIN")
+    with pytest.raises(S.GradeInputError, match="HOLDOUT"):
+        card.split("HOLDOUT")
+
+
+def test_the_vector_file_is_written_before_the_ledger_row(file_db, tmp_path, monkeypatch,
+                                                          capsys):
+    # publish-then-record: on an unlocked run the vector file exists when the
+    # ledger row is appended, so file and row come from ONE run.  Mutant tried:
+    # moving the write below `record_holdout_unlock` — the spy sees no file.
+    cache = tmp_path / "cache"
+    argv = _argv(file_db, cache, seasons="2024", grade_as_of="2025-02-28")
+    monkeypatch.setattr(R, "replay", lambda conn, params, **kw: [_holdout_record()])
+    seen = []
+    real_record = D.record_holdout_unlock
+    vector = D.freeze_dir(cache, D.ReplayParams(strategies=("signal_topk",), k=2,
+                                                seasons=(2024,), weeks=(6,))) / R.PER_WEEK_FILE
+    def spy(*a, **k):
+        seen.append(vector.exists())
+        return real_record(*a, **k)
+    monkeypatch.setattr(D, "record_holdout_unlock", spy)
+    assert R.main(argv + ["--unlock-holdout"]) == 0
+    assert seen == [True]
+    body = json.loads(vector.read_text())
+    assert body["split"] == "HOLDOUT" and body["seasons"] == [2024]
+    assert "HOLDOUT unlock recorded" in capsys.readouterr().out
+
+
+def test_per_week_file_is_written_on_an_unlocked_run_without_a_second_load(
+    file_db, tmp_path, monkeypatch,
+):
+    # the file is built from the cards main() already holds: one load, one
+    # grade per card, no second read of the holdout freeze.  Mutant tried:
+    # re-loading the freeze (D.load) or re-grading inside write_per_week_lifts
+    # — the counters below move.
+    cache = tmp_path / "cache"
+    argv = _argv(file_db, cache, seasons="2024", grade_as_of="2025-02-28", market="wp")
+    monkeypatch.setattr(R, "replay", lambda conn, params, **kw: [_holdout_record()])
+    assert R.main(argv + ["--unlock-holdout"]) == 0     # decide + freeze + grade
+    loads, grades = [], []
+    real_load, real_grade = D.load, S.build_scorecard
+    monkeypatch.setattr(D, "load", lambda *a, **k: (loads.append(1), real_load(*a, **k))[1])
+    monkeypatch.setattr(S, "build_scorecard",
+                        lambda *a, **k: (grades.append(1), real_grade(*a, **k))[1])
+    assert R.main(argv + ["--unlock-holdout", "--grade-only"]) == 0
+    assert loads == [1] and grades == [1]
+    params = D.ReplayParams(strategies=("signal_topk",), k=2, seasons=(2024,), weeks=(6,))
+    body = json.loads((D.freeze_dir(cache, params) / R.PER_WEEK_FILE).read_text())
+    assert body["split"] == "HOLDOUT" and body["cache_key"] == params.cache_key()
+
+
 # ------------------------------------------------------------- README
 
 
@@ -714,8 +945,21 @@ def test_every_replay_invocation_in_the_readme_parses_and_the_methodology_is_ver
     assert not args.unlock_holdout and not args.force and not args.grade_only
     assert D.ReplayParams(strategies=("signal_topk",), k=3,
                           seasons=R._parse_seasons(args.seasons)).cache_key() == "66c0e83d7da3"
-    for name in ("draft_backtest.py", "replay.py", "decisions.py", "scorecards.py", "stats.py"):
+    # the module table is an interface too: a module with a CLI that the README
+    # does not name is a module whose documented shape lives only in a
+    # gitignored note (item 4.2 audit — tune.py / tune_grid.py were missing)
+    for name in ("draft_backtest.py", "replay.py", "decisions.py", "scorecards.py", "stats.py",
+                 "tune.py", "tune_grid.py"):
         assert f"`{name}`" in text, name
+    tune_commands = [line.strip() for line in text.splitlines()
+                     if line.strip().startswith("python -m backtest.tune")]
+    assert len(tune_commands) >= 2, tune_commands
+    tune_parser = T.build_parser()
+    for cmd in tune_commands:
+        targs = tune_parser.parse_args(cmd.split()[3:])   # SystemExit = a stale README
+        assert targs.db and "ziggurat.sqlite" not in Path(targs.db).name
+    assert R.GRADE_LOG in text and T.FINGERPRINT_LOG in text and T.RESULTS_DIR in text
+    assert str(T.SEARCH_CACHE_DIR.relative_to(REPO_ROOT)) in text
     assert "holdout-unlocks.jsonl" in text and "data/backtest/replay/<params_hash[:12]>/" in text
     assert "does NOT beat the market" in text
 
@@ -736,3 +980,93 @@ def test_live_db_smoke_one_week():
     assert card.overall.decisions == 3 and card.overall.null_universe > 100
     text = S.render(card)
     assert "TRAIN 2021-23" in text and "precision@3" in text
+
+
+# ------------------------------ item 4.2: the grade log, and atomic writes
+
+
+def test_every_cli_grade_appends_one_line_to_the_grade_log(file_db, tmp_path):
+    # Mutant killed: logging grades ONLY from the search runner (backtest.tune),
+    # the pre-audit state.  §6.4 / §11.5: "every build_scorecard call made
+    # anywhere in 4.2 — the search, the G6 re-grades (§7.2), the holdout
+    # episode — appends one line ... F8 is otherwise unverifiable after the
+    # fact."  Both the §8.3 holdout commands and the §7.2 G6 re-grades at
+    # --hit-places 3 / 8 are THIS CLI, and hit_places / owned_delta /
+    # grade_as_of live in neither ReplayParams nor the manifest — so a log
+    # written only by the runner (which asserts H == 5 before it grades at all)
+    # could not see the sweep it exists to expose.
+    cache = tmp_path / "cache"
+    assert R.main(_argv(file_db, cache, market="wp")) == 0
+    log = cache / R.GRADE_LOG
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["places"] == S.HIT_PLACES_DEFAULT and rows[0]["market"] == "wp"
+    assert rows[0]["strategy"] == "signal_topk" and rows[0]["grade_as_of"] == "2024-02-28"
+    assert rows[0]["entry_point"] == "backtest.replay"
+    assert rows[0]["unlock_holdout"] is False
+    assert rows[0]["cache_key"] == D.ReplayParams(
+        strategies=("signal_topk",), k=2, seasons=(2023,), weeks=(6,)).cache_key()
+    # a G6-shaped re-grade at another H is APPENDED, with the H it used — this
+    # is the only artefact in the item that records it
+    assert R.main(_argv(file_db, cache, market="wp")
+                  + ["--grade-only", "--hit-places", "3"]) == 0
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    assert [r["places"] for r in rows] == [S.HIT_PLACES_DEFAULT, 3]
+    assert rows[0]["cache_key"] == rows[1]["cache_key"]        # H is not in the key
+    # --grade-log points the line somewhere else (e.g. the 4.2 SEARCH_CACHE_DIR,
+    # so the whole item keeps ONE file)
+    elsewhere = tmp_path / "search-cache" / "grade-log.jsonl"
+    assert R.main(_argv(file_db, cache, market="wp")
+                  + ["--grade-only", "--grade-log", str(elsewhere)]) == 0
+    assert len(elsewhere.read_text().splitlines()) == 1
+    assert len(log.read_text().splitlines()) == 2              # unchanged
+    # two markets x two strategies is four calls and four lines
+    assert R.main(_argv(file_db, cache, strategy="signal_topk,random_k", k="2",
+                        market="both")) == 0
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(rows) == 6 and {r["market"] for r in rows[2:]} == {"wp", "ros"}
+
+
+def test_the_per_week_vector_is_written_through_the_atomic_writer(file_db, tmp_path,
+                                                                 monkeypatch):
+    # Mutant killed: `path.write_bytes(blob)` in write_per_week_lifts.  The
+    # docstring promises "atomically (tmp + fsync + rename via D._write_atomic)"
+    # and the only assertion was that no `.tmp` survives — which a plain write
+    # satisfies trivially, because it never creates one.  This file is the ONE
+    # sanctioned source of the holdout d_w vectors (§8.3), and every graded run
+    # REWRITES it in place, so a torn write destroys the previous valid file.
+    writes: list[Path] = []
+    real = D._write_atomic
+
+    def spy(path, data):
+        writes.append(Path(path))
+        real(path, data)
+    monkeypatch.setattr(D, "_write_atomic", spy)
+    cache = tmp_path / "cache"
+    assert R.main(_argv(file_db, cache)) == 0
+    path = D.freeze_dir(cache, D.ReplayParams(strategies=("signal_topk",), k=2,
+                                              seasons=(2023,), weeks=(6,))) / R.PER_WEEK_FILE
+    assert path in writes and path.exists()
+    assert not list(path.parent.glob("*.tmp*"))
+
+
+def test_the_atomic_writer_never_shares_a_temp_name(tmp_path, monkeypatch):
+    # Mutant killed: `tmp = path.with_name(path.name + ".tmp")`, a FIXED temp
+    # name.  Two writers aiming at one path then interleave into a single shared
+    # fd — the survivor can be a mixture neither of them wrote — and the loser's
+    # os.replace hits a path the winner has already renamed away.
+    target = tmp_path / "x.json"
+    seen: list[str] = []
+    real_open = open
+
+    def spy(path, *a, **k):
+        if str(path).startswith(str(target)) and str(path) != str(target):
+            seen.append(Path(path).name)
+        return real_open(path, *a, **k)
+    monkeypatch.setattr("builtins.open", spy)
+    D._write_atomic(target, b"one")
+    D._write_atomic(target, b"two")
+    assert target.read_bytes() == b"two"
+    assert len(seen) == 2 and len(set(seen)) == 2
+    assert all(str(os.getpid()) in name for name in seen)
+    assert not list(tmp_path.glob("*.tmp*"))

@@ -9,6 +9,7 @@ phase must never need the generator.
 from __future__ import annotations
 
 import math
+import statistics
 
 import pytest
 
@@ -906,3 +907,282 @@ def test_draft_backtest_season_block_goes_through_stats():
     iv = stats.season_block_interval(per)
     assert (block.mean, block.ci_low, block.ci_high, block.sd, block.n_blocks) == (
         iv.mean, iv.lo, iv.hi, iv.sd, iv.n)
+
+
+# ------------------------------------------ item 4.2 (B): the runner's seams
+
+
+def test_depth_matched_lifts_is_the_summary_number(db):
+    # B1: the printed DEPTH-MATCHED number IS depth_matched_lifts() — one
+    # definition, called by _summarise, so the runner's per-week vectors
+    # cannot drift from the card.  _two_week_world makes the depth-matched
+    # mean (1.0, n=2: PA own-week, PC fallback, PD unmatched) differ from the
+    # raw lift (2.5/3) so a _summarise that re-derived its own number fails.
+    _two_week_world(db)
+    card = _card(db, _week7_records())
+    nulls = {(n.season, n.week): n for n in card.nulls}
+    graded = [p for p in card.picks if p.gradeable]
+    d = S.depth_matched_lifts(graded, nulls)
+    assert isinstance(d, S.DepthLifts)
+    assert d.per_pick == [1.0, 1.0] and (d.fallbacks, d.unmatched) == (1, 1)
+    assert d.per_week == {(SEASON, WEEK): [1.0], (SEASON, WEEK + 1): [1.0]}
+    s = card.split("TRAIN")
+    assert s.lift_depth_pooled.mean == statistics.fmean(d.per_pick)
+    assert s.lift_depth_pooled.n == len(d.per_pick) == 2
+    assert (s.depth_fallbacks, s.depth_unmatched) == (d.fallbacks, d.unmatched)
+    assert s.lift_depth_pooled.mean != s.lift_pooled.mean == pytest.approx(2.5 / 3)
+    # the per-week vector on the card is the same call's per_week, averaged
+    assert card.per_week_depth_lift("TRAIN") == {
+        k: statistics.fmean(v) for k, v in d.per_week.items()}
+    # the explicit band_totals keyword is the table _summarise itself uses:
+    # keyed by (season, band), so a superset of seasons changes nothing per key
+    totals = S.season_band_totals(nulls)
+    assert totals[(SEASON, "1-36")] == (0, 2) and totals[(SEASON, "unranked")] == (2, 3)
+    assert S.depth_matched_lifts(graded, nulls, band_totals=totals) == d
+
+
+def test_scorecard_carries_the_nulls_it_graded_against(db, panel):
+    # B2: every NullRate the grade used rides on the card — one per DECIDED
+    # week — and the Summary's null numbers are THOSE objects' counts, so a
+    # reader never grades a second time (the null pass is ~2.8 s of the 3.6 s
+    # grade, measured in the 4.2 build brief).
+    for gsis, team in panel.items():
+        _stat(db, gsis, team=team)
+    _stat(db, "star", team="BUF")
+    recs = [
+        _record([_decision("A", r0_rank=30)]),
+        _record([], week=WEEK + 1, as_of="2023-10-24", status=D.WEEK_EMPTY_POOL,
+                reason="synthetic: nothing to decide"),
+    ]
+    card = _card(db, recs)
+    assert [(n.season, n.week) for n in card.nulls] == [(SEASON, WEEK)]
+    n = card.null_at(SEASON, WEEK)
+    assert n is card.nulls[0]
+    assert (n.market, n.places) == ("wp", S.HIT_PLACES_DEFAULT)
+    s = card.split("TRAIN")
+    assert (n.universe, n.eligible, n.gradeable, n.hits) == (6, 5, 5, 4)
+    assert (s.null_universe, s.null_eligible, s.null_gradeable, s.null_hits) == (
+        n.universe, n.eligible, n.gradeable, n.hits)
+    assert s.null_rate == n.rate == pytest.approx(0.8)
+    assert (s.null_lead1, s.null_lead2, s.null_lead_bye_deferred) == (
+        n.lead1, n.lead2, n.lead_bye_deferred) == (2, 1, 1)
+    (row,) = [w for w in card.weeks if w.week == WEEK]
+    assert row.null_rate == n.rate
+    # a week the card never graded (undecided) is a refusal, not an empty rate
+    with pytest.raises(S.GradeInputError, match=r"holds no null for 2023 wk7"):
+        card.null_at(SEASON, WEEK + 1)
+    # a different hit threshold is a different null — and the card says which
+    strict = _card(db, recs, places=12)
+    assert strict.null_at(SEASON, WEEK).places == 12
+    assert strict.null_at(SEASON, WEEK).hits < n.hits
+
+
+def test_all_split_on_a_train_only_run_is_not_read_as_all(db, panel):
+    # B3 / pre-registration §2.7: on a TRAIN-only run ALL is byte-identical to
+    # TRAIN but for its label, so a reader that means TRAIN must ask for it by
+    # name — and asking for a split the card does not hold RAISES, naming what
+    # is there, instead of quietly handing back ALL.
+    import dataclasses
+
+    card = _card(db, [_record([_decision("A", r0_rank=30)])])
+    train = card.split("TRAIN")
+    assert train.split == "TRAIN" and train.seasons == (SEASON,)
+    assert card.split("ALL") is card.overall
+    # every NUMBER on the two Summaries is identical; only the two labels differ
+    assert dataclasses.replace(train, split="ALL", label="ALL") == card.overall
+    with pytest.raises(S.GradeInputError) as err:
+        card.split("HOLDOUT")
+    assert "no 'HOLDOUT' split" in str(err.value)
+    assert "splits present: ['TRAIN', 'ALL']" in str(err.value)
+    with pytest.raises(S.GradeInputError, match="'OTHER'"):
+        card.per_week_depth_lift("OTHER")
+
+
+def test_per_week_depth_lift_omits_weeks_with_no_graded_pick(db):
+    # B3: {(season, week): L(g, w)} restricted to the split — a decided week
+    # whose only pick could not be depth-matched (PD, no null line in its
+    # band all season) is ABSENT, never 0.0; so is a decided week with no
+    # graded pick at all.  0.0 would read as "no lift" in the runner's paired
+    # difference; absence drops the week from the pairing, which is §5.2.
+    _two_week_world(db)
+    recs = [
+        _record([_decision("PA", r0_rank=32)]),
+        _record([_decision("PD", r0_rank=38, week=WEEK + 1, as_of="2023-10-24", r0_scrape=R1)],
+                week=WEEK + 1, as_of="2023-10-24"),
+        _record([], week=WEEK + 2, as_of="2023-10-31"),
+    ]
+    card = _card(db, recs)
+    # all three weeks were decided and graded against a null ...
+    assert [(n.season, n.week) for n in card.nulls] == [
+        (SEASON, WEEK), (SEASON, WEEK + 1), (SEASON, WEEK + 2)]
+    assert _pick(card, "PD").gradeable and card.split("TRAIN").depth_unmatched == 1
+    # ... but only week 6 contributes a depth-matched pick
+    assert card.per_week_depth_lift("TRAIN") == {(SEASON, WEEK): 1.0}
+    assert card.split("TRAIN").per_week_lift_depth == (((SEASON, WEEK), 1.0),)
+    assert 0.0 not in card.per_week_depth_lift("TRAIN").values()
+
+
+def test_conditional_denominator_excludes_l1_hits_and_l1_byes(db, panel):
+    # B4 / pre-registration §9.1: the PRIMARY conditional lead-2 denominator
+    # is "the market had not already re-ranked him at r1" — status_l1 in
+    # {MISS, ABSENT}: a lead-1 hit is excluded (the market already moved) and
+    # so is a bye at r1 (no rankable r1 page).  The SECONDARY form adds the
+    # byes back.  Same rule on both sides of the lift, inside the one loop.
+    for gsis, team in panel.items():
+        _stat(db, gsis, team=team)
+    _stat(db, "star", team="BUF")             # unranked, absent at r1 and r2
+    recs = [_record([
+        _decision("A", r0_rank=30),                                   # hit at r1
+        _decision("B", rank_in_board=2, r0_rank=29),                  # miss r1, hit r2
+        _decision("E", rank_in_board=3, r0_rank=35, team="KC"),       # bye r1, hit r2
+        _decision("N", rank_in_board=4, r0_rank=20),                  # miss, miss
+    ])]
+    card = _card(db, recs)
+    s = card.split("TRAIN")
+    assert s.gradeable == 4
+    assert {p.gsis_id: p.status_l1 for p in card.picks} == {
+        "A": S.S_HIT, "B": S.S_MISS, "E": S.S_BYE, "N": S.S_MISS}
+    # picks: primary {B, N} -> B hits; bye-included {B, E, N} -> B, E hit
+    assert (s.cond_l2_rankable, s.cond_l2_hits) == (2, 1)
+    assert (s.cond_l2_rankable_strict, s.cond_l2_hits_strict) == (2, 1)
+    assert (s.cond_l2_rankable_incl_bye, s.cond_l2_hits_incl_bye) == (3, 2)
+    assert s.cond_lead2_rate().mean == pytest.approx(0.5)
+    assert s.cond_lead2_rate(form="incl_bye").mean == pytest.approx(2 / 3)
+    assert s.cond_lead2_rate() == stats.wilson_interval(1, 2)
+    with pytest.raises(S.GradeInputError):
+        s.cond_lead2_rate(form="raw")
+    # null: A hit r1, C hit r1, E bye r1 -> primary {B, star}: B hits at r2
+    n = card.null_at(SEASON, WEEK)
+    assert (n.l1_rankable, n.lead2_conditional) == (2, 1)
+    assert (n.l1_rankable_incl_bye, n.lead2_conditional_incl_bye) == (3, 2)
+    assert n.band_conditional("1-36") == (1, 1) and n.band_conditional("unranked") == (0, 1)
+    assert (s.null_l1_rankable, s.null_lead2_conditional) == (2, 1)
+    assert s.null_cond_lead2_rate == pytest.approx(0.5)
+    assert s.null_cond_lead2_rate_incl_bye == pytest.approx(2 / 3)
+    # depth-matched conditional lift: B (1-36) 1 - 1/1 = 0; N (1-36) 0 - 1 = -1
+    assert s.lift_cond_l2_depth_pooled.n == 2
+    assert s.lift_cond_l2_depth_pooled.mean == pytest.approx(-0.5)
+    assert s.lift_cond_l2_depth_pooled.kind == "pooled per-pick depth-matched conditional"
+    assert (s.cond_l2_depth_fallbacks, s.cond_l2_depth_unmatched) == (0, 0)
+    # ONE render line, labelled exactly, both forms on it
+    assert S.COND_LEAD2_LABEL == (
+        "conditional lead-2 (the market had not already re-ranked him at r1; "
+        "bye at r1 excluded)")
+    text = S.render(card)
+    # one line per rendered summary block (each split + each season)
+    assert text.count(S.COND_LEAD2_LABEL) == len(card.splits) + len(card.seasons)
+    lines = [ln for ln in text.splitlines() if ln.startswith(f"    {S.COND_LEAD2_LABEL}")]
+    assert len(lines) == 3 and len(set(lines)) == 1      # TRAIN, 2023, ALL: same numbers
+    line = lines[0]
+    assert line.startswith(f"    {S.COND_LEAD2_LABEL}: 1/2 = ")
+    assert "vs null  50.0% (1/2); strict (r2 page required) 1/2 = " in line
+    assert "DEPTH-MATCHED lift -50.0pp" in line
+    assert "(bye at r1 included: 2/3 = " in line and line.endswith(")")
+    assert "vs null  66.7% (2/3))" in line
+    # the line sits with the lead breakdown, ahead of the base-rate line
+    assert text.index("hits by lead") < text.index(S.COND_LEAD2_LABEL) < text.index("base rate (")
+
+
+# --------------------------------------- item 4.2 §9.1: the conditional lift's
+# two null matching levels, and the strict variant
+
+
+def _null(*, season, week, by_band_conditional):
+    return S.NullRate(
+        season=season, week=week, market="wp", places=5, universe=10, eligible=10,
+        gradeable=8, hits=4, lead1=2, lead2=1, lead_bye_deferred=0, corroborated=0,
+        corroboration_covered=0, by_band=(("1-36", 4, 8),),
+        l1_rankable=sum(g for _b, _h, g in by_band_conditional),
+        lead2_conditional=sum(h for _b, h, _g in by_band_conditional),
+        by_band_conditional=by_band_conditional,
+    )
+
+
+class _Pick:
+    """The four attributes the band-matching kernel reads."""
+
+    def __init__(self, season, week, band, hit):
+        self.season, self.week, self.depth_band, self.hit = season, week, band, hit
+        self.status_l2 = S.S_HIT if hit else S.S_MISS
+
+
+def test_the_conditional_lift_is_reported_against_both_null_matching_levels():
+    # §9.1 says only "the null conditional rate of that pick's own r0 band" and
+    # does NOT fix the matching level, while §5.2 fixes the PRIMARY metric's null
+    # at (season, week, band).  The two readings give different numbers, and
+    # §9.1's own measured block (+19.01pp [+0.62, +37.39] n=29 on the TRAIN
+    # default) is the SPLIT-POOLED one — the shipped code reproduces it and
+    # prints BOTH rather than quoting one number the frozen document contradicts.
+    # Mutant killed: `split_pooled_band_totals` keyed per season (i.e. a second
+    # copy of season_band_totals), which cannot pool 2021-23 into one rate.
+    nulls = {(2021, 1): _null(season=2021, week=1, by_band_conditional=(("1-36", 0, 4),)),
+             (2022, 1): _null(season=2022, week=1, by_band_conditional=(("1-36", 3, 4),))}
+    per_season = S.season_band_totals(nulls, conditional=True)
+    assert per_season == {(2021, "1-36"): (0, 4), (2022, "1-36"): (3, 4)}
+    pooled = S.split_pooled_band_totals(nulls, conditional=True)
+    assert pooled == {(2021, "1-36"): (3, 8), (2022, "1-36"): (3, 8)}
+    picks = [_Pick(2021, 1, "1-36", True)]
+    week_level = S._band_matched_lifts(
+        picks, nulls, hit_of=lambda p: 1.0, week_band=lambda n, b: n.band_conditional(b),
+        totals=per_season)
+    split_level = S._band_matched_lifts(
+        picks, {}, hit_of=lambda p: 1.0, week_band=lambda n, b: (0, 0), totals=pooled)
+    assert week_level.per_pick == [1.0]                       # its own week: 0/4
+    assert split_level.per_pick == [pytest.approx(0.625)]      # pooled: 3/8
+    assert S.split_pooled_band_totals([], conditional=True) == {}
+
+
+def test_both_conditional_matching_levels_reach_the_render_line(db, panel):
+    for gsis, team in panel.items():
+        _stat(db, gsis, team=team)
+    card = _card(db, [_record([_decision("B", r0_rank=29),
+                              _decision("N", rank_in_board=2, r0_rank=20)])])
+    s = card.split("TRAIN")
+    assert s.lift_cond_l2_depth_pooled is not None
+    assert s.lift_cond_l2_depth_bandpooled is not None
+    assert s.lift_cond_l2_depth_bandpooled.kind == (
+        "pooled per-pick split-pooled-band conditional")
+    # one week and one season: the two levels agree here BY CONSTRUCTION, and
+    # both are printed with the level named — the unit test above is what pins
+    # the arithmetic that separates them
+    assert s.lift_cond_l2_depth_bandpooled.mean == pytest.approx(
+        s.lift_cond_l2_depth_pooled.mean)
+    line = [ln for ln in S.render(card).splitlines()
+            if ln.startswith(f"    {S.COND_LEAD2_LABEL}")][0]
+    assert "null matched per season/week/band" in line
+    assert "same lift vs the SPLIT-POOLED band table" in line
+
+
+def test_the_strict_conditional_variant_drops_a_pick_with_no_r2_page(db):
+    # Mutant killed: `strict = list(rankable)`.  §9.1: "a strict variant
+    # excluding picks with no r2 page at all (status_l2 == S_NO_PAGE) is printed
+    # beside the primary form" — on the real TRAIN default it is the difference
+    # between n=29 and n=28, and no fixture reached the clause.
+    _page(db, week=WEEK, scrape=R0, ranks={"A": 30, "B": 29})
+    _page(db, week=WEEK + 1, scrape=R1, ranks={"A": 20, "B": 28})     # no r2 page at all
+    _stat(db, "A")
+    _stat(db, "B")
+    card = _card(db, [_record([_decision("A", r0_rank=30),
+                              _decision("B", rank_in_board=2, r0_rank=29)])])
+    assert _pick(card, "A").status_l1 == S.S_HIT
+    b = _pick(card, "B")
+    assert b.status_l1 == S.S_MISS and b.status_l2 == S.S_NO_PAGE
+    s = card.split("TRAIN")
+    assert (s.cond_l2_rankable, s.cond_l2_hits) == (1, 0)             # B is rankable
+    assert (s.cond_l2_rankable_strict, s.cond_l2_hits_strict) == (0, 0)   # ... and dropped
+    assert s.cond_lead2_rate(form="strict").n == 0
+    assert "strict (r2 page required) n/a (0 rankable)" in S.render(card)
+
+
+def test_the_public_api_lists_the_frozen_constants_and_stays_ordered():
+    # Mutant killed: dropping PERMUTATION_SEED / PERMUTATION_DRAWS from
+    # stats.__all__ (tune.SearchConfig reads both across the module boundary),
+    # and appending a constant after the sorted block in scorecards.__all__.
+    assert {"PERMUTATION_SEED", "PERMUTATION_DRAWS", "Key"} <= set(stats.__all__)
+    assert stats.__all__ == sorted(stats.__all__)
+    for name in stats.__all__:
+        assert hasattr(stats, name), name
+    consts = [n for n in S.__all__ if n.isupper() or n.split("_")[0].isupper()]
+    assert consts == sorted(consts), consts
+    for name in S.__all__:
+        assert hasattr(S, name), name

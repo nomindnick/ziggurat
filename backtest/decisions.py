@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import os
 from collections.abc import Iterable, Mapping, Sequence
@@ -133,6 +134,12 @@ STRATEGY_NAMES: tuple[str, ...] = ("signal_topk", "random_k", "volume_topk")
 #: :attr:`ReplayParams.generator`; bare metric names are the differenced floors.
 EMERGENCE_PREFIX = "emergence:"
 
+#: The floors that are SHARES of a team total (a fraction in [0, 1]); a floor
+#: at or above 1.0 on any of them can never be cleared.  Item 4.2, A1.
+SHARE_FLOORS: frozenset[str] = frozenset({
+    "target_share", "air_yards_share", "offense_pct", EMERGENCE_PREFIX + "offense_pct",
+})
+
 
 def default_generator() -> tuple[tuple[str, float], ...]:
     """The generator's SHIPPED floors as sorted ``(metric, floor)`` pairs.
@@ -232,6 +239,27 @@ class ReplayParams:
             raise ValueError("a generator floor may be given once only")
         if not gen:
             raise ValueError("the generator needs at least one floor")
+        # Item 4.2, admissibility A1 (breakout-backtest.md §3.6 / §11.3): the
+        # generator's `magnitude` is Σ delta/floor, so a floor of 0 divides by
+        # zero (swallowed per week into `generator_failed`) and a NEGATIVE floor
+        # admits collapsing usage and INVERTS that metric's ranking — both exit
+        # 0 today.  A SHARE floor at or above 1.0 can never be cleared, which
+        # silently disables its axis.  Refused HERE, at the parameters, because
+        # this is the one place every run passes through before a cache key.
+        degenerate = [(m, v) for m, v in gen if not (v > 0.0)]
+        if degenerate:
+            raise ValueError(
+                f"generator floor(s) {degenerate} must be strictly > 0: the usage arm's "
+                "magnitude is Σ delta/floor — a floor of 0 divides by zero and a negative "
+                "floor inverts that metric's ranking (item 4.2 admissibility A1)"
+            )
+        shares = [(m, v) for m, v in gen if m in SHARE_FLOORS and v >= 1.0]
+        if shares:
+            raise ValueError(
+                f"share floor(s) {shares} must be < 1.0: a share cannot clear 1.0, so "
+                "the axis would be silently disabled rather than tightened (item 4.2 "
+                "admissibility A1)"
+            )
         object.__setattr__(self, "generator", gen)
 
     @property
@@ -408,13 +436,48 @@ def freeze_dir(cache_dir: str | os.PathLike, params: ReplayParams) -> Path:
     return Path(cache_dir) / params.cache_key()
 
 
+_TMP_COUNTER = itertools.count()
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as fh:
-        fh.write(data)
+    """tmp + fsync + rename.  The temp name carries the writing PROCESS and a
+    per-process counter: two writers aiming at one path must not interleave
+    into a single shared ``<name>.tmp`` fd (item 4.2 audit — a fixed temp name
+    turns a lost race into a torn survivor, or into a ``FileNotFoundError``
+    when the winner's rename removes the shared temp under the loser)."""
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{next(_TMP_COUNTER)}")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def append_grade_log(path: str | os.PathLike, payload: Mapping[str, object]) -> Path:
+    """Append ONE json line to a grade log (§6.4), fsync'd.
+
+    Lives here rather than in the runner because BOTH callers need it and
+    ``backtest.replay`` cannot import ``backtest.tune`` (the runner imports the
+    harness).  Every ``build_scorecard`` call made anywhere in 4.2 — the
+    search, the G6 re-grades, the holdout episode — appends one line, so an
+    undisclosed H- or owned-delta sweep is visible to an auditor.  A grade log
+    written by only ONE of the two entry points cannot see the sweep it exists
+    to expose (item 4.2 audit)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n"
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    return p
 
 
 def freeze(

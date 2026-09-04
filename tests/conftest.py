@@ -27,6 +27,27 @@ def db():
     conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _backtest_cache_dirs_never_canonical(monkeypatch, tmp_path_factory):
+    """No test may write under the CANONICAL replay caches (item 4.2).
+
+    `data/backtest/replay/` holds the holdout-unlock ledger and the §6.4 grade
+    log — the item's audit trail — and `data/backtest/replay-4.2/` is the
+    search cache.  Both CLIs default `--cache-dir` to one of them, and the
+    parsers are built inside `main()`, so a test that omits `--cache-dir`
+    lands there: measured 2026-09-03, one such test appended two fixture
+    grade-log rows to the canonical log on EVERY full-suite run (18 rows from
+    nine runs before it was noticed).  Redirecting the module defaults makes
+    the omission harmless everywhere rather than in the one test that was
+    caught; `test_backtest_replay.py` pins the redirect."""
+    import backtest.replay as R
+    import backtest.tune as T
+
+    base = tmp_path_factory.mktemp("backtest-cache-defaults")
+    monkeypatch.setattr(R, "DEFAULT_CACHE_DIR", base / "replay")
+    monkeypatch.setattr(T, "DEFAULT_CACHE_DIR", base / "replay-4.2")
+
+
 @pytest.fixture()
 def push_db():
     """A full-schema in-memory DB for the item-3.6 push-layer tests (schema 8+

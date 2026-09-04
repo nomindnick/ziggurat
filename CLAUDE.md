@@ -940,8 +940,9 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   `ros` p@3 65.3% vs 30.2%. **Both amendment seams exist for 4.2**: a holdout
   lock (2024–25 refused without `--unlock-holdout`, every unlock logged to a
   ledger publish-then-record) and threshold injection
-  (`build_candidates(thresholds=, emergence_floors=)`; eleven floors, all in
-  the cache key); TRAIN is 54 weeks at ~27 s per setting, so the search is an
+  (`build_candidates(thresholds=, emergence_floors=)`; twelve floors — 8 + 4,
+  this line said "eleven" until 4.2 counted at the source — all in the cache
+  key); TRAIN is 54 weeks at ~27 s per setting, so the search is an
   afternoon. **The audit (7 lenses, 32 agents incl. 21 refute-first verifiers;
   46 findings, 43 confirmed, all fixed but two recorded) changed two
   conclusions.** (1) **The instrument grades
@@ -973,6 +974,47 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   `intel/research/backtest-harness-4.1-design.md`. **Standing lesson: a null
   that is not matched on the thing the strategies vary is a thumb on the
   scale for whichever strategy varies it most.**
+
+- **4.2 breakout-threshold tuning loop — done 2026-09-03. Verdict, in the
+  pre-registered words: "no setting earned a holdout read."** The twelve
+  labelled floors in `core/candidates.py` are byte-unchanged, the holdout
+  ledger is 4 rows before and after, and `TUNED` is blank. Run as an
+  OPTIMISATION LOOP with the grid, metric, family, gates and expected outcome
+  frozen in gitignored `intel/research/breakout-backtest.md` (2,333-line
+  frozen prefix, sha256-pinned, never edited; results as dated F4-N
+  amendments at the end) BEFORE the first cell; the search ran on a frozen DB
+  snapshot through new `backtest/tune.py` + `tune_grid.py` (no holdout flag
+  exists in the runner; it refuses the live DB and the canonical cache dir
+  by name). 47 of 80 settings in ≈7 min (8-way pool). Winner `carries=1`
+  (shipped 6): **D = +5.41pp depth-matched over the default on 45 paired TRAIN
+  weeks — clears the +5.4pp practical floor by 8e-05 and FAILS the
+  pre-registered max-null step-down (family-wise bar +7.21pp, adjusted p
+  0.153); 15.3% of pure-noise replicates clear the practical floor alone.**
+  Round 2 empty (0 axes at p < 0.05); the flood cell shows the largest D on the
+  page and is argmax-ineligible by construction — the outcome §13.1 wrote down
+  in advance, clause for clause. LOSO: three folds, three different winners,
+  +4.2pp winner's curse, all of it selection switching. The decomposition says
+  what the +5.4pp is: 45% lower null bar (picking shallower), a 68-RB-for-61-WR
+  swap toward backup/committee backs, a Simpson's reversal under position
+  standardisation — and in the secondaries **genuine one-week leads FALL 10→7
+  (wp) / 20→17 (ros)** while concurrent hits and Sleeper corroboration rise:
+  the tuned floor agrees with the market sooner and beats it less, which is
+  4.1's instrument finding shown to be what a floor optimises. Three Opus
+  workflows (build, 34 audit findings fixed → analysis, 19 agents, every
+  headline claim 3/3 refute-first, 0 protocol violations). Recorded, not
+  fixed: `stats.sign_flip_permutation` mis-resolves exact ties (decision-
+  irrelevant here), `band_table` duplicates a row, decide-only trials lack
+  `wall_seconds`; the knob count was "eleven" in four documents and is twelve
+  (corrected). No second search from this data under any other metric — that
+  is the post-hoc search the freeze exists to prevent; a revisit needs a NEW
+  pre-registration and preferably a new source (`ff_opportunity`, still
+  deferred, or 2026's own weeks). Suite green (**2,854 passed, 4 skipped**;
+  +111 over the 3.8A baseline of 2,743 — the tune runner, the grid, the stats
+  module and the harness seams). Details: `IMPLEMENTATION_PLAN.md` 4.2. **Standing lesson: a search that
+  pre-registers its own null distribution learns what its instrument can
+  see — here nothing under ~7pp on 45 weeks — and a winner that clears the
+  practical floor by 8e-05 while sitting 1.8pp under the noise maximum IS the
+  noise maximum wearing a label.**
 
 Update this section whenever a phase or checkpoint closes.
 
