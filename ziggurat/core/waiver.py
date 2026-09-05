@@ -72,9 +72,16 @@ module, never imports from ``ziggurat/draft/``.
 
 import heapq
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from ziggurat.core.candidates import NoCompletedWeek, build_candidates
+from ziggurat.core.candidates import (
+    CandidateBoard,
+    EpisodeHistory,
+    EvaluatedRows,
+    NoCompletedWeek,
+    build_candidates,
+    episode_legend,
+)
 from ziggurat.core.marginal import (
     ACQ_FREE_AGENT,
     ACQ_UNKNOWN,
@@ -82,9 +89,10 @@ from ziggurat.core.marginal import (
     DEFAULT_POOL_LIMIT,
     POSITION_CAPS,
     STREAMED_POSITIONS,
+    UNDROPPABLE_TAG,
+    MarginalBoard,
     MarginalRow,
     SwapRow,
-    UNDROPPABLE_TAG,
     WeekResolutionError,
     build_board,
     classify_acquisition,
@@ -215,6 +223,25 @@ STOP_BUDGET = "budget"
 STOP_EXHAUSTED = "exhausted"
 STOP_EVAL_BUDGET = "eval_budget"
 STOP_NO_CANDIDATES = "no_candidates"
+
+# Printed ONCE above a claim's opportunity-signal bullets (item 4.2b, B3). The
+# claim order is provably inert to these bullets today — they are appended AFTER
+# `_select_claims` has run and reach only players already in the printed chain —
+# which is what makes this header a true statement rather than a promise. Wiring
+# the column into the selection would make it a lie, so it is never a tie-break,
+# a sort key or an input to `_select_claims` (pinned by test).
+#
+# Never, in any form: "the market will agree with this by Friday". That sentence
+# was never shipped and the relabel must not smuggle it back as "the market
+# usually follows" — the ECR panel measures AGREEMENT with the market, not a lead
+# over it (item 4.1 audit), and this column has never been graded at all.
+USAGE_EVIDENCE_HEADER = (
+    "USAGE / ROLE EVIDENCE — does not change the claim order. The +/- number on "
+    "the line above was priced from projections and is unchanged by what follows. "
+    "These bullets are OBSERVED usage from ONE game (or one injury designation): "
+    "not a forecast, not a probability, not a tie-break. Act in the printed # "
+    "order, and do not drop a starter on the strength of a bullet here."
+)
 
 
 def _kind_of(add_status: str | None) -> str:
@@ -404,6 +431,13 @@ class ClaimRec:
     reasons: tuple[str, ...]
     gain_alone: float = 0.0         # standalone (the pre-3.4b number)
     chain_rank: int = 0             # 1-based; 0 => not in the season-long chain
+    # The DROP's ESPN id (item 4.2b, B1). ``add_espn_id`` has been carried since
+    # the item-3.4 audit fixed a duplicate-display-name mis-join; the drop side
+    # was left on the name alone, and a journal or an archive that records "what
+    # this claim cost" has the same two-players-one-name problem. Nothing printed
+    # changes. ``None`` on a PURE ADD (there is no drop) and whenever the swap
+    # itself carried no id.
+    drop_espn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -480,6 +514,111 @@ class WaiverPlan:
     def blocked(self) -> bool:
         """The done-when predicate: an illegal roster blocks all claims."""
         return not self.legality.legal
+
+
+# ------------------------------------------------------- the archive collector
+
+# The as-of gated tables ONE waiver run reads, and who reads them. A decision
+# archive that records only ``as_of`` records the GATE, not the DATA: a July
+# projection pull and a November one both carry a valid ``knowable_as_of``, and
+# nothing in the output tells them apart (the item-3.1b lesson — a stale read is
+# Rule-1-invisible). ``base.resolved_vintage`` answers "which pull was in force"
+# per table; see its docstring for what the number is and is not.
+#
+#   league_player_state  roster (get_player_state) + FA pool (get_free_agents)
+#   league_teams         waiver_rank / transaction lock (get_team_state)
+#   league_settings      the league's own limits + FAAB flag (get_league_settings)
+#   projections          every point on the page (marginal -> valuation weekly_lines)
+#   schedules            the week window, byes, partial-week checks
+#   weekly_stats         the usage arm's differences and raw levels
+#   snap_counts          snap share, both usage paths
+#   injuries             the historical/backtest half of the injury arm
+#
+# NOT here, deliberately: ``players``. The crosswalk is read AT-NOW by design
+# (``base.espn_by_gsis`` / ``name_by_gsis`` — an immutable identity map, never
+# as-of gated), so a "vintage under this view" would be a different quantity
+# wearing the same name. It is captured separately as ``crosswalk_vintage``.
+ARCHIVE_VINTAGE_TABLES = (
+    "league_player_state", "league_teams", "league_settings",
+    "projections", "schedules", "weekly_stats", "snap_counts", "injuries",
+)
+
+
+@dataclass
+class WaiverArtifacts:
+    """PASSIVE collector for one ``build_waiver_plan`` run (item 4.2b, B1).
+
+    ``ziggurat waivers`` produces stdout and NOTHING else: the swap matrix, the
+    pool as priced, the candidate board, the chain's own bookkeeping and every
+    reason string are discarded at process exit, so the Tuesday that produced a
+    decision cannot be reconstructed afterwards — and a missed Tuesday is
+    unrecoverable (``league_player_state`` accumulates forward only, item 3.1).
+    Pass one of these and it comes back holding what the run already computed;
+    the writer that turns it into a freeze is item 4.2b's ``decisions`` package,
+    which depends on ``core``, never the other way round.
+
+    It is a RECEIVER. It prices nothing, re-reads nothing on the decision path,
+    changes no recommendation and no reason, and nothing in this module reads
+    back out of it. ``collect=None`` — every production caller today — is
+    byte-identical to not having it, pinned by test.
+
+    Two things are NOT here because they cannot be honest:
+
+    * a ``knowable_as_of``. A freeze is not a fact about the NFL; it is "what the
+      tool said at ``as_of`` T". It records the gate it ran at and the vintages
+      it resolved, and it is never re-read as an input to a later decision.
+    * the swap matrix on the BLOCKED path. ``MarginalBoard.swaps`` is lazy and
+      costs more than the rest of the scan; the blocked path never resolves it
+      (there are no claims to plan), and a collector that touched it would make
+      an archive of a refusal cost more than the refusal.
+    """
+
+    # --- the run's own inputs, as resolved -----------------------------------
+    as_of: str = ""
+    season: int | None = None
+    team_id: int | None = None
+    view: str = ""
+    weeks_requested: tuple[int, ...] = ()
+    claim_budget: int | None = None
+    pool_limit: int | None = None
+    source: str = ""
+    today: str | None = None
+
+    # --- what the run computed ----------------------------------------------
+    plan: WaiverPlan | None = None
+    roster_rows: tuple[dict, ...] = ()          # RAW, IR rows included, as read
+    pool_rows: tuple[dict, ...] = ()            # the FA pool AS PRICED (post-filter)
+    board: MarginalBoard | None = None
+    swaps: tuple[SwapRow, ...] = ()             # the priced matrix, legal path only
+    candidates: CandidateBoard | None = None
+    evaluated: EvaluatedRows | None = None      # every EVALUATED row, flagged or not
+    candidate_notes: Mapping[str, list[str]] = field(default_factory=dict)
+    candidate_error: str | None = None          # the degrade note, when the load failed
+    league_settings: dict | None = None
+    open_slots: int | None = None
+
+    # --- provenance ----------------------------------------------------------
+    #: table -> the newest ``retrieved_as_of`` this view could see at ``as_of``.
+    #: Measured AFTER the run's reads, so a pull that lands mid-run is reported
+    #: as the newer vintage even though the earlier reads did not see it — the
+    #: run is ~25 s and the cadence writes four times a day, so this is rare and
+    #: it is stated rather than assumed away.
+    vintages: Mapping[str, str | None] = field(default_factory=dict)
+    #: ``players``, ungated — the crosswalk is read at-now by design (above).
+    crosswalk_vintage: str | None = None
+
+
+def _capture_vintages(collect: WaiverArtifacts, conn, *, as_of, season, view) -> None:
+    """Fill ``collect.vintages`` / ``crosswalk_vintage``. Called ONLY when a
+    collector was passed (measured 0.15 s on the live 840 MB database, ~99 % of
+    it the 2.5 M-row ``projections`` table), so the production path pays nothing.
+    """
+    collect.vintages = {
+        table: base.resolved_vintage(conn, table, as_of=as_of, season=season, view=view)
+        for table in ARCHIVE_VINTAGE_TABLES
+    }
+    row = conn.execute("SELECT MAX(retrieved_as_of) FROM players").fetchone()
+    collect.crosswalk_vintage = row[0] if row else None
 
 
 # --------------------------------------------------------- the legality precheck
@@ -845,34 +984,51 @@ def _claim_reasons(
 
 
 def _candidate_notes_by_espn(
-    conn, *, as_of, season, view, today
-) -> tuple[dict[str, list[str]], str | None]:
-    """(espn_id -> opportunity-signal note(s), error_note) from item 3.3, best-effort.
+    conn, *, as_of, season, view, today, collect: EvaluatedRows | None = None,
+    history: EpisodeHistory | None = None,
+) -> tuple[dict[str, list[str]], str | None, CandidateBoard | None]:
+    """(espn_id -> opportunity-signal note(s), error_note, the board) from item
+    3.3, best-effort.
 
     ``build_candidates`` needs a completed week; pre-season it raises
     ``NoCompletedWeek`` — the annotation is optional context, so we skip silently.
     ANY OTHER failure is a visible degrade, not a silent one (item 3.4 audit F10):
     it returns an error note so the plan can disclose that the signal load failed.
+
+    The board itself is handed back for the archive (item 4.2b, B1) — it was
+    already built, and only its ``reasons[0]`` per espn_id survives into the
+    notes. ``collect`` is the evaluated-row collector, threaded straight through.
+    Note the broad ``except`` below is a DEGRADE path for the decision, so a
+    collector fault would be reported as a signal-load failure rather than
+    crashing the plan; that is deliberate — nothing on the archive side may take
+    the Tuesday page down — and it is why the collector does no work of its own.
     """
     notes: dict[str, list[str]] = {}
     try:
-        board = build_candidates(conn, as_of=as_of, season=season, view=view, today=today)
+        board = build_candidates(conn, as_of=as_of, season=season, view=view,
+                                 today=today, collect=collect, history=history)
     except NoCompletedWeek:
-        return notes, None
+        return notes, None, None
     except Exception as exc:  # noqa: BLE001 — surfaced as a NOTE, never silently swallowed
         return notes, (
             f"opportunity signals UNAVAILABLE — the usage/injury signal load failed "
             f"({type(exc).__name__}: {exc}); the claims below carry no injury/usage "
-            f"context. This is a degrade, not 'no news' — verify manually."
-        )
+            f"context. The claim ORDER is unaffected (it never used this column), "
+            f"but this is a degrade, not 'no news' — verify manually."
+        ), None
+    legend = episode_legend(board.week)
     for c in board.rows:
         if not c.espn_id:
             continue
         head = c.reasons[0] if c.reasons else c.signal_kind
-        notes.setdefault(str(c.espn_id), []).append(
-            f"opportunity signal [{c.signal_kind}]: {head}"
-        )
-    return notes, None
+        # The header + legend land ONCE per claim, above that claim's evidence
+        # rows, so a reader who sees a bullet has already read what it is not.
+        bucket = notes.setdefault(str(c.espn_id), [])
+        if not bucket:
+            bucket.append(USAGE_EVIDENCE_HEADER)
+            bucket.append(legend)
+        bucket.append(f"  [{c.signal_kind}] {c.episode_tag or 'FIRST SEEN'}: {head}")
+    return notes, None, board
 
 
 def _is_streamed(s: SwapRow) -> bool:
@@ -929,6 +1085,7 @@ def _swap_rec(
         ),
         gain_alone=alone,
         chain_rank=chain_rank,
+        drop_espn_id=None if is_pure_add else s.drop_espn_id,
     )
 
 
@@ -1475,6 +1632,8 @@ def build_waiver_plan(
     view: base.AsOfView = "historical",
     today=None,
     claim_budget: int = 3,
+    collect: WaiverArtifacts | None = None,
+    history: EpisodeHistory | None = None,
 ) -> WaiverPlan:
     """The waiver plan (item 3.4). Rule 1: ``as_of`` keyword-only, no default;
     ``view`` threaded into every accessor.
@@ -1496,6 +1655,16 @@ def build_waiver_plan(
     the streaming lane keeps its own separate slice. ``plan.chain_gain`` is the
     joint number and equals the sum of the per-claim conditional gains by
     construction. See ``_select_claims``.
+
+    ``history`` (item 4.2b, B3) is the decision archive's flag history, threaded
+    into ``build_candidates`` for the NEW / REPEAT badge on the opportunity-signal
+    bullets. It reaches the CONTEXT only: those bullets are appended after the
+    chain has been selected, so nothing about them can move a claim.
+
+    ``collect`` (item 4.2b, B1) is an optional passive ``WaiverArtifacts``: pass
+    one and it comes back holding what this run already computed, for the
+    per-Tuesday freeze. It changes no recommendation, no reason and no order, and
+    ``None`` is byte-identical to not having it (pinned by test).
     """
     # Refuse to value the whole free-agent universe as the roster (item 3.4 audit
     # F9) — mirror resolve_own_team's refuse-rather-than-guess convention (Rule 6).
@@ -1513,6 +1682,15 @@ def build_waiver_plan(
         conn, as_of=as_of, season=season, on_team_id=own_team_id, view=view,
     )]
     verdict = check_legality(roster_rows, structure=roster_structure)
+
+    if collect is not None:
+        collect.as_of = normalize_as_of(as_of).isoformat()
+        collect.season, collect.team_id, collect.view = int(season), own_team_id, str(view)
+        collect.weeks_requested = resolved_weeks
+        collect.claim_budget, collect.pool_limit, collect.source = (
+            claim_budget, pool_limit, source)
+        collect.today = None if today is None else str(today)
+        collect.roster_rows = tuple(roster_rows)
 
     # team context (waiver priority + ESPN's own lock) — CONTEXT only, never the gate.
     # Read ALL teams so the 'of N' denominator comes from data, not a hardcode (F13).
@@ -1555,6 +1733,8 @@ def build_waiver_plan(
     # the budget is inert, which is the measured state of this league.
     settings = league_state.get_league_settings(
         conn, as_of=as_of, season=season, view=view)
+    if collect is not None:
+        collect.league_settings = None if settings is None else dict(settings)
     faab_flag = (settings or {}).get("is_using_acquisition_budget")
     faab_note = league_state.faab_verdict(settings)
     if faab_note is not None:
@@ -1622,6 +1802,11 @@ def build_waiver_plan(
                     weeks=weeks, last_week=last_week, roster_structure=roster_structure,
                     pool_limit=pool_limit, source=source, view=view, today=today,
                 )
+                if collect is not None:
+                    # The BOARD only — never ``board.swaps``: the matrix is lazy
+                    # and costs more than the whole rest of the scan, and this
+                    # path plans no claims to price (see WaiverArtifacts).
+                    collect.board = board
                 # The board's own disclosures (no projections knowable, the
                 # static-roster caveat, a tighter league limit, a degraded settings
                 # row) qualify the forced drop this branch is about to NAME — they
@@ -1721,7 +1906,7 @@ def build_waiver_plan(
                    f"undroppable list refuses that drop." if fenced else "")
             )
 
-        return WaiverPlan(
+        blocked_plan = WaiverPlan(
             legality=verdict,
             forced_drop=forced_drop,
             ir_move_fix=ir_move_fix,
@@ -1742,6 +1927,10 @@ def build_waiver_plan(
             league_limits=blocked_limits,
             ir_rule=ir_rule,
         )
+        if collect is not None:
+            collect.plan = blocked_plan
+            _capture_vintages(collect, conn, as_of=as_of, season=season, view=view)
+        return blocked_plan
 
     # --- legal path: ONE scan, then compose. -------------------------------------
     # Fetch the pool explicitly (single source, single as_of). Guard a leaked
@@ -1777,13 +1966,23 @@ def build_waiver_plan(
     swaps = board.swaps           # LAZY + expensive — touch ONCE, cache
     drop_board = tuple(_drop_rec(r) for r in board.ranked)
 
-    candidate_notes, candidate_err = _candidate_notes_by_espn(
-        conn, as_of=as_of, season=season, view=view, today=today,
+    evaluated = EvaluatedRows() if collect is not None else None
+    candidate_notes, candidate_err, candidate_board = _candidate_notes_by_espn(
+        conn, as_of=as_of, season=season, view=view, today=today, collect=evaluated,
+        history=history,
     )
     if candidate_err:
         notes.append(candidate_err)
+    if collect is not None:
+        collect.pool_rows = tuple(pool_rows)
+        collect.board, collect.swaps = board, tuple(swaps)
+        collect.candidates, collect.evaluated = candidate_board, evaluated
+        collect.candidate_notes = candidate_notes
+        collect.candidate_error = candidate_err
 
     open_slots = max(roster_structure.active_slots - verdict.active_count, 0)
+    if collect is not None:
+        collect.open_slots = open_slots
     chain = _select_claims(
         swaps, board=board, claim_budget=claim_budget, waiver_rank=waiver_priority,
         team_count=team_count, open_slots=open_slots,
@@ -1832,7 +2031,7 @@ def build_waiver_plan(
     notes.extend(_chain_notes(chain, claim_budget=claim_budget,
                               weeks=len(board.weeks)))
 
-    return WaiverPlan(
+    plan = WaiverPlan(
         legality=verdict,
         forced_drop=None,
         ir_move_fix=(),
@@ -1860,6 +2059,10 @@ def build_waiver_plan(
         league_limits=board.league_limits,
         ir_rule=ir_rule,
     )
+    if collect is not None:
+        collect.plan = plan
+        _capture_vintages(collect, conn, as_of=as_of, season=season, view=view)
+    return plan
 
 
 def _chain_notes(chain: _ChainResult, *, claim_budget: int, weeks: int) -> list[str]:

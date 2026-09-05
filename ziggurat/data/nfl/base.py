@@ -26,6 +26,7 @@ mean the same thing there. Nothing about ``select_as_of`` changed.
 import contextvars
 import functools
 import logging
+import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -801,3 +802,60 @@ def select_observed_as_of(
     """
     bound = {"as_of": cutoff, **(dict(params) if params else {})}
     return conn.execute(sql, bound).fetchall()
+
+
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def resolved_vintage(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    as_of,
+    view: AsOfView = "historical",
+    season: int | None = None,
+    season_col: str = "season",
+) -> str | None:
+    """The NEWEST ``retrieved_as_of`` this ``view`` can see in ``table`` at
+    ``as_of`` — "which pull of this source was in force when the tool ran".
+
+    Item 4.2b (B1). A decision archive has to record the DATA the decision was
+    priced off, not only the ``as_of`` it was gated at: a July projection pull
+    and a November one both carry a perfectly valid ``knowable_as_of`` and are
+    Rule-1-invisible from the output alone (the item-3.1b lesson). This is the
+    one honest summary of that, and it is deliberately a summary:
+
+    **It is NOT the vintage every row was served from.** ``select_as_of``
+    resolves ``MAX(retrieved_as_of)`` PER KEY, so a table can serve one player
+    from Tuesday's pull and another from a pull three weeks old (nothing
+    refreshed him). This returns the newest version any key could resolve to —
+    an upper bound on the freshness of the read, and the number that moves when
+    a new pull lands. A per-key distribution is a different (much more
+    expensive) question; when it matters, ask it explicitly.
+
+    ``None`` means the view can see NO row at all (an empty table, a pre-season
+    ``as_of``, or — the footgun ``latest_truth`` exists for — bulk history whose
+    ``retrieved_as_of`` is in the future of ``as_of`` under ``historical``).
+
+    Rule 1: ``as_of`` is keyword-only with no default and the safe ``historical``
+    view (which gates BOTH knowledge and retrieval time) is the default, exactly
+    as ``select_as_of``. ``table`` / ``season_col`` are code-authored SQL
+    identifiers and are validated as such rather than trusted.
+    """
+    if view not in AS_OF_VIEWS:
+        raise ValueError(f"unknown as-of view {view!r} (known: {AS_OF_VIEWS})")
+    for ident in (table, season_col):
+        if not _IDENTIFIER.match(ident):
+            raise ValueError(f"not a SQL identifier: {ident!r}")
+    cutoff = normalize_as_of(as_of).isoformat()
+    gate = "knowable_as_of <= :as_of"
+    if view == "historical":
+        gate += " AND retrieved_as_of <= :as_of"
+    params: dict = {"as_of": cutoff}
+    if season is not None:
+        gate += f" AND {season_col} = :season"
+        params["season"] = int(season)
+    row = conn.execute(
+        f"SELECT MAX(retrieved_as_of) FROM {table} WHERE {gate}", params
+    ).fetchone()
+    return row[0] if row else None

@@ -44,8 +44,8 @@ ships plain reasons, priors are quoted with their source and the word
 module, never imports from ``ziggurat/draft/``.
 """
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 from ziggurat.data.asof import normalize_as_of
@@ -56,7 +56,12 @@ from ziggurat.data.nfl.depth_charts import (
     qb1_change_candidates,
 )
 from ziggurat.data.nfl.snap_counts import get_snap_counts
-from ziggurat.data.nfl.usage import _combine_clubs, season_snap_lines, usage_deltas
+from ziggurat.data.nfl.usage import (
+    USAGE_METRICS,
+    _combine_clubs,
+    season_snap_lines,
+    usage_deltas,
+)
 from ziggurat.data.nfl.weekly_stats import get_weekly_stats
 from ziggurat.league import state as league_state
 
@@ -204,6 +209,11 @@ class CandidateRow:
     prior_week: int | None
     hypothesis: bool           # True for QB1_CHANGE (never validated)
     reasons: tuple[str, ...]
+    #: the NEW / REPEAT / WEEK 1 badge (item 4.2b, B3). A PRESENTATION label
+    #: computed from the freeze history AFTER every arm has run — it orders
+    #: nothing, prices nothing, and is empty on a row built outside
+    #: ``build_candidates``. See the episode section below.
+    episode_tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,6 +227,407 @@ class CandidateBoard:
 
     def by_kind(self, kind: str) -> tuple[CandidateRow, ...]:
         return tuple(r for r in self.rows if r.signal_kind == kind)
+
+
+# ------------------------------------------------- the evaluated-row collector
+
+# Which of the two usage paths evaluated a row (``_usage_arm``'s own fork).
+PATH_DIFFERENCED = "differenced"
+PATH_EMERGENCE = "emergence"
+
+# The raw target-week usage levels emitted beside the deltas. Exactly
+# ``usage.USAGE_METRICS`` — the columns the arm already reads — so the archive
+# carries the arm's own inputs, not a second selection. NOTE ``wopr`` is here
+# because the arm reads it, NOT because it decides anything: it is deliberately
+# absent from ``DEFAULT_BREAKOUT.floors`` (item 3.3 F8/F10 — it is a
+# deterministic echo of target_share and air_yards_share). The FLOORS are the
+# decision; a column in this table is evidence, never a rule.
+EVALUATED_LEVELS = USAGE_METRICS
+
+
+@dataclass(frozen=True)
+class EvaluatedRow:
+    """ONE evaluated RB/WR/TE player-week — flagged or NOT (item 4.2b, B1).
+
+    ``build_candidates`` returns only the survivors, so a false NEGATIVE (a
+    player the floors passed over) is invisible the moment the process exits and
+    can never be studied. This is the row ``_usage_arm`` already computed for
+    every player it looked at, handed out instead of discarded. Nothing here is
+    re-derived and no floor is re-implemented: a second flag rule outside the
+    module is two rules that can silently diverge.
+
+    ``flagged`` is the module's own verdict — True exactly when this row became a
+    ``CandidateRow`` in the USAGE_BREAKOUT block. ``floors_cleared`` is the
+    ``{metric: value}`` the arm cleared (empty on a non-flagged row); on the
+    ``differenced`` path the values are DELTAS, on the ``emergence`` path they
+    are ABSOLUTE levels, because those are the two different things the two sets
+    of floors are compared against (item 3.3 F1). ``magnitude`` is that path's
+    own sum of value/floor, i.e. 0.0 when nothing cleared.
+
+    Rule 1: ``as_of``/``view`` are the ones this row was PRODUCED at and travel
+    with it — a field must never be filled in later at a different gate (the
+    ``usage_deltas`` hand-over rule). Rule 2: no points column, and no floor of
+    any kind is stored as a number that reads like one.
+    """
+
+    season: int
+    week: int
+    prior_week: int | None
+    as_of: str
+    view: str
+    gsis_id: str | None
+    espn_id: str | None
+    player: str | None
+    position: str | None
+    team: str | None
+    #: ``d_<metric>`` for the eight USAGE_METRICS plus d_offense_snaps /
+    #: d_offense_pct, straight off ``usage_deltas``. ``None`` is UNKNOWN (no
+    #: prior game, or the snap crosswalk did not bridge) and is NEVER a real 0.0.
+    deltas: Mapping[str, float | None]
+    #: the TARGET week's raw usage (``EVALUATED_LEVELS``), as read.
+    levels: Mapping[str, float | None]
+    #: the target week's snap share, folded across clubs exactly as the arm folds
+    #: it. ``None`` = the pfr->gsis crosswalk or the snap row did not resolve.
+    snap_pct: float | None
+    #: ``snap_pct is not None`` — the item-4.2b S4 field. A row evaluated with an
+    #: unresolved snap share was judged on the OTHER floors alone; without this
+    #: the coverage question cannot be asked of the archive.
+    snap_resolved: bool
+    path: str                       # PATH_DIFFERENCED | PATH_EMERGENCE
+    floors_cleared: Mapping[str, float]
+    magnitude: float
+    flagged: bool
+    #: the row's reasons AFTER the injury pass has rewritten them (the arm's
+    #: return value is missing the beneficiary line — it is appended in place by
+    #: ``_injury_arm``/``_rewrite``). Empty on a non-flagged row: the module
+    #: writes no prose for a player it passed over.
+    reasons: tuple[str, ...] = ()
+
+    def as_record(self) -> dict:
+        """The FLAT row a writer serialises (item 4.2b, B2's payload).
+
+        One dict, deterministic key order, every metric its own key — so a
+        reader never has to know which nested map a column came from. This is a
+        rendering of what was collected; it computes nothing.
+        """
+        record: dict = {
+            "season": self.season, "week": self.week, "prior_week": self.prior_week,
+            "as_of": self.as_of, "view": self.view,
+            "gsis_id": self.gsis_id, "espn_id": self.espn_id,
+            "player": self.player, "position": self.position, "team": self.team,
+        }
+        for key in sorted(self.deltas):
+            record[key] = self.deltas[key]
+        for key in sorted(self.levels):
+            record[key] = self.levels[key]
+        record["snap_pct"] = self.snap_pct
+        record["snap_resolved"] = self.snap_resolved
+        record["path"] = self.path
+        record["floors_cleared"] = dict(sorted(self.floors_cleared.items()))
+        record["magnitude"] = self.magnitude
+        record["flagged"] = self.flagged
+        record["reasons"] = list(self.reasons)
+        return record
+
+
+@dataclass
+class EvaluatedRows:
+    """PASSIVE collector for the table above (item 4.2b, B1).
+
+    Pass one as ``build_candidates(..., collect=...)`` and it is filled with one
+    ``EvaluatedRow`` per evaluated player-week plus the floors that were IN FORCE
+    (Rule 6: the numbers a row was judged against travel with the rows, so an
+    archived board can never be read against the wrong hypothesis). Passing
+    nothing is the production path and costs nothing — no row is built, no extra
+    lookup is made, and the board is byte-identical either way.
+
+    It is a RECEIVER. It never decides what qualifies, never re-reads the
+    database, and nothing in the generator reads back out of it.
+    """
+
+    #: did the usage arm actually RUN with this collector attached? An empty
+    #: ``rows`` otherwise means two different things — "it evaluated nobody" and
+    #: "it never got that far" (a pre-season ``NoCompletedWeek``, or the degrade
+    #: path in ``waiver._candidate_notes_by_espn``) — and an archive that cannot
+    #: tell them apart records an absence as if it were a measurement.
+    ran: bool = False
+    rows: list[EvaluatedRow] = field(default_factory=list)
+    season: int | None = None
+    week: int | None = None
+    as_of: str | None = None
+    view: str | None = None
+    positions: tuple[str, ...] = ()
+    #: the DIFFERENCED floors in force and their provenance (Rule 6).
+    floors: Mapping[str, float] | None = None
+    floors_label: str = ""
+    floors_source: str = ""
+    #: the ABSOLUTE role-emergence floors in force, and the sentence that
+    #: discloses whether they are the shipped hypothesis or a tuning setting.
+    emergence_floors: Mapping[str, float] | None = None
+    emergence_label: str = ""
+
+    @property
+    def flagged(self) -> tuple[EvaluatedRow, ...]:
+        return tuple(r for r in self.rows if r.flagged)
+
+    def flagged_keys(self) -> frozenset[str]:
+        """The IDENTITIES of the flagged rows (not a count).
+
+        ``gsis_id`` when there is one, else the same ``?:<team>`` fallback the
+        arm builds its ``player_key`` from, so this set can be compared
+        element-for-element with ``board.by_kind(SIGNAL_USAGE)``.
+        """
+        return frozenset(r.gsis_id or f"?:{r.team}" for r in self.flagged)
+
+    def attach_final_reasons(self, usage_rows: Sequence[CandidateRow]) -> None:
+        """Re-read the flagged rows' reasons AFTER the injury pass (B1).
+
+        ``_injury_arm`` appends the beneficiary line to a usage row IN PLACE
+        (``_rewrite``), so a snapshot taken inside ``_usage_arm`` is missing it.
+        Matched on ``gsis_id`` — the same key ``_rewrite`` itself uses, so this
+        reaches exactly the rows that pass can rewrite and no others.
+        """
+        final = {r.gsis_id: r.reasons for r in usage_rows if r.gsis_id}
+        self.rows = [
+            replace(row, reasons=final[row.gsis_id])
+            if row.flagged and row.gsis_id in final else row
+            for row in self.rows
+        ]
+
+
+def _collect_evaluated(
+    collect: EvaluatedRows, *, d: Mapping, raw, snap_pct: float | None, path: str,
+    hits: Mapping[str, float], magnitude: float, flagged: bool,
+    espn_id: str | None, player: str | None, season, week, as_of, view,
+) -> None:
+    """Hand ONE evaluated row to the collector. Called only when a collector was
+    passed, so the production path pays nothing for it."""
+    gsis = d["player_id"]
+    collect.rows.append(EvaluatedRow(
+        season=int(season), week=int(week), prior_week=d["prior_week"],
+        as_of=normalize_as_of(as_of).isoformat(), view=str(view),
+        gsis_id=gsis, espn_id=espn_id, player=player,
+        position=d["position"], team=d["team"],
+        deltas={k: v for k, v in d.items() if k.startswith("d_")},
+        levels={m: (None if raw is None else raw[m]) for m in EVALUATED_LEVELS},
+        snap_pct=snap_pct, snap_resolved=snap_pct is not None,
+        path=path, floors_cleared=dict(hits), magnitude=magnitude, flagged=flagged,
+    ))
+
+
+# ----------------------------------------------------- the NEW / REPEAT episode
+
+# A LABELLED HYPOTHESIS (item 4.2b §2.3), and a PRESENTATION label only: it
+# orders nothing, prices nothing, and is never an input to a claim chain.
+#
+# THE RULE. An episode of a signal ENDS after a gap of MORE THAN
+# ``EPISODE_GAP_WEEKS`` weeks, counted ONLY over the weeks the player was
+# EVALUATED. A bye or an inactive week is not a gap: ``usage_deltas`` emits no
+# row for him at all, and "he was on bye" is not "the signal stopped" (measured:
+# 52 of 433 one-week gaps on the 2025 backfill, 12.0%, are weeks the player was
+# never evaluated).
+#
+# WHY THIS GAP AND NOT ANOTHER. Measured on the 2025 usage arm (414 distinct
+# players, 2,006 flag-rows, median gap 2.0), the NEW share is 70.3% at gap>1,
+# **48.7% at gap>2**, 36.4% at gap>3 and 20.6% at one-episode-per-season — a
+# 50-point spread, which makes this the most consequential free parameter in the
+# whole presentation change. It is NOT tuned to outcomes; nothing was graded to
+# pick it. That is why the number and its provenance are printed beside the
+# badge (Rule 6) instead of being assumed.
+#
+# WHAT IS STORED. The freeze stores the RAW per-week flag history, never only
+# the badge, so any other rule (gap>1/3/4, rostered-ends-it, acted-on-ends-it,
+# role reversion, a fixed 4-week horizon matching 4.2c's window) is recomputable
+# from the archive without re-deciding anything here. ``episode_tag_for`` takes
+# ``gap_weeks`` for exactly that reason.
+EPISODE_GAP_WEEKS = 2
+
+#: The three badges. Week 1 gets its OWN, because week 1 is the all-emergence
+#: regime: on the 2025 backfill 321 of 321 evaluated rows carried
+#: ``prior_week=None`` and the top of the board is established starters, so
+#: marking 158 of them "NEW" would be a false claim of novelty on exactly the
+#: day the archive begins.
+EPISODE_NEW = "NEW"
+EPISODE_WEEK1 = "WEEK 1"
+#: With no archive at all the honest badge is NOT "NEW" — nothing was compared.
+EPISODE_FIRST_SEEN = "FIRST SEEN (no archive yet)"
+
+EPISODE_WEEK1_NOTE = (
+    "WEEK 1 — first game of the season; every row is a first observation, not a "
+    "role change"
+)
+EPISODE_LABEL = (
+    f"hypothesis: an episode ends after a gap of more than {EPISODE_GAP_WEEKS} "
+    "EVALUATED weeks (bye/inactive weeks do not count); this rule labels ~49% of "
+    "2025 flag-rows NEW, against 70% at gap>1 and 21% at one-per-season. NOT "
+    "tuned to outcomes (item 4.2b, the archive stores the raw history so any "
+    "other rule is recomputable)"
+)
+EPISODE_LEGEND = (
+    f"FIRST SEEN: {EPISODE_NEW} = the signal has not fired for him recently; "
+    f"REPEAT (also wk N) = it fired in wk N, within the last "
+    f"{EPISODE_GAP_WEEKS} weeks he was evaluated. A label, never a ranking "
+    f"({EPISODE_LABEL})."
+)
+
+
+def episode_legend(week: int | None) -> str:
+    """The ONE legend sentence both surfaces print (``ziggurat candidates`` /
+    the briefing SIGNALS block, and the waiver evidence block).
+
+    In week 1 every badge is the same, so the NEW/REPEAT legend would be noise
+    and the week-1 sentence is what a reader needs instead."""
+    return EPISODE_WEEK1_NOTE if week is not None and int(week) <= 1 else EPISODE_LEGEND
+
+
+def _repeat_tag(week: int) -> str:
+    return f"REPEAT (also wk {int(week)})"
+
+
+def _unbounded_new_tag(missing: int) -> str:
+    """NEW, with the archive hole that makes it a bound rather than a fact.
+
+    An absence is only a fact when you know it is one (the item-3.2c tombstone
+    lesson): a flag FOUND is positive evidence whatever the coverage, but "no
+    flag" is only NEW if the weeks that could have carried one were archived."""
+    return f"{EPISODE_NEW} (no archive for {missing} earlier wk(s))"
+
+
+@dataclass(frozen=True)
+class WeekFlags:
+    """ONE archived week, as the episode rule needs it (item 4.2b, B3).
+
+    ``evaluated`` and ``flagged`` hold ``episode_key`` strings — the signal kind
+    and the generator's own ``player_key``, joined — so an injury shock and a
+    usage breakout for the same man are separate episodes (they are separate
+    signals, and "REPEAT" must mean *this* signal fired again).
+
+    Build one with ``week_flags`` rather than by hand: the key rule lives in one
+    place on purpose. A reader that invents its own key is a second identity
+    rule that can silently diverge from the generator's.
+    """
+
+    week: int
+    evaluated: frozenset[str]
+    flagged: frozenset[str]
+
+
+def episode_key(kind: str, player_key: str) -> str:
+    return f"{kind}:{player_key}"
+
+
+def evaluated_episode_key(row: EvaluatedRow) -> str:
+    """The episode key of an EVALUATED (flagged or not) usage row — the same
+    ``player_key`` rule ``_usage_arm`` uses for the ``CandidateRow`` it may or
+    may not emit for him."""
+    return episode_key(SIGNAL_USAGE, row.gsis_id or f"?:{row.team}")
+
+
+def week_flags(board: CandidateBoard,
+               evaluated_rows: Iterable[EvaluatedRow] = ()) -> WeekFlags:
+    """One week's ``WeekFlags`` from a board plus that week's evaluated rows.
+
+    The archive holds both; this is the reader's constructor so the key rule is
+    not re-implemented outside the module. ``evaluated_rows`` may be empty (an
+    older capture with no evaluated table) — a flagged key is always evaluated
+    by construction, so the rule still runs, it just cannot see the weeks a
+    player was looked at and passed over.
+    """
+    flagged = frozenset(episode_key(r.signal_kind, r.player_key) for r in board.rows)
+    evaluated = frozenset(evaluated_episode_key(r) for r in evaluated_rows)
+    return WeekFlags(week=int(board.week), evaluated=evaluated | flagged, flagged=flagged)
+
+
+def _week_counts(kind: str, key: str, wf: WeekFlags) -> bool:
+    """Does ``wf`` count as one of the player's EVALUATED weeks?
+
+    For the usage arm the answer is a fact we hold: ``usage_deltas`` emits a row
+    per player-week it looked at, and emits nothing for a bye or an inactive.
+    The injury and QB1 arms scan a fixed universe every week — there is no
+    per-player 'not evaluated' state — so every archived week counts for them.
+    """
+    if kind == SIGNAL_USAGE:
+        return key in wf.evaluated
+    return True
+
+
+def episode_tag_for(
+    kind: str,
+    player_key: str,
+    *,
+    week: int,
+    history: Sequence[WeekFlags],
+    gap_weeks: int = EPISODE_GAP_WEEKS,
+) -> str:
+    """The NEW / REPEAT / WEEK 1 badge for one flagged row. Pure.
+
+    ``history`` is the archived weeks (any order; weeks at or after ``week`` are
+    ignored). ``gap_weeks`` is the rule itself, a parameter so the SAME archive
+    can be re-judged under a different rule without re-deciding anything — the
+    badge is a view of the stored history, never a fact stored in place of it.
+    """
+    if int(week) <= 1:
+        return EPISODE_WEEK1
+    key = episode_key(kind, player_key)
+    prior = sorted((w for w in history if int(w.week) < int(week)),
+                   key=lambda w: -int(w.week))
+    if not prior:
+        return EPISODE_FIRST_SEEN
+    steps, window_closed = 0, False
+    for wf in prior:
+        hit = key in wf.flagged
+        if not hit and not _week_counts(kind, key, wf):
+            continue                      # bye / inactive: not a gap week
+        steps += 1
+        if hit:
+            # A flag inside the window continues the episode; outside it, the
+            # episode had already ended and this is a new one.
+            return _repeat_tag(wf.week) if steps <= gap_weeks else EPISODE_NEW
+        if steps >= gap_weeks:
+            window_closed = True          # the window shut with no flag in it
+            break
+    if window_closed:
+        # Nothing earlier can change this: the episode ended inside the weeks we
+        # DO hold, whatever the archive is missing before them.
+        return EPISODE_NEW
+    covered = {int(w.week) for w in prior}
+    missing = len(set(range(1, int(week))) - covered)
+    return _unbounded_new_tag(missing) if missing else EPISODE_NEW
+
+
+class EpisodeHistoryError(RuntimeError):
+    """The history provider failed. The scan degrades to un-badged rows and says
+    so; it never takes the board down (the badge is context, the board is the
+    decision)."""
+
+
+#: What ``build_candidates(history=...)`` accepts: a callable invoked ONCE as
+#: ``history(season=<int>, before_week=<int>)`` and returning the archived
+#: ``WeekFlags`` for that season's weeks before ``before_week``. It is a callable
+#: rather than a sequence so the generator never pays for a read it does not
+#: need, and so ``ziggurat/core/`` keeps its import edges (the archive reader
+#: lives in ``ziggurat/decisions/``, which core must not import).
+EpisodeHistory = Callable[..., Sequence[WeekFlags]]
+
+
+def _tag_rows(rows: Sequence[CandidateRow], *, season: int, week: int,
+              history: EpisodeHistory | None) -> tuple[list[CandidateRow], str | None]:
+    """Badge every row. Returns (rows, note) — ``note`` is a novice-legible
+    sentence when the archive could not be read, never a silent empty badge."""
+    if int(week) <= 1:
+        return [replace(r, episode_tag=EPISODE_WEEK1) for r in rows], None
+    if history is None:
+        return [replace(r, episode_tag=EPISODE_FIRST_SEEN) for r in rows], None
+    try:
+        archived = tuple(history(season=int(season), before_week=int(week)))
+    except Exception as exc:  # noqa: BLE001 — degrade LOUDLY, never crash the scan
+        note = (f"FIRST SEEN badges UNAVAILABLE — the decision archive could not be "
+                f"read ({type(exc).__name__}: {exc}); every row below reads "
+                f"'{EPISODE_FIRST_SEEN}'. That is a degrade, not 'nothing has fired "
+                f"before'.")
+        return [replace(r, episode_tag=EPISODE_FIRST_SEEN) for r in rows], note
+    return [replace(r, episode_tag=episode_tag_for(
+        r.signal_kind, r.player_key, week=week, history=archived)) for r in rows], None
 
 
 # ------------------------------------------------------------- week resolution
@@ -317,7 +728,8 @@ def _emergence_hits(raw, snap_pct: float | None,
 
 
 def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
-               emergence_floors: Mapping[str, float] = EMERGENCE_FLOORS):
+               emergence_floors: Mapping[str, float] = EMERGENCE_FLOORS,
+               collect: EvaluatedRows | None = None):
     """USAGE_BREAKOUT rows. ``names`` maps gsis_id -> display name (Rule 6:
     usage_deltas / weekly_stats carry NO name column).
 
@@ -335,6 +747,12 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
     the floors in force ARE the shipped ones — otherwise it names the floors in
     force and says they are a tuning setting, so a tuned run never wears the
     default hypothesis's provenance (``_emergence_label``).
+
+    ``collect`` (item 4.2b, B1) is an optional passive ``EvaluatedRows``: every
+    row this arm LOOKS AT is handed to it — the ones that clear a floor and the
+    ones that do not — because a false negative is unstudyable the moment the
+    non-qualifiers are dropped. It changes no verdict, no reason and no order,
+    and ``None`` (every production caller) builds nothing.
 
     COST (item 4.1 audit, COST-1): the season-to-date stat and snap frames are
     read ONCE here and handed to ``usage_deltas`` per position (``stats=`` /
@@ -354,6 +772,16 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
         conn, as_of=as_of, season=season, week=week, view=view,
         gsis_ids={r["player_id"] for r in stats if r["position"] in positions})
     emergence_label = _emergence_label(emergence_floors)
+    if collect is not None:
+        collect.ran = True
+        collect.season, collect.week = int(season), int(week)
+        collect.as_of = normalize_as_of(as_of).isoformat()
+        collect.view = str(view)
+        collect.positions = tuple(positions)
+        collect.floors = dict(thresholds.floors)
+        collect.floors_label, collect.floors_source = thresholds.label, thresholds.source
+        collect.emergence_floors = dict(emergence_floors)
+        collect.emergence_label = emergence_label
     rows: list[CandidateRow] = []
     for position in positions:
         for d in usage_deltas(conn, as_of=as_of, season=season, week=week,
@@ -362,10 +790,17 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
             if d["prior_week"] is None:
                 # ROLE EMERGENCE — no prior week to difference (F1).
                 raw = raw_usage.get(gsis)
-                if raw is None:
-                    continue
-                hits = _emergence_hits(raw, snap_pct.get(gsis), emergence_floors)
-                if not hits:
+                hits = ({} if raw is None
+                        else _emergence_hits(raw, snap_pct.get(gsis), emergence_floors))
+                if collect is not None:
+                    _collect_evaluated(
+                        collect, d=d, raw=raw, snap_pct=snap_pct.get(gsis),
+                        path=PATH_EMERGENCE, hits=hits,
+                        magnitude=sum(v / emergence_floors[m] for m, v in hits.items()),
+                        flagged=raw is not None and bool(hits),
+                        espn_id=espn_of.get(gsis), player=names.get(gsis, gsis or "?"),
+                        season=season, week=week, as_of=as_of, view=view)
+                if raw is None or not hits:
                     continue
                 usage_bits = ", ".join(_fmt_delta_abs(m, v) for m, v in sorted(
                     hits.items(), key=lambda kv: -kv[1] / emergence_floors[kv[0]]))
@@ -386,6 +821,13 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
                 ))
                 continue
             hits = thresholds.qualifies(d)
+            if collect is not None:
+                _collect_evaluated(
+                    collect, d=d, raw=raw_usage.get(gsis), snap_pct=snap_pct.get(gsis),
+                    path=PATH_DIFFERENCED, hits=hits,
+                    magnitude=thresholds.magnitude(hits), flagged=bool(hits),
+                    espn_id=espn_of.get(gsis), player=names.get(gsis, gsis or "?"),
+                    season=season, week=week, as_of=as_of, view=view)
             if not hits:
                 continue
             reason_bits = ", ".join(_fmt_delta(m, v) for m, v in sorted(
@@ -723,6 +1165,8 @@ def build_candidates(
     today=None,
     thresholds: BreakoutThresholds | None = None,
     emergence_floors: Mapping[str, float] | None = None,
+    collect: EvaluatedRows | None = None,
+    history: EpisodeHistory | None = None,
 ) -> CandidateBoard:
     """The weekly candidate scan (item 3.3). Rule 1: ``as_of`` keyword-only, no
     default; ``view`` threaded into EVERY accessor.
@@ -740,6 +1184,19 @@ def build_candidates(
     ``None`` means the shipped ``DEFAULT_BREAKOUT`` / ``EMERGENCE_FLOORS``, so the
     production CLI and every no-arg caller are row-for-row unchanged. The label a
     caller passes travels into the reason text (Rule 6).
+
+    ``collect`` (item 4.2b, B1) is an optional passive ``EvaluatedRows``. Pass one
+    and it comes back holding EVERY evaluated RB/WR/TE player-week — the flagged
+    rows and the ones the floors passed over — plus the floors that judged them.
+    The board this function returns is byte-identical either way; that is pinned
+    by test, because a collector that changes an answer is a second generator.
+
+    ``history`` (item 4.2b, B3) is the decision archive's flag history, as a
+    callable invoked once — ``history(season=..., before_week=...)`` returning
+    ``WeekFlags``. It fills the NEW / REPEAT badge and NOTHING else: no row is
+    ordered, ranked, added or removed by it, and passing nothing (every caller
+    that has no archive) badges every row ``FIRST SEEN (no archive yet)`` rather
+    than claiming novelty it did not check.
 
     The 2025 validation path binds the WHOLE generator once:
     ``base.latest_truth(build_candidates)(conn, as_of=..., season=2025, week=W)``.
@@ -776,9 +1233,13 @@ def build_candidates(
     usage_rows = _usage_arm(conn, as_of=as_of, season=season, week=week,
                             positions=scan_positions, view=view,
                             thresholds=thresholds, names=names,
-                            emergence_floors=emergence_floors)
+                            emergence_floors=emergence_floors, collect=collect)
     injury_rows = _injury_arm(conn, as_of=as_of, season=season, week=week,
                               view=view, usage_rows=usage_rows)
+    if collect is not None:
+        # AFTER the injury pass, never before: it rewrites a beneficiary's reasons
+        # in place, so a snapshot taken inside the arm is missing that line (B1).
+        collect.attach_final_reasons(usage_rows)
     qb1_rows, qb1_note = _qb1_arm(conn, as_of=as_of, season=season, since=since, view=view)
 
     # Rank WITHIN each kind by magnitude (descending). Python's sort is stable, so
@@ -787,7 +1248,15 @@ def build_candidates(
     for group in (usage_rows, injury_rows, qb1_rows):
         ordered.extend(sorted(group, key=lambda r: -r.magnitude))
 
+    # The NEW / REPEAT badge, LAST and on the already-ordered rows (item 4.2b,
+    # B3): it is a label on a decision that has already been made. Tagging
+    # before the sort would put a presentation string inside the ranking path,
+    # which is the one thing the header on both surfaces promises it is not.
+    ordered, episode_note = _tag_rows(ordered, season=season, week=week, history=history)
+
     notes: list[str] = []
+    if episode_note:
+        notes.append(episode_note)
     if _week_is_partial(conn, as_of=as_of, season=season, week=week, view=view):
         notes.append(
             f"PARTIAL WEEK: week {week}'s games are not all played/knowable at "
@@ -832,11 +1301,31 @@ def _freshness_lines(conn, *, season, as_of, today) -> list[str]:
 
 # --------------------------------------------------------------------- display
 
+# EXTENDED, never renamed (item 4.2b, B3): every existing pin matches on the
+# leading literal, and a rename would have rotted five of them for a wording
+# change. The added clause is what the block IS — evidence, not a shopping list.
 _KIND_TITLE = {
-    SIGNAL_USAGE: "USAGE BREAKOUTS (role/volume change vs the prior week)",
-    SIGNAL_INJURY: "INJURY SHOCKS (vacated roles — beneficiaries are committee-safe)",
-    SIGNAL_QB1: "QB1-CHANGE HYPOTHESIS (labelled; precision never measured)",
+    SIGNAL_USAGE:
+        "USAGE BREAKOUTS — usage/role evidence "
+        "(role/volume change vs the prior week)",
+    SIGNAL_INJURY:
+        "INJURY SHOCKS — usage/role evidence "
+        "(vacated roles — beneficiaries are committee-safe)",
+    SIGNAL_QB1:
+        "QB1-CHANGE HYPOTHESIS — usage/role evidence "
+        "(labelled; precision never measured)",
 }
+
+# The banner both this page and the briefing SIGNALS block print, directly under
+# the SIGNAL legend. It is the same promise the waiver page's
+# ``USAGE_EVIDENCE_HEADER`` makes, in the place a reader of THIS page needs it:
+# nothing here re-orders a claim. Never, in any form: "the market will agree with
+# this by Friday" — that sentence was never shipped and the relabel must not
+# smuggle it back as "the market usually follows".
+USAGE_EVIDENCE_BANNER = (
+    "USAGE / ROLE EVIDENCE — does not change the claim order: `ziggurat waivers` "
+    "prices and orders the claims; nothing on this page re-orders them."
+)
 
 
 def format_candidates(board: CandidateBoard, *, top: int | None = None,
@@ -857,6 +1346,11 @@ def format_candidates(board: CandidateBoard, *, top: int | None = None,
     # blocks use different scales (usage sums delta/floor; injury is a fixed
     # severity), so it must never read as a points projection.
     out.append("  (SIGNAL = within-block ranking key, higher = stronger; NOT fantasy points)")
+    # The two banner lines (item 4.2b, B3). The legend line above is UNCHANGED —
+    # it is pinned twice and still true; these are inserted after it, never in
+    # place of it.
+    out.append(f"  {USAGE_EVIDENCE_BANNER}")
+    out.append(f"  {episode_legend(board.week)}")
     out.append("")
 
     for kind in (SIGNAL_USAGE, SIGNAL_INJURY, SIGNAL_QB1):
@@ -867,11 +1361,13 @@ def format_candidates(board: CandidateBoard, *, top: int | None = None,
             out.append("")
             continue
         shown = group if top is None else group[:top]
-        out.append(f"  {'PLAYER':<24} {'POS':<4} {'TEAM':<5} {'SIGNAL':>7}")
+        out.append(f"  {'PLAYER':<24} {'POS':<4} {'TEAM':<5} {'SIGNAL':>7}  "
+                   f"{'FIRST SEEN'}")
         for r in shown:
-            tag = "  [HYPOTHESIS]" if r.hypothesis else ""
-            out.append(f"  {(r.player or '?')[:24]:<24} {(r.position or ''):<4} "
-                       f"{(r.team or ''):<5} {r.magnitude:>7.2f}{tag}")
+            hyp = "  [HYPOTHESIS]" if r.hypothesis else ""
+            out.append((f"  {(r.player or '?')[:24]:<24} {(r.position or ''):<4} "
+                        f"{(r.team or ''):<5} {r.magnitude:>7.2f}  "
+                        f"{r.episode_tag}{hyp}").rstrip())
             if reasons:
                 out.extend(f"      - {reason}" for reason in r.reasons)
         if top is not None and len(group) > top:
