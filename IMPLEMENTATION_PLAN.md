@@ -4173,6 +4173,100 @@ says.
 > the brief; the build proceeds on the recommendations in an isolated
 > worktree against a scratch DB copy, and NOTHING touches the production
 > tree, its DB or the timers until the operator approves the merge.
+> **Wave 1 BUILT and gated, 2026-09-05** — in the isolated worktree
+> (`wt/4.2b-decision-archive`, base `a37ab3d`), 13 Opus agents: six unit
+> builders in three lanes, one integration agent, four refute-first
+> auditors (rules/boundaries, design conformance, tests/determinism with 19
+> mutation experiments, operations/Rule 6 run live against the scratch DB),
+> one fixer, one gate. **8 commits, 48 files, +11,416 / −86; full suite
+> 3,106 passed / 5 skipped** (base 2,856 / 4; the extra skip is an
+> environment gate, none of the 4.2b tests skip); ruff clean on every touched
+> file; `repo_guard` clean over 48 paths; production tree, DB and timers
+> untouched (proven by the gate). What landed: `ziggurat/decisions/`
+> ({capture,store,read}.py, 1,949 lines) + `ziggurat decisions
+> {freeze,status,verify}` + always-on capture inside `ziggurat waivers`
+> (+0.15 s on 24.3 s, ~450 KB/capture) + the Tue 18:30 unit and
+> `scripts/install-decisions.sh` (NOT installed); collector seams
+> `WaiverArtifacts` / `EvaluatedRows` (35 fields per evaluated row, pinned by
+> IDENTITY against the shipped board on 2025 wk1/5/9/18 = 158/108/91/134;
+> collector=None byte-identical, measured on the real 37,071-byte page) and a
+> new Rule-1 accessor `base.resolved_vintage`; the episode rule
+> (`episode_tag_for`: NEW / REPEAT / FIRST SEEN / WEEK 1, gap > 2 EVALUATED
+> weeks, labelled hypothesis with its 2025 provenance) + the seven
+> presentation strings + the journal block in `templates/`; `ff_opportunity`
+> (`ffopp_weekly`, migration 015, gameday-stamped 100 %, parquet mirror,
+> `OpportunityCollapse`, `model_version` change raises, `mirror_only()` for
+> 2021–25 as an operator step); `fp_weekly_ecr` (migration 016, DynastyProcess
+> twice-daily file, `week_basis` provenance, the FantasyPros page opt-in via
+> `ZIGGURAT_FP_WEEK_PAGE=1`, default OFF); the Tue/Thu vintage units
+> (`ziggurat-nfl-ingest-vintage-{tue,thu}`, decide()-across-a-week simulated
+> both ways) + `acquisition_at` (ms) and `related_transaction_id` (migration
+> 017); `decision_freezes` run log (018). Migrations 015–018 pinned; schema
+> 14 → 18 on the scratch copy. Audit: **37 findings (1 critical, 9 major),
+> 36 fixed, 1 refuted** — the critical was two temporary source mutations a
+> concurrent lens had not restored (restored, tree clean); the fixer's
+> record follows. **NOT merged**: awaiting the operator's D1/D2/D4 answers
+> and the merge itself. Open, carried: `decision_freezes.candidate_week`
+> needs migration 019 (Wave 2); `core/briefing.py` history wiring goes
+> through `push/run.py` (this session); the LIVE journal template
+> (gitignored, never overwritten by `scaffold`) must be hand-synced; the
+> `mirror_only` step for 2021–25; the two installers; D2(b)'s env flag.
+> **The intermediate commits are not individually green by construction**
+> (the migration pins land at the integration commit); HEAD is what was
+> measured.
+>
+> Audit-fix round, 2026-09-05 (commit `0c222a5`). 36 of 37 findings applied,
+> one refused; no recommendation, gain or ordering moves. **The headline is
+> that the freeze archived the usage arm and nothing else** — the
+> INJURY_SHOCK and QB1_CHANGE arms survived only as the integer
+> `board_rows`, so their reason text and their `player_key` (the episode key
+> the whole NEW/REPEAT rule is built on) died with the process on a Tuesday
+> that cannot be re-taken. `board.jsonl` now holds them, and with it the
+> reader that makes the badge a comparison: `read.week_flags_history` walks
+> the archive, verifies each manifest and rebuilds `WeekFlags` through
+> `candidates.week_flags` itself, and the `waivers` / `candidates` /
+> `decisions freeze` CLI bodies pass it as `history=`. The badge had shipped
+> INERT and SILENT: `history is None` was the one branch of three that
+> produced no note, and it was the branch production took, under a legend
+> explaining NEW and REPEAT above rows that all read FIRST SEEN.
+> Second: the two market probes reported a market the run could not read.
+> They gated `knowable_as_of` only — no retrieval gate, no per-key
+> resolution — beside a printed `"view"`. Measured on the live database:
+> 3,516 `fpecr_panel` wp rows for 2023 at as_of 2023-11-01 against ZERO the
+> historical view can serve, and a five-row board pulled on three days
+> counted as fifteen. Both now go through the source's own as-of accessor,
+> and `market.json` records the day's fp_weekly BOARD rather than its
+> cardinality, which is what the design decided. Third: a failed Tuesday
+> left no fact — every pre-plan failure (expired ESPN cookies above all)
+> exited before `start_capture`, so `decisions status` showed nothing at all
+> while the unit file asserted a failure is visible three ways. The run-log
+> row is now written before the plan, and `capture.record_prerun_failure`
+> covers the credential path the CLI resolves earlier still.
+> Recorded deviations from the design brief: (a) it said the run log carries
+> no as-of columns; `plan_as_of` is the run PARAMETER — the gate the plan ran
+> at — kept so `decisions status` can say which gate a capture ran at, and
+> asserted never to reach `select_as_of`. (b) `trigger` is a THREE-value
+> vocabulary, `waivers` | `cli` | `timer`; the brief named two — `waivers` is
+> the always-on capture inside `ziggurat waivers`, the dominant path.
+> (c) `crosswalk_vintage` stays an UNGATED `MAX(retrieved_as_of)` and that is
+> correct: the crosswalk accessors read `players` at-now with no as-of gate
+> by design, so a gated number would record a vintage the run did NOT use —
+> the audit finding asking to gate it was examined and refuted. (d)
+> `ff_opportunity.mirror_only(season, path)` fetches a past season's asset
+> and ingests nothing, so 4.2c gets `ep_weekly_2021..2025` without anyone
+> relaxing `BACKFILL_EXCLUDED`; no CLI or registry entry by design.
+> **Standing lesson this round paid for: a boundary guard that inspects the
+> wrong attribute is indistinguishable from one that works.**
+> `test_nothing_in_the_package_imports_backtest` read `getattr(n, "module",
+> "")` on every node — and an `ast.Import` has no `.module`, so a plain
+> `import backtest.decisions` evaluated to `""` and the guard only ever
+> caught the `from backtest ... import ...` shape, while a correct scanner
+> sat ten lines above it in the same file. Four mechanisms in this wave had
+> no test that could distinguish them from their absence; three are now
+> mutation-verified (the freeze timer's ExecStart, that import guard, and
+> the chain's order-inertness — stated structurally, because a TIE-BREAK
+> promotion fires only on exactly equal gains and passed both behavioural
+> pins).
 
 ### 4.2c [Experiment] Realised-points instrument — pre-registered (added 2026-09-04; opens 2026-09-15)
 **Goal:** Replace market-rank movement as the PRIMARY objective with what the

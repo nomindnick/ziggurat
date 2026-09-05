@@ -20,6 +20,7 @@ import os
 from ziggurat.core import alerts as alerts_mod
 from ziggurat.core import briefing as briefing_mod
 from ziggurat.data.nfl import news as news_mod
+from ziggurat.decisions import read as decisions_read
 from ziggurat.paths import INTEL_DIR
 from ziggurat.push import outbound, runs
 
@@ -106,6 +107,10 @@ def run_briefing(
         brief = briefing_mod.build_briefing(
             conn, as_of=as_of, season=season, own_team_id=own_team_id,
             week=week, last_week=last_week, claim_budget=claim_budget, today=today or as_of,
+            # The NEW / REPEAT badge's comparison set (item 4.2b). A callable, so the
+            # composer in core/ never imports decisions/; the Wednesday SIGNALS block
+            # is the surface a stale badge would mislead on.
+            history=decisions_read.episode_history_provider(),
         )
         full_md = briefing_mod.format_briefing(brief)
 

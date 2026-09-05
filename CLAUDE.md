@@ -1359,9 +1359,13 @@ source that `ingest status` calls stale and that feeds today's decision gets
 disclosed alongside the recommendation, not silently priced through.
 
 On a Tuesday, also run `.venv/bin/ziggurat decisions status`. Unlike an empty
-alert tick, an EMPTY capture log is NOT healthy: it means no Tuesday has ever
-been archived on this box, and a Tuesday that is not captured cannot be
-reconstructed later (item 3.1).
+alert tick, a capture log with NO ROW FOR TODAY is not healthy, and an empty one
+is worse: it means no Tuesday has ever been archived on this box. The report now
+prints LAST CAPTURE (with its age in days) and MISSING TUESDAYS — every Tuesday
+since the first capture that has none — in the same UNRECOVERABLE register
+`league status` uses, because here the word is literal: `league_player_state`
+accumulates forward only (item 3.1) and six market sources serve the current
+value only (item 3.1b, as amended by 4.2b).
 
 Two output notes: (1) `'empty' is healthy` refers to empty alert TICKS — the
 distinct string `no push runs recorded yet` means the push layer has never run
@@ -1380,6 +1384,13 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    `journalctl --user -u ziggurat-nfl-ingest-vintage-tue.service -n 20`, and
    journal a missed one: the Tuesday copy of that week's stats cannot be
    re-taken.
+   Check the OTHER half in the same breath — `journalctl --user -u
+   ziggurat-nfl-ingest-vintage-thu.service -n 20`. A missing THURSDAY is the
+   silent one: Tuesday keeps anchoring the interval gate, so every later read
+   serves the EARLY copy while `ingest status` reads `fresh` throughout.
+   `ziggurat ingest status` now closes with a VINTAGE PAIR footer that names a
+   Tuesday with no Thursday after it (item 4.2b audit, OPS-5); it is silent
+   before either unit has ever fired.
 2. `.venv/bin/ziggurat waivers --reasons --claim-budget 10` — the deeper
    budget is deliberate: `--claim-budget` is the CEILING on the whole claim
    chain, and the quick-scan default of 3 can cut it off while the last line
@@ -1421,9 +1432,13 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    for him recently; **REPEAT (also wk N)** = it fired in wk N, within the last
    2 weeks he was EVALUATED (a bye or an inactive week is not a gap — he was
    never looked at). In week 1 every row reads **WEEK 1** instead, because week
-   1 is every player's first observation, not a role change. With no decision
-   archive yet the badge is **FIRST SEEN (no archive yet)** — an absence of
-   comparison, never a claim of novelty.
+   1 is every player's first observation, not a role change. The archive reader is wired (item 4.2b audit, DC-2), so the badge goes live
+   as soon as a SECOND Tuesday has been captured. Until then every row reads
+   **FIRST SEEN (no archive yet)** and the page prints its own note saying which
+   of three things happened — no reader was wired on this surface, the archive
+   holds no earlier week, or the read failed and here is the error. That is an
+   absence of comparison, never a claim of novelty; if you see the note when
+   captures do exist, read the reason it gives.
    Where the two tools disagree, surface the disagreement — never smooth it
    over — and **journal whether any bullet here changed what you
    recommended**; a "no" week is still a data point, because it is the only
@@ -1549,6 +1564,13 @@ correct, not broken. `candidates` is the exception: it EXITS with "no REG week
 is fully played and knowable" until a real week completes, so Tuesday step 3
 and any other `candidates` step is skipped before Week 1. The cadence starts
 for real the Tuesday after the draft.
+
+**Mon 2026-09-14, or early Tue 09-15, once, by hand:** `.venv/bin/ziggurat
+ingest run --source weekly_stats --source snap_counts --force`. Belt-and-braces,
+whether or not the vintage timers are installed: the Tue/Thu pair has never
+fired in-season, and Week 1's Tuesday copy of the stats the waiver decision is
+priced off cannot be re-taken once upstream corrects the file (item 4.2b, B6).
+Also in `docs/runbook-strix-halo.md` §3.5.
 
 ## Heuristics promotion criteria
 

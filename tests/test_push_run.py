@@ -4,9 +4,8 @@ network (fake poster) and no LLM (fake/omitted router)."""
 
 import json
 
-import pytest
-
-from ziggurat.push import outbound, run as push_run, runs
+from ziggurat.push import outbound, runs
+from ziggurat.push import run as push_run
 
 
 def _seed_own_team(conn, *, own_team_id=1):
@@ -275,3 +274,25 @@ def test_run_briefing_survives_llm_failure(push_db, tmp_path, monkeypatch):
     # LLM failed but the deterministic briefing still got written + pushed.
     assert r["status"] == runs.STATUS_PARTIAL
     assert list((tmp_path / "briefings").glob("*.md"))
+
+
+def test_run_briefing_supplies_the_episode_history_provider(push_db, tmp_path, monkeypatch):
+    """Item 4.2b audit DC-2 carried forward: the Wednesday briefing is a surface
+    the NEW / REPEAT badge renders on, so push/run.py must hand the composer the
+    archive reader (a callable) — otherwise every row reads FIRST SEEN forever."""
+    from ziggurat.core import briefing as briefing_mod
+    monkeypatch.setattr(push_run, "BRIEFINGS_DIR", tmp_path / "briefings")
+    _seed_own_team(push_db)
+    _snap(push_db, "2026-09-10", 100, "Star Back", 1, "ACTIVE", sp=1)
+    push_db.commit()
+    captured = {}
+
+    def fake_build(conn, **kw):
+        captured.update(kw)
+        raise RuntimeError("stop after capturing kwargs")
+
+    monkeypatch.setattr(briefing_mod, "build_briefing", fake_build)
+    push_run.run_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                          now="2026-09-10T06:00:00", week=2, config=_cfg(),
+                          poster=lambda *a, **k: 200, push=False)
+    assert callable(captured.get("history")), sorted(captured)

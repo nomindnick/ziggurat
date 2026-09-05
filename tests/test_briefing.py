@@ -85,3 +85,29 @@ def test_staleness_banner_flags_missing_snapshot(push_db):
     b = briefing.build_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=None,
                                 today="2026-09-10")
     assert any("NO snapshot" in s for s in b.staleness)
+
+
+def test_build_briefing_threads_history_to_both_generators(push_db, monkeypatch):
+    """Item 4.2b: the composer forwards ``history`` to build_waiver_plan AND
+    build_candidates, so the Wednesday SIGNALS block can badge NEW / REPEAT.
+    core/ never imports decisions/, so the callable arrives from the caller."""
+    from ziggurat.core import candidates as candidates_mod
+    from ziggurat.core import waiver as waiver_mod
+    _seed_snapshot(push_db)
+    seen = {}
+
+    def fake_plan(conn, **kw):
+        seen["waiver"] = kw.get("history")
+        raise RuntimeError("stop here")
+
+    def fake_board(conn, **kw):
+        seen["candidates"] = kw.get("history")
+        raise candidates_mod.NoCompletedWeek("no week")
+
+    monkeypatch.setattr(waiver_mod, "build_waiver_plan", fake_plan)
+    monkeypatch.setattr(candidates_mod, "build_candidates", fake_board)
+    sentinel = object()
+    briefing.build_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                            today="2026-09-10", history=sentinel)
+    assert seen.get("waiver") is sentinel
+    assert seen.get("candidates") is sentinel

@@ -114,7 +114,13 @@ def build_briefing(
     source: str = "sleeper_rotowire",
     view: league_state.base.AsOfView = "historical",
     today=None,
+    history=None,
 ) -> Briefing:
+    """Compose the briefing. ``history`` is the NEW / REPEAT badge's comparison
+    set — a callable ``(season=, before_week=) -> WeekFlags`` sequence — supplied by
+    the caller (``push/run.py``), because ``ziggurat/core/`` must not import
+    ``ziggurat/decisions/`` (item 4.2b). Without it every SIGNALS row reads
+    "FIRST SEEN (no archive yet)" and the page says so."""
     today = today or (as_of if isinstance(as_of, str) else None)
     notes: list[str] = []
     sections: list[BriefingSection] = []
@@ -147,7 +153,7 @@ def build_briefing(
             plan = waiver.build_waiver_plan(
                 conn, as_of=as_of, season=season, own_team_id=own_team_id,
                 weeks=weeks, last_week=last_week, claim_budget=claim_budget,
-                source=source, view=view, today=today,
+                source=source, view=view, today=today, history=history,
             )
             n_claims = len(plan.claims)
             legal = not plan.blocked
@@ -183,7 +189,8 @@ def build_briefing(
     # --- 3. SIGNALS (league-wide breakout/injury/QB1 candidates) ---
     try:
         board = candidates_mod.build_candidates(
-            conn, as_of=as_of, season=season, view=view, today=today)
+            conn, as_of=as_of, season=season, view=view, today=today,
+            history=history)
         sections.append(BriefingSection(
             "SIGNALS", candidates_mod.format_candidates(board, top=8)))
     except candidates_mod.NoCompletedWeek as exc:
