@@ -26,6 +26,12 @@ consequences, all load-bearing:
   gitignored ``data/ffopp/`` — 25 of 159 columns are stored in SQLite (963 B/row
   vs 196 B/row measured), and a column dropped from a vintage that cannot be
   re-fetched would be gone for good. 1.1 MB a day buys the column choice back.
+* PAST SEASONS ARE MIRRORED, NEVER INGESTED. :func:`mirror_only` is D7's second
+  half (item 4.2b audit, DC-9): it fetches one season's asset to a dated parquet
+  and touches no database, so 4.2c gets ``ep_weekly_2021…2025`` as an input
+  WITHOUT anyone relaxing the ``BACKFILL_EXCLUDED`` fence. It takes no
+  connection, which is the fence — there is no argument to it that could write a
+  row. Run it once, outside the cadence; a finished season's asset is frozen.
 
 FETCHED BY URL, NOT THROUGH ``nflreadpy``, and that is a measurement too.
 ``nflreadpy.load_ff_opportunity`` validates ``season <= get_current_season()``
@@ -745,6 +751,32 @@ def pull_ff_opportunity(
         asset_updated_at=asset.updated_at, source_timestamp=source_timestamp,
         model_version=model_version,
     )
+
+
+def mirror_only(season: int, path, *, refresh: bool = False) -> str:
+    """Fetch ONE season's asset to ``path`` and ingest NOTHING. Returns the path.
+
+    D7's second half, which had no code and no reminder anywhere (item 4.2b
+    audit, DC-9): mirror ``ep_weekly_2021…2025.parquet`` ONCE, outside the
+    cadence, so item 4.2c has a lossless input WITHOUT anyone relaxing the
+    ``BACKFILL_EXCLUDED`` fence that keeps past-season rows out of the live
+    capture table. ``ffopp_weekly`` is a FORWARD-ONLY capture: a past season's
+    file has a different model version and a different rewrite clock, and
+    ``select_as_of`` would resolve it per key beside the live rows.
+
+    DEADLINE, because this is the whole reason it is a separate entry point:
+    upstream rewrites the CURRENT season's asset several times a week and
+    FREEZES it once the season ends — so 2025's file is already frozen and safe,
+    while 2026's is not a thing to mirror yet.
+
+    Touches no database and takes no connection, which is the fence: there is no
+    argument to this function that could write a row.
+    """
+    sweep_stale_parts(path)
+    asset = release_asset(fetch_release(), asset_name(int(season)))
+    if refresh or not os.path.exists(str(path)):
+        fetch_asset(asset, path)
+    return str(path)
 
 
 # ------------------------------------------------------------------ read

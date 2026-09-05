@@ -22,7 +22,8 @@ why :func:`format_status` says so in as many words rather than printing an empty
 list (item 3.7's lesson: "no push runs recorded yet" once read as healthy).
 """
 
-from datetime import datetime
+import textwrap
+from datetime import date, datetime, timedelta
 
 STATUS_RUNNING = "running"
 STATUS_OK = "ok"
@@ -70,6 +71,7 @@ def finish_capture(
     *,
     status,
     finished_at,
+    week=None,
     artifact_dir=None,
     manifest_sha256=None,
     payload_digest=None,
@@ -83,13 +85,17 @@ def finish_capture(
     chain_gain=None,
     error=None,
 ) -> None:
+    # `week` is COALESCEd, never overwritten with NULL: the row is started BEFORE
+    # the plan runs (so a credential failure still leaves a fact — item 4.2b
+    # audit, OPS-3), and the week only becomes knowable when the plan resolves it.
     conn.execute(
-        "UPDATE decision_freezes SET status=?, finished_at=?, artifact_dir=?, "
-        "manifest_sha256=?, payload_digest=?, files=?, claims=?, grabs=?, streaming=?, "
-        "evaluated=?, flagged=?, blocked=?, chain_gain=?, error=? WHERE freeze_id=?",
-        (status, finished_at, artifact_dir, manifest_sha256, payload_digest, files,
-         claims, grabs, streaming, evaluated, flagged, blocked, chain_gain, error,
-         freeze_id),
+        "UPDATE decision_freezes SET status=?, finished_at=?, week=COALESCE(?, week), "
+        "artifact_dir=?, manifest_sha256=?, payload_digest=?, files=?, claims=?, "
+        "grabs=?, streaming=?, evaluated=?, flagged=?, blocked=?, chain_gain=?, "
+        "error=? WHERE freeze_id=?",
+        (status, finished_at, week, artifact_dir, manifest_sha256, payload_digest,
+         files, claims, grabs, streaming, evaluated, flagged, blocked, chain_gain,
+         error, freeze_id),
     )
     conn.commit()
 
@@ -121,6 +127,15 @@ def recent_captures(conn, *, season=None, week=None, limit=15):
         f"SELECT * FROM decision_freezes{where} ORDER BY freeze_id DESC LIMIT :limit",
         params,
     ).fetchall()
+
+
+def capture_status(conn, freeze_id):
+    """The status of one run-log row, or ``None``. Used to keep a failure path
+    from finishing a row twice (the inner writer may already have done it)."""
+    row = conn.execute(
+        "SELECT status FROM decision_freezes WHERE freeze_id = ?", (int(freeze_id),)
+    ).fetchone()
+    return None if row is None else row["status"]
 
 
 def capture_by_id(conn, capture_id):
@@ -177,16 +192,76 @@ EMPTY_STATUS = (
     "  Every `ziggurat waivers` run captures a freeze, so an empty log means either\n"
     "  the archive has never run on this box, or every attempt failed before it could\n"
     "  record a row. A Tuesday that is not captured cannot be reconstructed later:\n"
-    "  league_player_state accumulates forward only (item 3.1) and four market sources\n"
-    "  serve the current value only (item 3.1b).\n"
+    "  league_player_state accumulates forward only (item 3.1) and six market sources\n"
+    "  serve the current value only (item 3.1b, as amended by item 4.2b: ff_opportunity\n"
+    "  and fp_weekly_ecr joined the four).\n"
     "  fix: run `ziggurat waivers` (or `ziggurat decisions freeze`), then re-check;\n"
     "       install the Tuesday timer with scripts/install-decisions.sh."
 )
 
 
-def format_status(conn, *, season=None, limit=10) -> str:
-    """Last captures, newest first. Rule 3: the CLI prints this, it computes
-    nothing."""
+def normalize_day(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _capture_day(row) -> date | None:
+    """The calendar day a capture STARTED, from its own timestamp."""
+    stamp = row["started_at"]
+    try:
+        return datetime.fromisoformat(str(stamp)).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def missing_tuesdays(conn, *, season, today) -> tuple[list[date], date | None]:
+    """(Tuesdays with no capture, the first captured day) for one season.
+
+    THE WORD IS LITERAL HERE, which is why this report is allowed to borrow
+    ``league status``'s register (item 4.2b audit, OPS-2). A Tuesday that was not
+    captured cannot be reconstructed: ``league_player_state`` accumulates forward
+    only and six market sources serve the current value only, so there is no pull
+    that recovers the pool as it stood that night.
+
+    Bounded BELOW by the first capture — this box's archive begins when it begins,
+    and reporting every Tuesday back to March as missing would be the
+    undifferentiated alarm item 3.1b refused to ship — and above by ``today``.
+    """
+    rows = conn.execute(
+        "SELECT started_at, status FROM decision_freezes WHERE season = ?", (int(season),)
+    ).fetchall()
+    days = {d for d in (_capture_day(r) for r in rows if r["status"] in CAPTURED_STATUSES)
+            if d is not None}
+    if not days:
+        return [], None
+    first, last = min(days), normalize_day(today)
+    if last is None or last < first:
+        return [], first
+    cursor = first + timedelta(days=(1 - first.weekday()) % 7)   # first Tuesday >= first
+    missing = []
+    while cursor <= last:
+        if cursor not in days:
+            missing.append(cursor)
+        cursor += timedelta(days=7)
+    return missing, first
+
+
+def format_status(conn, *, season=None, limit=10, today=None) -> str:
+    """Last captures, newest first, then the VERDICT. Rule 3: the CLI prints this,
+    it computes nothing.
+
+    ``today`` is operational wall clock (the ``refresh.format_status`` shape),
+    NOT an as-of gate — nothing here is a fact about the NFL. Without it the
+    report can list rows and nothing else, which was the whole defect: a log with
+    a capture from three Tuesdays ago read exactly like one captured tonight
+    (item 4.2b audit, OPS-2).
+    """
     rows = recent_captures(conn, season=season, limit=limit)
     if not rows:
         return EMPTY_STATUS
@@ -199,7 +274,7 @@ def format_status(conn, *, season=None, limit=10) -> str:
             line += (f"\n      claims={r['claims']} grabs={r['grabs']} "
                      f"streaming={r['streaming']}"
                      + ("" if r["chain_gain"] is None
-                        else f" joint={r['chain_gain']:+.1f}"))
+                        else f" joint={r['chain_gain']:+.1f} house pts"))
             if r["blocked"]:
                 line += "  BLOCKED (illegal roster: no claims planned)"
         if r["evaluated"] is not None:
@@ -207,7 +282,13 @@ def format_status(conn, *, season=None, limit=10) -> str:
         if r["artifact_dir"]:
             line += f"\n      dir={r['artifact_dir']}"
         if r["error"]:
-            line += f"\n      NOTE={r['error'][:200]}"
+            # Never a bare mid-word truncation: the string being cut is the one
+            # that tells a novice a `partial` capture is EXPECTED rather than
+            # broken, and "The plan hal" reads as corruption (item 4.2b audit).
+            line += "\n      NOTE=" + textwrap.shorten(
+                " ".join(str(r["error"]).split()), width=200,
+                placeholder=" … (full text: ziggurat decisions verify --capture "
+                            f"{r['capture_id']})")
         out.append(line)
     latest = rows[0]
     if latest["status"] not in CAPTURED_STATUSES:
@@ -215,8 +296,60 @@ def format_status(conn, *, season=None, limit=10) -> str:
             f"  ^ the most recent attempt is '{latest['status']}', not a capture — "
             "that Tuesday is not archived."
         )
+    out.extend(_verdict(conn, rows, season=season, today=today))
     out.append(
         "  verify a capture's bytes against its manifest: "
         "ziggurat decisions verify --capture <id>"
     )
     return "\n".join(out)
+
+
+def _verdict(conn, rows, *, season, today) -> list[str]:
+    """How OLD the archive is, and which Tuesdays are gone. The half the report
+    was missing: it handled the empty case emphatically and then treated every
+    non-empty log as healthy."""
+    day = normalize_day(today)
+    if day is None:
+        return ["  AGE: not assessed (no `today` was passed to this report)."]
+    out: list[str] = []
+    newest = next((d for d in (_capture_day(r) for r in rows
+                               if r["status"] in CAPTURED_STATUSES) if d is not None),
+                  None)
+    if newest is None:
+        out.append(
+            "  NO CAPTURE IN THE LAST "
+            f"{len(rows)} ATTEMPT(S) — every row above is a failure, so nothing in "
+            "this window is archived."
+        )
+    else:
+        age = (day - newest).days
+        verdict = "captured today" if age == 0 else f"{age} day(s) old"
+        out.append(f"  LAST CAPTURE : {newest.isoformat()} ({verdict}).")
+        if age > 7:
+            out.append(
+                "  ^ more than a week with no capture. A Tuesday with no capture is "
+                "not a gap that can be filled later."
+            )
+    target = season if season is not None else rows[0]["season"]
+    if target is None:
+        return out
+    missing, first = missing_tuesdays(conn, season=target, today=day)
+    if first is None:
+        return out
+    if missing:
+        out.append(
+            f"  MISSING TUESDAYS : {len(missing)} — "
+            + ", ".join(d.isoformat() for d in missing[:8])
+            + ("" if len(missing) <= 8 else f", … (+{len(missing) - 8} more)")
+        )
+        out.append(
+            "     (the archive on this box starts "
+            f"{first.isoformat()}; those Tuesdays are UNRECOVERABLE — the pool as it "
+            "stood that night cannot be re-pulled from anywhere.)"
+        )
+    else:
+        out.append(
+            f"  MISSING TUESDAYS : none since {first.isoformat()} "
+            f"(season {target})."
+        )
+    return out

@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
     --season) SEASON="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;   # the header block, up to `set -euo`
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

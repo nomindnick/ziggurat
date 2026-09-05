@@ -363,6 +363,10 @@ def waivers(
             claim_budget=claim_budget,
             today=_today(),
             collect=artifacts,
+            # The NEW / REPEAT badge's comparison set (item 4.2b B3 + audit DC-2).
+            # A callable, so core/ never imports decisions/; without it every row
+            # reads "FIRST SEEN (no archive yet)" forever and says so.
+            history=decisions_read.episode_history_provider(),
         )
         captured = None if artifacts is None else decisions_capture.capture_best_effort(
             conn, artifacts, trigger=decisions_store.TRIGGER_WAIVERS, argv=sys.argv,
@@ -514,6 +518,7 @@ def candidates(
             positions=None if position is None else [canon_position(position)],
             since=since,
             today=_today(),
+            history=decisions_read.episode_history_provider(),
         )
     except NoCompletedWeek as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -1330,10 +1335,22 @@ def decisions_freeze(
     resolved_season = _season(season)
     conn = open_db(path)
     try:
-        team_id = _resolve_team(conn, team=team, as_of=day, season=resolved_season)
+        try:
+            team_id = _resolve_team(conn, team=team, as_of=day, season=resolved_season)
+        except RuntimeError as exc:
+            # Expired ESPN cookies are the most likely Tuesday failure and they
+            # land HERE, before run_freeze can record anything — so the row is
+            # written by the package and the timer logs one legible line instead
+            # of a bare traceback (item 4.2b audit, OPS-3).
+            decisions_capture.record_prerun_failure(
+                conn, season=resolved_season, trigger=trigger, plan_as_of=day,
+                error=f"the capture never started: {type(exc).__name__}: {exc}")
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         plan, result = decisions_capture.run_freeze(
             conn, as_of=day, season=resolved_season, own_team_id=team_id,
             trigger=trigger, argv=sys.argv,
+            history=decisions_read.episode_history_provider(),
             weeks=None if from_week is None else range(from_week, last_week + 1),
             last_week=last_week,
             pool_limit=None if pool_limit == 0 else pool_limit,
@@ -1359,7 +1376,8 @@ def decisions_status(
     tick with nothing new, a Tuesday with no capture is a Tuesday that can never be
     reconstructed (item 3.1)."""
     conn = open_db(path)
-    typer.echo(decisions_store.format_status(conn, season=season, limit=limit))
+    typer.echo(decisions_store.format_status(
+        conn, season=season, limit=limit, today=_today()))
     conn.close()
 
 
@@ -1381,21 +1399,12 @@ def decisions_verify(
     if target is None:
         conn = open_db(path)
         try:
-            row = (decisions_store.capture_by_id(conn, capture) if capture
-                   else decisions_store.last_capture(conn))
-            if row is None:
-                typer.echo(
-                    "error: no capture recorded"
-                    + (f" for id {capture}" if capture else " yet")
-                    + " — run `ziggurat decisions status`.", err=True)
-                raise typer.Exit(code=1)
-            if not row["artifact_dir"]:
-                typer.echo(
-                    f"error: capture {row['capture_id']} is '{row['status']}' and named "
-                    "no directory — nothing landed to verify.", err=True)
-                raise typer.Exit(code=1)
-            target = Path(row["artifact_dir"])
-            expected = row["manifest_sha256"]
+            target, expected = decisions_read.resolve_capture_target(
+                conn, capture_id=capture)
+        except (decisions_read.CaptureNotFound,
+                decisions_read.CaptureIncomplete) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
         finally:
             conn.close()
     report = decisions_read.verify(target, expected_manifest_sha256=expected)

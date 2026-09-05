@@ -428,8 +428,8 @@ def make_draft_board():
 
 @pytest.fixture(autouse=True)
 def _decision_captures_never_land_in_the_real_archive(monkeypatch, tmp_path_factory):
-    """No test may write a capture under the operator's own `data/decisions/`
-    (item 4.2b).
+    """No test may write a capture PAYLOAD under the operator's own
+    `data/decisions/` (item 4.2b).
 
     `ziggurat waivers` archives EVERY run, so any test that invokes it — the CLI
     smoke tests already do — would otherwise drop a synthetic Tuesday into the
@@ -438,8 +438,68 @@ def _decision_captures_never_land_in_the_real_archive(monkeypatch, tmp_path_fact
     the backtest cache redirect above: redirecting the module default makes the
     omission harmless everywhere rather than in the one test that was caught.
     `tests/test_decisions_capture.py` pins the redirect.
+
+    WHAT THIS DOES NOT COVER, stated because the guarantee used to be written as
+    if it did (item 4.2b audit, R5): the RUN-LOG half. `freeze_waiver_artifacts`
+    writes `decision_freezes` rows into whatever CONNECTION it is handed, and a
+    connection is not patchable from here — a test that forgot `--path` would
+    insert synthetic rows into `db/ziggurat.sqlite`, where `decisions status`
+    shows them as archived Tuesdays. `_no_synthetic_rows_in_the_operators_run_log`
+    below is the guard for that half.
     """
     from ziggurat.decisions import capture as decisions_capture
 
     monkeypatch.setattr(decisions_capture, "DECISIONS_DIR",
                         tmp_path_factory.mktemp("decision-captures"))
+
+
+def _live_freeze_count() -> int | None:
+    """Rows in the operator's own decision run log, or None when there is no
+    database / no table (a fresh clone, CI)."""
+    import sqlite3
+
+    from ziggurat.paths import REPO_ROOT
+
+    db = REPO_ROOT / "db" / "ziggurat.sqlite"
+    if not db.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name='decision_freezes'"
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        return int(conn.execute("SELECT COUNT(*) FROM decision_freezes").fetchone()[0])
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_synthetic_rows_in_the_operators_run_log():
+    """The run-log half of the guard above (item 4.2b audit, R5).
+
+    The payload redirect cannot see a CLI test that omits `--path` and therefore
+    opens `DEFAULT_DB_PATH`. This counts `decision_freezes` before and after the
+    whole session and fails if the suite added a row: a synthetic `ok` there is
+    an archived Tuesday that never happened, and `decisions verify` would then
+    point at a tmp directory that no longer exists.
+
+    Skipped silently when the database or the table is absent, which is the
+    fresh-clone and CI case."""
+    before = _live_freeze_count()
+    yield
+    after = _live_freeze_count()
+    if before is None or after is None:
+        return
+    assert after == before, (
+        f"the suite wrote {after - before} row(s) into the operator's own "
+        "decision_freezes — a test invoked a capture path without --path. Every "
+        "capture test must pass a tmp database."
+    )

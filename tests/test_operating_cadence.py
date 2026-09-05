@@ -204,3 +204,38 @@ def test_the_cadence_names_the_decision_archive_and_its_operator_asks():
                 / "week-TEMPLATE.md").read_text()
     assert "## Submitted claims & departures (Tuesday)" in template, \
         "the cadence points at a journal block the shipped template does not carry"
+
+
+def test_every_command_the_journal_template_quotes_resolves():
+    """The doc-to-code discipline, applied to the OTHER document the Tuesday
+    workflow hands the operator (item 4.2b audit, DC-5/OPS-4).
+
+    The template shipped an instruction to run `ziggurat decisions record`, which
+    is Wave-2 and does not exist — so the first live Tuesday's procedure ended in
+    typer's `No such command`. The cadence test could not see it: it resolves the
+    invocations quoted in CLAUDE.md, and the template is a different file.
+
+    A command named as NOT YET SHIPPED is exempt, and must say so in the same
+    sentence: naming the future command is the point of the line."""
+    template = (REPO_ROOT / "templates" / "intel" / "weekly"
+                / "week-TEMPLATE.md").read_text()
+    unshipped = re.compile(r"does not exist yet|lands with item")
+    for line in template.splitlines():
+        for cmd, sub, flags in _INVOCATION.findall(line):
+            args = [cmd] + ([sub.strip()] if sub.strip() else [])
+            if unshipped.search(line):
+                continue
+            result = runner.invoke(app, args + ["--help"])
+            assert result.exit_code == 0, (
+                f"the journal template quotes `ziggurat {' '.join(args)}`, which the "
+                f"real CLI does not resolve:\n{result.output}"
+            )
+            for flag in flags.split():
+                assert flag in result.output, (
+                    f"`ziggurat {' '.join(args)}` has no {flag}, but the template "
+                    "tells the operator to pass it"
+                )
+    # Teeth: the exemption is not a blanket one — the phrase has to be on the
+    # SAME line as the command it excuses.
+    assert unshipped.search("run `ziggurat decisions record` (lands with item 4.2b B12)")
+    assert not unshipped.search("run `ziggurat decisions record --capture <id>`.")

@@ -106,6 +106,17 @@ def test_every_evaluated_row_is_emitted_flagged_or_not(db, nfl_fixture):
     assert len(collect.rows) > len(collect.flagged)
     assert collect.flagged_keys() == _board_usage_keys(board)
     assert len(collect.flagged) == len(board.by_kind(C.SIGNAL_USAGE))
+    # BOTH ARMS MUST CONTRIBUTE BOTH KINDS OF ROW (item 4.2b audit, T2). The
+    # assertions above are satisfied by the EMERGENCE path alone, so a mutation
+    # that collects only FLAGGED rows on the DIFFERENCED path passed every
+    # offline cell — and that path is the majority of the table (measured on this
+    # fixture at week 6: 104 differenced rows the floors passed over, against 51
+    # emergence ones). Only the live-DB cells caught it, and those skip on any
+    # box without the gitignored database.
+    assert {(r.path, r.flagged) for r in collect.rows} == {
+        (C.PATH_DIFFERENCED, True), (C.PATH_DIFFERENCED, False),
+        (C.PATH_EMERGENCE, True), (C.PATH_EMERGENCE, False),
+    }, "both usage paths must emit flagged AND passed-over rows"
     # every row carries the week it was evaluated in and the two ids
     assert {r.week for r in collect.rows} == {6}
     assert all(r.position in C.USAGE_POSITIONS for r in collect.rows)
@@ -539,17 +550,35 @@ _CORE_MAY_IMPORT = {"core", "data", "league"}
 def _ziggurat_imports(path: Path) -> set[str]:
     """The `ziggurat.<subpackage>` names a module reaches, at import time or
     lazily inside a function — both are runtime coupling for this question."""
+    return _subpackage_imports(path, root="ziggurat")
+
+
+def _top_level_imports(path: Path) -> set[str]:
+    """Every ROOT package name a module reaches, both import shapes."""
+    reached: set[str] = set()
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            reached.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:            # a relative import reaches nothing outside
+                continue
+            reached.add((node.module or "").split(".")[0])
+    return reached
+
+
+def _subpackage_imports(path: Path, *, root: str) -> set[str]:
     reached: set[str] = set()
     tree = ast.parse(path.read_text(), filename=str(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
-                if parts[0] == "ziggurat" and len(parts) > 1:
+                if parts[0] == root and len(parts) > 1:
                     reached.add(parts[1])
         elif isinstance(node, ast.ImportFrom):
             parts = (node.module or "").split(".")
-            if parts[0] == "ziggurat":
+            if parts[0] == root:
                 if len(parts) > 1:
                     reached.add(parts[1])
                 else:
@@ -573,12 +602,17 @@ def test_core_gained_no_new_import_edges():
 
 def test_nothing_in_the_package_imports_backtest():
     """`backtest/` imports `ziggurat/` (item 4.1). The reverse would be a cycle,
-    and the 4.2b freeze writer must never be confused with the 4.1 one."""
+    and the 4.2b freeze writer must never be confused with the 4.1 one.
+
+    USES THE FILE'S OWN SCANNER (item 4.2b audit, R2). It used to read
+    `getattr(n, "module", "")` on every node — and an `ast.Import` HAS NO
+    `.module`, so a plain `import backtest.decisions` evaluated to `""` and the
+    guard only ever caught the `from backtest... import ...` shape. A correct
+    scanner was sitting ten lines above it. The standing lesson this repo already
+    paid for once: a boundary pattern is assumed narrow until tested."""
     offenders = [
         str(py.relative_to(ZIGGURAT)) for py in ZIGGURAT.rglob("*.py")
-        if any(isinstance(n, (ast.Import, ast.ImportFrom))
-               and (getattr(n, "module", "") or "").split(".")[0] == "backtest"
-               for n in ast.walk(ast.parse(py.read_text(), filename=str(py))))
+        if "backtest" in _top_level_imports(py)
     ]
     assert offenders == []
 
@@ -596,3 +630,67 @@ def test_the_import_scanner_would_catch_a_real_inversion(tmp_path):
     clean = tmp_path / "clean.py"
     clean.write_text("from ziggurat.core.marginal import build_board\n")
     assert _ziggurat_imports(clean) == {"core"}
+
+    # R2: the BARE-IMPORT shape, which the backtest guard could not see. Both
+    # shapes, and a lazy one, since that is how a cycle actually gets introduced.
+    plain = tmp_path / "plain.py"
+    plain.write_text("import backtest.decisions\n")
+    assert "backtest" in _top_level_imports(plain)
+
+    from_shape = tmp_path / "from.py"
+    from_shape.write_text("from backtest.decisions import freeze\n")
+    assert "backtest" in _top_level_imports(from_shape)
+
+    lazy_backtest = tmp_path / "lazy_backtest.py"
+    lazy_backtest.write_text("def f():\n    import backtest.replay as r\n    return r\n")
+    assert "backtest" in _top_level_imports(lazy_backtest)
+
+    assert "backtest" not in _top_level_imports(clean)
+
+
+# ============================================ item 4.2b audit — id_alternates
+
+
+def test_a_colliding_espn_id_travels_with_the_row(db, nfl_fixture):
+    """DC-4 / §2.9. `base.gsis_by_espn` keeps the FIRST of a colliding pair and
+    logs the rest to a stderr line that dies with the process — measured on the
+    live database, 87 espn ids map to more than one gsis and 3 of those joins are
+    wrong, one of them a rostered player at 61.9% ownership. Without this field a
+    freeze cannot later tell whether a flagged row was the right man.
+
+    Evidence, never a rule: it is read by no floor and no ordering."""
+    _seed(db, nfl_fixture)
+    # Take a player the arm ACTUALLY evaluates, then point a SECOND gsis at his
+    # espn id so the arm's own crosswalk really does collide.
+    first = C.EvaluatedRows()
+    _read(db, as_of="2023-10-17", season=2023, week=6, collect=first)
+    victim = next(r for r in first.rows if r.espn_id)
+    assert all(r.id_alternates == () for r in first.rows), \
+        "the fixture must start with an unambiguous crosswalk"
+
+    twin = "00-0099999"
+    db.execute(
+        "INSERT OR REPLACE INTO players (gsis_id, espn_id, name, merge_name, position, "
+        "retrieved_as_of, knowable_as_of) VALUES (?, ?, 'Twin Player', 'twin player', "
+        "'RB', ?, ?)",
+        (twin, victim.espn_id, "2023-08-01", "2023-08-01"),
+    )
+    db.commit()
+
+    collect = C.EvaluatedRows()
+    _read(db, as_of="2023-10-17", season=2023, week=6, collect=collect)
+    hit = next((r for r in collect.rows if r.gsis_id == victim.gsis_id), None)
+    assert hit is not None
+    assert twin in hit.id_alternates, hit.id_alternates
+    assert hit.as_record()["id_alternates"] == list(hit.id_alternates)
+    # every other row is unambiguous and says so with an EMPTY tuple, never None
+    assert all(isinstance(r.id_alternates, tuple) for r in collect.rows)
+    assert any(r.id_alternates == () for r in collect.rows)
+
+
+def test_the_alternates_map_is_pure_and_symmetric():
+    """The helper alone, so the rule is legible without a database."""
+    assert C._id_alternates({"A": "1", "B": "1", "C": "2"}) == {
+        "A": ("B",), "B": ("A",)}
+    assert C._id_alternates({"A": "1"}) == {}
+    assert C._id_alternates({"A": None, "B": None}) == {}

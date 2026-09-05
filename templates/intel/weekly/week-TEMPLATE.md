@@ -29,8 +29,10 @@ Two disciplines, from SPEC.md:
 <!-- Item 4.2b. The freeze records what the TOOL printed; only this block records
      what YOU DID, and the two are joined by capture_id. ESPN stamps a won claim
      and a grab you made yourself both as `ADD` on the same day, so without this
-     block Wednesday cannot tell them apart. Fill it the night you submit, then
-     run `ziggurat decisions record --capture <id>`. -->
+     block Wednesday cannot tell them apart. Fill it the night you submit —
+     THIS BLOCK IS THE RECORD. (`ziggurat decisions record` lands with item
+     4.2b B12 and does not exist yet; until it does, nothing reads this block
+     but you.) -->
 
 - **Tool run:** `<the exact command, including --as-of and --claim-budget>`
 - **capture_id:** <from the freeze line the run printed>

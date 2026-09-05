@@ -360,9 +360,11 @@ def test_the_header_lands_once_per_claim_above_its_evidence_rows(db, nfl_fixture
                    for r in board.rows),
         week=9, freshness=(), notes=(), as_of="2025-11-04", season=2025)
     monkeypatch.setattr(waiver, "build_candidates", lambda *a, **k: board)
-    notes, err, out = waiver._candidate_notes_by_espn(
+    notes, errs, out = waiver._candidate_notes_by_espn(
         db, as_of="2025-11-04", season=2025, view="historical", today=None)
-    assert err is None and out is board
+    # The second return is the board's OWN notes, not one error string (OPS-11):
+    # this board carries none, and it is a LIST either way.
+    assert errs == [] and out is board
     block = notes["4242"]
     assert block[0] == USAGE_EVIDENCE_HEADER
     assert block[1] == C.EPISODE_LEGEND
@@ -399,6 +401,48 @@ def test_the_week_one_block_explains_the_week_one_badge(db, monkeypatch):
 
 
 # ======================================================== the order-inertness pin
+
+
+def test_no_sort_key_in_the_chain_can_ever_see_the_evidence_column():
+    """The STRUCTURAL half of the pin (item 4.2b audit, T7).
+
+    The behavioural pins below catch a promotion that MOVES the ranking. They do
+    not catch the literal thing the header forbids — the column promoted to a
+    TIE-BREAK — because a key element inserted AFTER `-s.gain` only fires on
+    exactly equal gains, which this fixture does not produce. Measured: such a
+    mutant passed both order-inertness pins.
+
+    So state the rule as a fact about the code instead: no ordering expression
+    inside the chain selector may mention `candidate_notes`. That fails on the
+    tie-break mutant AND on the gain mutant, and it does not depend on a fixture
+    happening to contain a tie."""
+    import ast
+
+    source = (REPO_ROOT / "ziggurat" / "core" / "waiver.py").read_text()
+    tree = ast.parse(source)
+    funcs = [n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == "_select_claims"]
+    assert funcs, "the chain selector was renamed — re-point this pin, do not delete it"
+    ordering = ("sorted", "sort", "nlargest", "nsmallest", "min", "max",
+                "heappush", "heapify")
+    seen = 0
+    for func in funcs:
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", ""))
+            if name not in ordering:
+                continue
+            seen += 1
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                names = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
+                assert "candidate_notes" not in names, (
+                    f"{func.name} orders rows by the opportunity-signal column — the "
+                    "header on both surfaces says it does not change the claim order, "
+                    "and the manifest records enriched_chain_equals_projection_only"
+                )
+    assert seen, "found no ordering call in _select_claims — this pin has gone blind"
 
 
 def test_the_evidence_column_cannot_reorder_the_chain(db, marginal_world, nfl_fixture):
@@ -440,7 +484,7 @@ def test_the_evidence_column_cannot_reorder_the_chain(db, marginal_world, nfl_fi
     with pytest.MonkeyPatch.context() as mp:
         # the column is empty — nothing else about the run changes
         mp.setattr(waiver, "_candidate_notes_by_espn",
-                   lambda *a, **k: ({}, None, None))
+                   lambda *a, **k: ({}, [], None))
         without = _run()
 
     def _economics(plan):
@@ -527,3 +571,84 @@ def test_the_journal_block_quotes_only_sentences_the_tools_still_print():
         assert fragment in body and fragment in waiver_src
     assert "USAGE / ROLE EVIDENCE" in body
     assert "USAGE / ROLE EVIDENCE" in waiver_src
+
+
+# ================================ item 4.2b audit — the badge says what it is
+
+
+def test_the_unwired_page_never_explains_a_badge_it_cannot_emit():
+    """OPS-7. `_tag_rows` had three branches and only ONE produced no note — the
+    `history is None` branch, which is the branch production actually took. So
+    every row read 'FIRST SEEN (no archive yet)' while `EPISODE_LEGEND`, printed
+    directly above them, explained only NEW and REPEAT.
+
+    Measured before the fix on a real render (`candidates --season 2025 --week 9
+    --validate`): 91 of 91 usage rows and 28 of 28 injury rows un-badged, under a
+    legend that said the badge was live."""
+    rows = [_row(USAGE, "Studied Player", 3.0)]
+    tagged, note, badged = C._tag_rows(rows, season=2025, week=9, history=None)
+
+    assert badged is False
+    assert note and "NOT WIRED" in note
+    assert "absence of comparison" in note
+    assert all(r.episode_tag == C.EPISODE_FIRST_SEEN for r in tagged)
+    # ... and the legend follows the rows, not the other way round
+    assert C.episode_legend(9, badged=False) == C.EPISODE_UNBADGED_LEGEND
+    assert "NEW" not in C.EPISODE_UNBADGED_LEGEND.replace("NEVER", "")
+    assert C.episode_legend(9, badged=True) == C.EPISODE_LEGEND
+    # week 1 is its own regime under either wiring
+    assert C.episode_legend(1, badged=False) == C.EPISODE_WEEK1_NOTE
+
+
+def test_an_archive_with_no_earlier_week_says_so_too():
+    """OPS-7, the second silent branch: a wired reader that finds nothing is not
+    the same fact as no reader at all, and neither is 'the signal is new'."""
+    rows = [_row(USAGE, "Studied Player", 3.0)]
+    tagged, note, badged = C._tag_rows(rows, season=2026, week=3,
+                                       history=lambda **kw: [])
+    assert badged is False
+    assert note and "no readable capture" in note
+    assert all(r.episode_tag == C.EPISODE_FIRST_SEEN for r in tagged)
+
+    # A real earlier week flips both.
+    hist = [C.WeekFlags(week=2, evaluated=frozenset(), flagged=frozenset())]
+    _, note, badged = C._tag_rows(rows, season=2026, week=3, history=lambda **kw: hist)
+    assert badged is True and note is None
+
+
+def test_the_board_carries_its_own_badging_state(db, monkeypatch):
+    """The legend on BOTH surfaces reads this, so it has to ride on the board."""
+    board = C.CandidateBoard(rows=(), week=9, freshness=(), notes=(),
+                             as_of="2025-11-04", season=2025)
+    assert board.badged is True
+    page = C.format_candidates(
+        C.CandidateBoard(rows=(), week=9, freshness=(), notes=(),
+                         as_of="2025-11-04", season=2025, badged=False))
+    assert C.EPISODE_UNBADGED_LEGEND in page
+    assert C.EPISODE_LEGEND not in page
+
+
+def test_the_badge_degrade_reaches_the_waiver_page_too(db, monkeypatch):
+    """OPS-11. `board.notes` — including the badge degrade and the PARTIAL WEEK
+    warning — reached `ziggurat candidates` and was DISCARDED on the surface the
+    Tuesday decision is actually made on. Same shape as the 3.8A headline: two
+    renderers of one scan disagreeing."""
+    board = C.CandidateBoard(
+        rows=(), week=9, freshness=(), as_of="2025-11-04", season=2025,
+        badged=False,
+        notes=("FIRST SEEN badges are NOT WIRED on this surface — an example",))
+    monkeypatch.setattr(waiver, "build_candidates", lambda *a, **k: board)
+    notes, errs, out = waiver._candidate_notes_by_espn(
+        db, as_of="2025-11-04", season=2025, view="historical", today=None)
+    assert out is board
+    assert errs == list(board.notes), "the board's own caveats must survive"
+
+    # ... and a LOAD FAILURE still reads as one, never as a caveat.
+    def _boom(*a, **k):
+        raise RuntimeError("signal load died")
+
+    monkeypatch.setattr(waiver, "build_candidates", _boom)
+    _, errs, out = waiver._candidate_notes_by_espn(
+        db, as_of="2025-11-04", season=2025, view="historical", today=None)
+    assert out is None and len(errs) == 1
+    assert "opportunity signals UNAVAILABLE" in errs[0]

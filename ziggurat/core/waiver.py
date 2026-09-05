@@ -604,7 +604,14 @@ class WaiverArtifacts:
     #: run is ~25 s and the cadence writes four times a day, so this is rare and
     #: it is stated rather than assumed away.
     vintages: Mapping[str, str | None] = field(default_factory=dict)
-    #: ``players``, ungated — the crosswalk is read at-now by design (above).
+    #: ``players`` at ``MAX(retrieved_as_of)``, UNGATED — and that is the number
+    #: that belongs here, not an oversight (item 4.2b audit, DC-8 examined and
+    #: refuted). This field means "which pull priced this page", and the crosswalk
+    #: accessors (``base.espn_by_gsis`` / ``name_by_gsis``) read ``players`` at-now
+    #: with no as-of gate by design — see ARCHIVE_VINTAGE_TABLES above. Resolving
+    #: it through ``base.resolved_vintage`` would record a vintage the run did NOT
+    #: use: at a past ``as_of`` the gated answer is None (or an old day) while the
+    #: crosswalk still resolved today's rows.
     crosswalk_vintage: str | None = None
 
 
@@ -986,9 +993,15 @@ def _claim_reasons(
 def _candidate_notes_by_espn(
     conn, *, as_of, season, view, today, collect: EvaluatedRows | None = None,
     history: EpisodeHistory | None = None,
-) -> tuple[dict[str, list[str]], str | None, CandidateBoard | None]:
-    """(espn_id -> opportunity-signal note(s), error_note, the board) from item
+) -> tuple[dict[str, list[str]], list[str], CandidateBoard | None]:
+    """(espn_id -> opportunity-signal note(s), error_notes, the board) from item
     3.3, best-effort.
+
+    THE SECOND RETURN IS A LIST, not one error string (item 4.2b audit, OPS-11).
+    The board's OWN notes — the badge degrade, the partial-week warning — used to
+    reach `ziggurat candidates` and die here, so the surface the Tuesday decision
+    is actually made on printed a caveat-free page while the other one explained
+    itself. Same shape as the 3.8A headline: two renderers of one scan disagreed.
 
     ``build_candidates`` needs a completed week; pre-season it raises
     ``NoCompletedWeek`` — the annotation is optional context, so we skip silently.
@@ -1008,15 +1021,15 @@ def _candidate_notes_by_espn(
         board = build_candidates(conn, as_of=as_of, season=season, view=view,
                                  today=today, collect=collect, history=history)
     except NoCompletedWeek:
-        return notes, None, None
+        return notes, [], None
     except Exception as exc:  # noqa: BLE001 — surfaced as a NOTE, never silently swallowed
-        return notes, (
+        return notes, [
             f"opportunity signals UNAVAILABLE — the usage/injury signal load failed "
             f"({type(exc).__name__}: {exc}); the claims below carry no injury/usage "
             f"context. The claim ORDER is unaffected (it never used this column), "
             f"but this is a degrade, not 'no news' — verify manually."
-        ), None
-    legend = episode_legend(board.week)
+        ], None
+    legend = episode_legend(board.week, badged=board.badged)
     for c in board.rows:
         if not c.espn_id:
             continue
@@ -1028,7 +1041,7 @@ def _candidate_notes_by_espn(
             bucket.append(USAGE_EVIDENCE_HEADER)
             bucket.append(legend)
         bucket.append(f"  [{c.signal_kind}] {c.episode_tag or 'FIRST SEEN'}: {head}")
-    return notes, None, board
+    return notes, list(board.notes), board
 
 
 def _is_streamed(s: SwapRow) -> bool:
@@ -1967,12 +1980,17 @@ def build_waiver_plan(
     drop_board = tuple(_drop_rec(r) for r in board.ranked)
 
     evaluated = EvaluatedRows() if collect is not None else None
-    candidate_notes, candidate_err, candidate_board = _candidate_notes_by_espn(
+    candidate_notes, candidate_errs, candidate_board = _candidate_notes_by_espn(
         conn, as_of=as_of, season=season, view=view, today=today, collect=evaluated,
         history=history,
     )
-    if candidate_err:
-        notes.append(candidate_err)
+    notes.extend(candidate_errs)
+    # `collect.candidate_error` stays the LOAD-FAILURE note and only that: the
+    # board's own notes now ride in the same list (OPS-11), and a board that
+    # BUILT is not a degrade — `_candidates_meta` reads this field to say WHY the
+    # candidate half is absent, so a mere caveat here would mislabel a good one.
+    candidate_err = (candidate_errs[0]
+                     if candidate_board is None and candidate_errs else None)
     if collect is not None:
         collect.pool_rows = tuple(pool_rows)
         collect.board, collect.swaps = board, tuple(swaps)

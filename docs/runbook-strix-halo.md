@@ -124,6 +124,8 @@ through `base.latest_truth(accessor)`.
 loginctl enable-linger "$USER"     # FIRST — or every timer dies at logout
 scripts/install-league-sync.sh
 scripts/install-nfl-ingest.sh
+scripts/install-decisions.sh       # item 4.2b — the Tuesday decision freeze
+scripts/install-push.sh            # item 3.6 — needs NTFY_TOPIC in .env (see §5)
 systemctl --user list-timers 'ziggurat-*' --no-pager
 ```
 
@@ -136,6 +138,7 @@ What you should see:
 | `ziggurat-nfl-ingest-weekly` | 08:20 daily | fires daily, but each source's `interval_days` and the run log decide — so a failed Thursday retries Friday instead of costing an in-season week |
 | `ziggurat-nfl-ingest-gameday` | 16:20 daily | weather forecasts inside the ~10-day horizon |
 | `ziggurat-nfl-ingest-vintage-tue` | Tue 08:00 | the DECISION-DAY copy of `weekly_stats` + `snap_counts`, forced (item 4.2b) |
+| `ziggurat-decisions` | Tue 18:30 | the per-Tuesday decision freeze (item 4.2b) — a Tuesday nobody opened. A missed Tuesday is UNRECOVERABLE, and on `ziggurat decisions status` an empty log is NOT healthy-empty. |
 | `ziggurat-nfl-ingest-vintage-thu` | Thu 08:00 | the POST-CORRECTION copy of the same two, forced. **The pair is one mechanism** — `--force` still anchors the interval gate, so the Tuesday unit alone makes the 08:20 group skip both sources all week and the clean copy is never taken. Their health signal is `nfl_ingest_runs`, never `ingest status`, which reads `fresh` off whichever anchored last. |
 
 Force one of each immediately, so a failure surfaces now rather than at 05:15:
@@ -144,7 +147,22 @@ Force one of each immediately, so a failure surfaces now rather than at 05:15:
 systemctl --user start ziggurat-league-sync.service
 journalctl --user -u ziggurat-league-sync.service -n 50
 .venv/bin/ziggurat league status
+systemctl --user start ziggurat-decisions.service
+.venv/bin/ziggurat decisions status      # 'NO DECISION CAPTURES' is NOT healthy
 ```
+
+**The Week-1 stat anchor, once, by hand** (item 4.2b): the Tue/Thu vintage pair
+has never fired in-season, and Week 1's Tuesday copy of `weekly_stats` /
+`snap_counts` cannot be re-taken once upstream corrects the file. On the Monday
+before the season's first full week — **2026-09-14** — or early that Tuesday, run
+
+```bash
+.venv/bin/ziggurat ingest run --source weekly_stats --source snap_counts --force
+```
+
+belt-and-braces, whether or not the timer is installed. `ziggurat ingest status`
+now prints a VINTAGE PAIR footer; a Tuesday pull with no Thursday one after it is
+the failure that silently trades the clean copy for the early one.
 
 ### 3.6 Decommission the laptop's timers
 
@@ -153,6 +171,8 @@ On the **laptop**:
 ```bash
 scripts/install-league-sync.sh --uninstall
 scripts/install-nfl-ingest.sh --uninstall
+scripts/install-decisions.sh --uninstall
+scripts/install-push.sh --uninstall
 systemctl --user list-timers 'ziggurat-*' --no-pager   # expect nothing
 ```
 
@@ -330,9 +350,11 @@ then, the alert arm proves out in Week 1.
 ```bash
 scripts/install-league-sync.sh --uninstall
 scripts/install-nfl-ingest.sh --uninstall
+scripts/install-decisions.sh --uninstall
+scripts/install-push.sh --uninstall
 ```
 
-Both are user-level systemd units — no root, no system-wide side effects. If the
+All are user-level systemd units — no root, no system-wide side effects. If the
 desktop has no user systemd at all, the tail of each installer prints a cron
 equivalent that keeps the `timeout` wrapper (cron has no `TimeoutStartSec`, and a
 hung pull would otherwise never end).

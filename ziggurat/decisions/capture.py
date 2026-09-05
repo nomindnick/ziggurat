@@ -73,13 +73,15 @@ MANIFEST = "manifest.json"
 PLAN_FILE = "plan.jsonl"
 SWAPS_FILE = "swaps.jsonl"
 CANDIDATES_FILE = "candidates.jsonl"
+BOARD_FILE = "board.jsonl"
 POOL_FILE = "pool.jsonl"
 ROSTER_FILE = "roster.json"
 MARKET_FILE = "market.json"
 
 #: The order files are digested in for :func:`payload_digest` — sorted by name,
 #: so a capture that gains a file later still digests deterministically.
-PAYLOAD_FILES = (CANDIDATES_FILE, MARKET_FILE, PLAN_FILE, POOL_FILE, ROSTER_FILE, SWAPS_FILE)
+PAYLOAD_FILES = (BOARD_FILE, CANDIDATES_FILE, MARKET_FILE, PLAN_FILE, POOL_FILE,
+                 ROSTER_FILE, SWAPS_FILE)
 
 #: The claim the manifest records, and the mechanism behind it. Stated as a
 #: STRUCTURAL fact about the code path (pinned by
@@ -305,11 +307,27 @@ def new_capture_id(now: datetime) -> str:
     The random tail is what makes two captures in the same SECOND two directories
     rather than a collision, and the timestamp head is what makes a directory
     listing sort into the order the operator ran things.
+
+    FOUR bytes, not three (item 4.2b audit, T4). At three the birthday
+    probability over 200 same-second draws is 0.12% — measured at 0.13% over
+    20,000 repetitions — which is a real collision rate wearing the word
+    "collision-free", and it made the suite's own 200-draw pin flaky at about 1
+    run in 800. One extra character takes it to 0.00046%.
     """
-    return f"{now.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+    return f"{now.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
 
 
 def capture_dir(root, *, season, week, capture_id) -> Path:
+    """``<root>/<season>/wk<NN>/<capture_id>``.
+
+    THE WEEK IN THE PATH IS THE WEEK THE BOARD PRICED, and on every in-season
+    Tuesday that is one MORE than the week the candidate rows describe: the plan
+    prices the week ahead, while ``build_candidates`` resolves the last week
+    fully played and knowable (Tue 2026-09-15 → a ``wk02`` directory holding
+    week-1 candidate rows). NEVER join the candidate half to the directory name
+    or to ``decision_freezes.week``; the manifest records ``candidate_week``
+    beside ``week`` for exactly that join (item 4.2b audit, DC-7).
+    """
     wk = "wk00" if week is None else f"wk{int(week):02d}"
     return Path(root) / str(season if season is not None else "unknown") / wk / str(capture_id)
 
@@ -418,6 +436,67 @@ def _candidate_records(collect) -> list[dict]:
     return rows
 
 
+def _board_records(collect) -> list[dict]:
+    """``board.jsonl``: the FLAGGED board itself — every arm, not just usage.
+
+    ``candidates.jsonl`` holds ``_usage_arm``'s evaluated rows, so without this
+    file the INJURY_SHOCK and QB1_CHANGE arms leave no trace in a freeze at all:
+    their reason text and their ``player_key`` (the episode key — item 4.2b §2.3
+    keys the injury arm on it, and it re-fires while a designation persists)
+    exist nowhere else once the process exits, and every Tuesday not captured is
+    unrecoverable.
+
+    It is also what makes the archive re-readable by its own rule:
+    ``candidates.week_flags(board, evaluated_rows)`` needs a board, and the
+    episode history (B12) is built from this file joined to
+    ``candidates.jsonl``. A header line carries the board's own ``notes`` and
+    ``freshness`` — the degrade sentences that explain a badge or a stale read —
+    so a later reader is never left with rows whose caveats were dropped.
+
+    Sorted canonically (kind, player_key, player) so two captures of one board
+    are byte-identical; the arms' emission order is a ranking WITHIN a kind and
+    is preserved as ``rank_in_kind``.
+    """
+    board = collect.candidates
+    if board is None:
+        return []
+    out: list[dict] = [{
+        "record": "board",
+        "season": board.season,
+        "week": board.week,
+        "as_of": board.as_of,
+        "rows": len(board.rows),
+        "notes": list(board.notes),
+        "freshness": list(board.freshness),
+    }]
+    seen: dict[str, int] = {}
+    rows = []
+    for row in board.rows:
+        kind = str(row.signal_kind)
+        seen[kind] = seen.get(kind, 0) + 1
+        rows.append({
+            "record": "flagged",
+            "player_key": row.player_key,
+            "signal_kind": kind,
+            "rank_in_kind": seen[kind],
+            "gsis_id": row.gsis_id,
+            "espn_id": row.espn_id,
+            "player": row.player,
+            "position": row.position,
+            "team": row.team,
+            "magnitude": row.magnitude,
+            "week": row.week,
+            "prior_week": row.prior_week,
+            "hypothesis": row.hypothesis,
+            "episode_tag": row.episode_tag,
+            "reasons": list(row.reasons),
+        })
+    rows.sort(key=lambda r: (str(r["signal_kind"]), str(r["player_key"]),
+                             str(r["player"] or "")))
+    out.extend(rows)
+    return out
+
+
 def _candidates_meta(collect) -> dict:
     """The candidate half's own provenance — or WHY it is absent.
 
@@ -458,6 +537,12 @@ def _candidates_meta(collect) -> dict:
         })
     if board is not None:
         meta["board_rows"] = len(board.rows)
+        # The BOARD's own week is the candidate week too, and it is the one that
+        # survives when the evaluated collector did not run (an older generator, a
+        # board built outside the usage arm). `week` here is the week the
+        # CANDIDATE half describes — never the week the plan priced (DC-7).
+        if meta.get("week") is None:
+            meta["week"] = int(board.week)
         meta["absent_reason"] = None
         return meta
     if evaluated is None:
@@ -622,45 +707,132 @@ def _market_payload(conn, collect) -> dict:
         "projection_input": _probe("projection_input",
                                    lambda: _projection_input(collect)),
     }
-    market["fpecr_panel_wp"] = _probe("fpecr_panel", lambda: _fpecr_probe(conn, season, as_of))
-    market["fp_weekly_ecr"] = _probe("fp_weekly_ecr", lambda: _fp_weekly_probe(conn, as_of))
+    market["fpecr_panel_wp"] = _probe(
+        "fpecr_panel", lambda: _fpecr_probe(conn, season, as_of, collect.view))
+    market["fp_weekly_ecr"] = _probe(
+        "fp_weekly_ecr", lambda: _fp_weekly_probe(conn, as_of, collect.view))
     return market
 
 
-def _fpecr_probe(conn, season, as_of) -> dict:
-    if _table_exists(conn, "fpecr_panel"):
-        row = conn.execute(
-            "SELECT COUNT(*) AS n, MIN(scrape_date) AS lo, MAX(scrape_date) AS hi "
-            "FROM fpecr_panel WHERE season = ? AND ecr_type = 'wp' "
-            "AND knowable_as_of <= ?",
-            (season, as_of),
-        ).fetchone()
-        return {
-            "rows": int(row["n"] or 0),
-            "first_scrape": row["lo"],
-            "last_scrape": row["hi"],
-            "note": "the weekly-positional ECR series the 4.1/4.2 harness grades on, "
-                    "counted at this as_of. 0 rows for the live season is expected "
-                    "until the panel's next scheduled pull.",
-        }
-    return {"status": "absent", "reason": "no fpecr_panel table at this schema_version"}
+#: Why both probes below go through the module's own as-of accessor instead of
+#: their own SQL (item 4.2b audit, R1). ``market.json`` prints ``"view"`` beside
+#: these numbers, so they must be the numbers THAT view can serve. A hand-written
+#: ``knowable_as_of <= :as_of`` is neither half of that:
+#:
+#:   * it has NO RETRIEVAL GATE, so under the safe-default ``historical`` view it
+#:     reports rows the run itself provably could not read. Measured on the live
+#:     database: 3,516 ``fpecr_panel`` wp rows for season 2023 at as_of
+#:     2023-11-01 against ZERO the view can serve (that panel is bulk history —
+#:     every row was retrieved in 2026);
+#:   * it does NOT RESOLVE PER KEY, so once a perishable table holds more than
+#:     one vintage of the same board the count multiplies by the number of
+#:     captures (measured: a 5-row board pulled on three days counted as 15).
+#:
+#: The accessors do both, and doing it here a second time would be a second rule
+#: that can silently diverge from the one the tool reads with. The
+#: ``select_as_of`` ban in tests/test_decisions_capture.py is about this package
+#: never gating a DECISION INPUT ITSELF; these are exactly the fact reads it
+#: exists to protect, and they reach the gate the only safe way — through the
+#: source module that owns it.
+MARKET_PROBE_GATE = (
+    "counted through the source's own as-of accessor at this capture's `as_of` "
+    "and `view` — so the number is what the run itself could have READ, per-key "
+    "resolved (one row per identity, never one per vintage)."
+)
 
 
-def _fp_weekly_probe(conn, as_of) -> dict:
-    if _table_exists(conn, "fp_weekly_ecr"):
-        rows = conn.execute(
-            "SELECT page, COUNT(*) AS n, MAX(scrape_date) AS scrape "
-            "FROM fp_weekly_ecr WHERE knowable_as_of <= ? GROUP BY page ORDER BY page",
-            (as_of,),
-        ).fetchall()
-        return {"pages": [{"page": r["page"], "rows": int(r["n"]),
-                           "last_scrape": r["scrape"]} for r in rows]}
+def _fpecr_probe(conn, season, as_of, view) -> dict:
+    from ziggurat.data.nfl import fpecr
+
+    if not _table_exists(conn, "fpecr_panel"):
+        return {"status": "absent", "reason": "no fpecr_panel table at this schema_version"}
+    rows = fpecr.get_fpecr(conn, as_of=as_of, season=season, ecr_type="wp", view=view)
+    scrapes = sorted({r["scrape_date"] for r in rows if r["scrape_date"]})
     return {
-        "status": "absent",
-        "reason": "no fp_weekly_ecr table at this schema_version — the same-week "
-                  "ECR capture (item 4.2b, B5) had not landed when this freeze "
-                  "was written. The same-week market this capture DOES hold is "
-                  "the Sleeper projections vintage above.",
+        "view": view,
+        "rows": len(rows),
+        "first_scrape": scrapes[0] if scrapes else None,
+        "last_scrape": scrapes[-1] if scrapes else None,
+        "scrape_days": len(scrapes),
+        "gate": MARKET_PROBE_GATE,
+        "note": "the weekly-positional ECR series the 4.1/4.2 harness grades on. "
+                "0 rows for the LIVE season is expected until the panel's next "
+                "scheduled pull; 0 rows for a PAST season under `historical` is "
+                "expected too and is not an absence of market — that panel is bulk "
+                "history, and the backtest reads it through base.latest_truth.",
+    }
+
+
+def _fp_weekly_probe(conn, as_of, view) -> dict:
+    """The same-week weekly-ECR board itself, not only its cardinality.
+
+    §2.1 decides market.json holds "the day's fp_weekly_ecr rows for the six
+    league pages". THE DAY'S: for each page this emits the rows of the NEWEST
+    scrape this view can serve, and reports the whole visible history only as a
+    count beside it. Anything else grows without bound (every page keeps every
+    scrape day in its key), and the older boards are still re-readable from
+    SQLite — ``retrieved_as_of`` is in this table's primary key, so a vintage is
+    never overwritten by a later one.
+    """
+    from ziggurat.data.nfl import fp_weekly
+
+    if not _table_exists(conn, "fp_weekly_ecr"):
+        return {
+            "status": "absent",
+            "reason": "no fp_weekly_ecr table at this schema_version — the same-week "
+                      "ECR capture (item 4.2b, B5) had not landed when this freeze "
+                      "was written. The same-week market this capture DOES hold is "
+                      "the Sleeper projections vintage above.",
+        }
+    pages, board = [], []
+    for page in sorted(fp_weekly.LEAGUE_PAGES):
+        served = fp_weekly.get_fp_weekly_ecr(conn, as_of=as_of, page=page, view=view)
+        scrapes = sorted({r["scrape_date"] for r in served if r["scrape_date"]})
+        last = scrapes[-1] if scrapes else None
+        day = [r for r in served if r["scrape_date"] == last] if last else []
+        pages.append({
+            "page": page,
+            "rows": len(day),               # the day's board — what `board` holds
+            "rows_all_scrapes": len(served),
+            "first_scrape": scrapes[0] if scrapes else None,
+            "last_scrape": last,
+            "scrape_days": len(scrapes),
+        })
+        for r in day:
+            board.append({
+                "page": page,
+                "fantasypros_id": r["fantasypros_id"],
+                "gsis_id": r["gsis_id"],
+                "espn_id": r["espn_id"],
+                "player": r["player"],
+                "team": r["team"],
+                "rank": r["rank"],
+                "ecr": r["ecr"],
+                "sd": r["sd"],
+                "best": r["best"],
+                "worst": r["worst"],
+                "player_ecr_delta": r["player_ecr_delta"],
+                "nfl_week": r["nfl_week"],
+                "week_basis": r["week_basis"],
+                "scrape_date": r["scrape_date"],
+            })
+    # Canonical order so two captures of one board are byte-identical; the
+    # accessor's own row order carries no meaning.
+    def _order(row):
+        rank = row["rank"]
+        return (str(row["page"]), rank is None, float(rank) if rank is not None else 0.0,
+                str(row["fantasypros_id"] or ""), str(row["player"] or ""))
+
+    board.sort(key=_order)
+    return {
+        "view": view,
+        "pages": pages,
+        "board": board,
+        "gate": MARKET_PROBE_GATE,
+        "board_basis": "for each of the six league pages, the rows of the NEWEST "
+                       "scrape this view can serve at `as_of`. `pages[].rows` is "
+                       "that board's size and equals this page's share of `board`; "
+                       "`rows_all_scrapes` counts every scrape day still visible.",
     }
 
 
@@ -678,6 +850,7 @@ def freeze_waiver_artifacts(
     captured_at: datetime | None = None,
     git=None,
     record: bool = True,
+    freeze_id: int | None = None,
 ) -> CaptureResult:
     """Write ONE capture from a filled :class:`~ziggurat.core.waiver.WaiverArtifacts`.
 
@@ -716,14 +889,13 @@ def freeze_waiver_artifacts(
             f"{target} already exists — captures are append-only and are never "
             "overwritten (two captures on one Tuesday are two facts)"
         )
-    if record and store.capture_by_id(conn, cid) is not None:
+    if record and freeze_id is None and store.capture_by_id(conn, cid) is not None:
         raise CaptureCollision(
             f"capture_id {cid!r} is already recorded in decision_freezes — a capture "
             "id names one run and is never reused"
         )
 
-    freeze_id = None
-    if record:
+    if record and freeze_id is None:
         # START-BEFORE-WORK: a killed process must leave a legible row, not silence.
         freeze_id = store.start_capture(
             conn, capture_id=cid, season=season, week=week, trigger=trigger,
@@ -738,7 +910,7 @@ def freeze_waiver_artifacts(
     except BaseException as exc:
         if record and freeze_id is not None:
             store.finish_capture(
-                conn, freeze_id, status=store.STATUS_FAILED,
+                conn, freeze_id, status=store.STATUS_FAILED, week=week,
                 finished_at=datetime.now(CAPTURE_TZ).isoformat(timespec="seconds"),
                 artifact_dir=str(target), error=f"{type(exc).__name__}: {exc}",
             )
@@ -747,7 +919,7 @@ def freeze_waiver_artifacts(
         evaluated = collect.evaluated
         # PUBLISH-THEN-RECORD: only now, with manifest.json on disk.
         store.finish_capture(
-            conn, freeze_id, status=result.status,
+            conn, freeze_id, status=result.status, week=week,
             finished_at=datetime.now(CAPTURE_TZ).isoformat(timespec="seconds"),
             artifact_dir=result.directory,
             manifest_sha256=result.manifest_sha256,
@@ -765,6 +937,18 @@ def freeze_waiver_artifacts(
 
 def _write_capture(conn, collect, *, target: Path, capture_id, now, trigger, argv,
                    week, git) -> CaptureResult:
+    """Write the payload files, then the manifest LAST. Never called directly.
+
+    ``trigger`` IS A THREE-VALUE VOCABULARY, and §2.1 named two (item 4.2b audit,
+    DC-11): ``waivers`` | ``cli`` | ``timer``. The third one is the NEW one, not a
+    rename — ``waivers`` is the always-on capture inside ``ziggurat waivers``
+    (decision D1(a), and the DOMINANT path), ``cli`` is an explicit
+    ``ziggurat decisions freeze``, and ``timer`` is the Tuesday 18:30 unit. The
+    decided two-way split was "was this the run that produced the decision, or the
+    unattended one?"; splitting the attended half in two is what lets a later
+    reader tell the page the operator watched from the one he asked for by hand.
+    A reader filtering on ``{"cli", "timer"}`` alone sees almost nothing.
+    """
     plan = collect.plan
     try:
         target.mkdir(parents=True, exist_ok=False)
@@ -779,6 +963,7 @@ def _write_capture(conn, collect, *, target: Path, capture_id, now, trigger, arg
         (PLAN_FILE, _plan_records(plan)),
         (SWAPS_FILE, _swap_records(collect)),
         (CANDIDATES_FILE, _candidate_records(collect)),
+        (BOARD_FILE, _board_records(collect)),
         (POOL_FILE, _pool_records(collect)),
     ):
         payloads[name] = (_jsonl(records), len(records))
@@ -802,6 +987,17 @@ def _write_capture(conn, collect, *, target: Path, capture_id, now, trigger, arg
         "capture_id": capture_id,
         "season": plan.season,
         "week": week,
+        # The OTHER week this capture holds, and the reason both are named. See
+        # capture_dir's docstring: on an in-season Tuesday these differ by one,
+        # and a reader that joins the candidate rows on `week` (or on the
+        # directory name) is off by one against every row in candidates.jsonl.
+        "candidate_week": candidates.get("week"),
+        "candidate_week_basis": (
+            "the last REG week fully played AND knowable at this as_of, which is "
+            "what build_candidates resolves — NOT `week` above, which is the first "
+            "week the board PRICED. On an in-season Tuesday candidate_week == "
+            "week - 1. None when the candidate half is absent."
+        ),
         "week_basis": (
             "the first week the board priced (plan.weeks[0])" if week is not None
             else "UNRESOLVED — this plan priced no week window (a blocked roster "
@@ -890,6 +1086,19 @@ def capture_best_effort(conn, collect, *, trigger, argv=(), root=None,
         return freeze_waiver_artifacts(conn, collect, trigger=trigger, argv=argv,
                                        root=root, **kwargs)
     except BaseException as exc:  # noqa: BLE001 — the page must survive anything here
+        freeze_id = kwargs.get("freeze_id")
+        if freeze_id is not None:
+            # The pre-started row belongs to THIS run; a fault before
+            # freeze_waiver_artifacts could record one (a bad `root`, a collision)
+            # would otherwise leave it 'running' until the reaper.
+            try:
+                if store.capture_status(conn, freeze_id) == store.STATUS_RUNNING:
+                    store.finish_capture(
+                        conn, freeze_id, status=store.STATUS_FAILED,
+                        finished_at=datetime.now(CAPTURE_TZ).isoformat(timespec="seconds"),
+                        error=f"{type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001 — nothing here may raise
+                pass
         return CaptureResult(
             status=store.STATUS_FAILED,
             capture_id=str(kwargs.get("capture_id") or "?"),
@@ -898,6 +1107,37 @@ def capture_best_effort(conn, collect, *, trigger, argv=(), root=None,
             week=None,
             error=f"{type(exc).__name__}: {exc}",
         )
+
+
+def record_prerun_failure(conn, *, season, trigger, plan_as_of, error,
+                          now=None) -> str:
+    """Write ONE ``failed`` run-log row for a Tuesday that never reached the plan.
+
+    The last hole in "a failure is visible three ways" (item 4.2b audit, OPS-3):
+    the caller resolves ESPN credentials and the own-team id BEFORE
+    :func:`run_freeze` can record anything, and expired cookies are a documented
+    recurring event. Without this, the single most likely Tuesday failure leaves
+    the journal as its only trace and ``ziggurat decisions status`` shows nothing
+    at all for that day.
+
+    Returns the capture id it minted. Never raises: a run-log write must not turn
+    one failure into two.
+    """
+    stamp = now or datetime.now(CAPTURE_TZ)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=CAPTURE_TZ)
+    cid = new_capture_id(stamp)
+    iso = stamp.isoformat(timespec="seconds")
+    try:
+        freeze_id = store.start_capture(
+            conn, capture_id=cid, season=season, week=None, trigger=trigger,
+            plan_as_of=plan_as_of, started_at=iso,
+        )
+        store.finish_capture(conn, freeze_id, status=store.STATUS_FAILED,
+                             finished_at=iso, error=str(error))
+    except Exception:  # noqa: BLE001 — the failure being reported is the point
+        pass
+    return cid
 
 
 #: ``pool_limit=UNSET`` means "whatever ``build_waiver_plan`` ships as its
@@ -909,7 +1149,8 @@ UNSET = object()
 
 def run_freeze(conn, *, as_of, season, own_team_id, trigger=store.TRIGGER_CLI,
                argv=(), weeks=None, last_week=17, pool_limit=UNSET,
-               source="sleeper_rotowire",
+               source="sleeper_rotowire", history=None, record=True,
+               capture_id=None, captured_at=None,
                claim_budget=3, today=None, root=None, **kwargs):
     """Run the Tuesday plan and capture it — the ``ziggurat decisions freeze`` body.
 
@@ -918,6 +1159,10 @@ def run_freeze(conn, *, as_of, season, own_team_id, trigger=store.TRIGGER_CLI,
     if the archive write fails. A plan that does NOT build raises: there is nothing
     to archive, and the caller reports it.
 
+    ``history`` is the NEW/REPEAT badge's comparison set (``read.episode_history_provider``),
+    passed in rather than built here so this module keeps its one-way import edge
+    with ``read`` — and so a timer run and a ``waivers`` run badge identically.
+
     The CANDIDATE half is allowed to be absent — before Week 1 the generator raises
     ``NoCompletedWeek`` and ``build_waiver_plan`` already degrades silently — and
     the capture records that as ``partial`` with the reason, rather than failing.
@@ -925,13 +1170,46 @@ def run_freeze(conn, *, as_of, season, own_team_id, trigger=store.TRIGGER_CLI,
     from ziggurat.core.marginal import DEFAULT_POOL_LIMIT
     from ziggurat.core.waiver import WaiverArtifacts, build_waiver_plan
 
+    now = captured_at or datetime.now(CAPTURE_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=CAPTURE_TZ)
+    cid = capture_id or new_capture_id(now)
+
+    # START BEFORE THE PLAN, not before the WRITE (item 4.2b audit, OPS-3). Every
+    # pre-plan failure — expired ESPN cookies (a documented recurring event), an
+    # unresolvable week, an unresolvable own team, anything raised inside
+    # build_waiver_plan — used to exit before any row existed, so the timer's own
+    # claim that "a failure is visible three ways" was true of the journal only:
+    # `decisions status` showed NOTHING AT ALL for a Tuesday that failed. It
+    # suppresses nothing (a later capture is a new row with a new capture_id) and
+    # `reap_orphans` already covers the window this widens.
+    freeze_id = None
+    if record:
+        freeze_id = store.start_capture(
+            conn, capture_id=cid, season=season, week=None, trigger=trigger,
+            plan_as_of=as_of, started_at=now.isoformat(timespec="seconds"),
+        )
+        store.reap_orphans(conn, now=now.isoformat(timespec="seconds"))
+
     collect = WaiverArtifacts()
-    plan = build_waiver_plan(
-        conn, as_of=as_of, season=season, own_team_id=own_team_id, weeks=weeks,
-        last_week=last_week,
-        pool_limit=DEFAULT_POOL_LIMIT if pool_limit is UNSET else pool_limit,
-        source=source, claim_budget=claim_budget, today=today, collect=collect,
-    )
+    try:
+        plan = build_waiver_plan(
+            conn, as_of=as_of, season=season, own_team_id=own_team_id, weeks=weeks,
+            last_week=last_week,
+            pool_limit=DEFAULT_POOL_LIMIT if pool_limit is UNSET else pool_limit,
+            source=source, claim_budget=claim_budget, today=today, collect=collect,
+            history=history,
+        )
+    except BaseException as exc:
+        if freeze_id is not None:
+            store.finish_capture(
+                conn, freeze_id, status=store.STATUS_FAILED,
+                finished_at=datetime.now(CAPTURE_TZ).isoformat(timespec="seconds"),
+                error=f"the plan did not build, so there was nothing to archive: "
+                      f"{type(exc).__name__}: {exc}",
+            )
+        raise
     result = capture_best_effort(conn, collect, trigger=trigger, argv=argv, root=root,
-                                 **kwargs)
+                                 capture_id=cid, captured_at=now, record=record,
+                                 freeze_id=freeze_id, **kwargs)
     return plan, result

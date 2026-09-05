@@ -2361,7 +2361,77 @@ def format_status(conn, *, season: int, today) -> str:
                          f"batch {row['batch_id']}")
         if len(orphans) > 5:
             lines.append(f"    ... and {len(orphans) - 5} more")
+    lines.extend(_vintage_lines(conn, season=season, today=day))
     return "\n".join(lines)
+
+
+#: The two sources the item-4.2b Tue/Thu vintage pair captures twice a week, and
+#: the weekday each unit fires on.
+VINTAGE_SOURCES = ("weekly_stats", "snap_counts")
+VINTAGE_DAYS = {1: "Tue", 3: "Thu"}
+
+
+def _vintage_lines(conn, *, season, today) -> list[str]:
+    """The Tue/Thu vintage pair's own health — the half no workflow day looked at.
+
+    THE DANGEROUS FAILURE IS THE HALF-PAIR (item 4.2b audit, OPS-5). The two
+    units are ONE mechanism: Tuesday takes the early copy that the decision was
+    priced off, Thursday takes the settled one. If Thursday stops firing, Tuesday
+    keeps anchoring the interval and every later read gets the EARLY copy — while
+    every row above still reads ``fresh``, deliberately and by test
+    (``test_ingest_status_cannot_see_a_missing_vintage``). So the freshness
+    verdict cannot report this and something else has to.
+
+    Cheap on purpose: two run-log reads, no fact-table scan, and SILENT before
+    either unit has ever fired in-season (nothing to compare, and a standing
+    alarm about a unit that has correctly never run is how a report earns being
+    ignored).
+
+    WHAT IT CANNOT SEE, stated rather than implied: ``nfl_ingest_runs`` has no
+    ``forced`` column, so this reads the WEEKDAY of a successful pull and nothing
+    else. A Tuesday landing from the 08:20 weekly group would look identical to
+    one from the vintage unit. That is a false NEGATIVE only in the harmless
+    direction (it can call a pair healthy that a different unit made healthy);
+    the failure it is here for — a Tuesday with no Thursday after it — is
+    unambiguous either way, and it is strictly more than the freshness verdict
+    above is able to say.
+    """
+    seen: dict[str, dict[str, str]] = {}
+    for source in VINTAGE_SOURCES:
+        rows = conn.execute(
+            "SELECT retrieved_as_of, status FROM nfl_ingest_runs "
+            "WHERE source = ? AND season = ? AND status = ? "
+            "ORDER BY run_id DESC LIMIT 60",
+            (source, int(season), STATUS_OK),
+        ).fetchall()
+        for row in rows:
+            stamp = normalize_as_of(row["retrieved_as_of"])
+            label = VINTAGE_DAYS.get(stamp.weekday())
+            if label and label not in seen.setdefault(source, {}):
+                seen[source][label] = stamp.isoformat()
+    if not seen:
+        return []
+    out = ["  VINTAGE PAIR : the Tue/Thu double pull of "
+           + "/".join(VINTAGE_SOURCES) + " (item 4.2b, B4)"]
+    for source in VINTAGE_SOURCES:
+        got = seen.get(source, {})
+        tue, thu = got.get("Tue"), got.get("Thu")
+        out.append(f"    {source:<{NAME_WIDTH}} last Tue {tue or 'never'}   "
+                   f"last Thu {thu or 'never'}")
+    stale = [s for s in VINTAGE_SOURCES
+             if seen.get(s, {}).get("Tue") and not seen.get(s, {}).get("Thu")]
+    behind = [s for s in VINTAGE_SOURCES
+              if seen.get(s, {}).get("Tue") and seen.get(s, {}).get("Thu")
+              and seen[s]["Thu"] < seen[s]["Tue"]]
+    if stale or behind:
+        out.append(
+            "    ^ HALF A PAIR: " + ", ".join(sorted(set(stale + behind)))
+            + " has a Tuesday pull with no Thursday one after it. Every read then "
+            "serves the EARLY copy and the rows above still say `fresh` — that "
+            "blindness is by design, which is why this line exists. Check "
+            "`journalctl --user -u ziggurat-nfl-ingest-vintage-thu.service`."
+        )
+    return out
 
 
 def _source_flags(spec: SourceSpec) -> list[str]:
@@ -2865,6 +2935,14 @@ _PROTECTED_SQL: tuple[tuple[str, str, bool], ...] = (
     # re-fetched from anywhere. Whole table, not a season slice: like
     # `adp_rankings`, "the backfill only touches old seasons" is not a defence.
     ("fp_weekly_ecr", "SELECT * FROM fp_weekly_ecr", False),
+    # Item 4.2b (audit R3): the same argument again, and the STRONGER case of the
+    # two. `_pull_ff_opportunity` is season-addressed (it passes `ctx.season` and
+    # writes a per-season parquet mirror), so if the BACKFILL_EXCLUDED entry were
+    # ever edited the backfill would aim a PAST-SEASON file straight at this
+    # table — whereas `fp_weekly_ecr`'s pull ignores season entirely. Whole
+    # table, not a season slice: a forward-only capture table should hold no row
+    # a backfill could touch at all.
+    ("ffopp_weekly", "SELECT * FROM ffopp_weekly", False),
     ("players", "SELECT * FROM players", False),
 )
 

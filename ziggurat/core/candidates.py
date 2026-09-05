@@ -224,6 +224,10 @@ class CandidateBoard:
     notes: tuple[str, ...]
     as_of: str
     season: int
+    #: False when the NEW/REPEAT comparison could not run (no archive reader
+    #: wired, none readable, or the read failed). The LEGEND keys on this, so a
+    #: page never explains a badge it did not emit — see ``episode_legend``.
+    badged: bool = True
 
     def by_kind(self, kind: str) -> tuple[CandidateRow, ...]:
         return tuple(r for r in self.rows if r.signal_kind == kind)
@@ -302,6 +306,16 @@ class EvaluatedRow:
     #: ``_injury_arm``/``_rewrite``). Empty on a non-flagged row: the module
     #: writes no prose for a player it passed over.
     reasons: tuple[str, ...] = ()
+    #: THE OTHER gsis ids that share this row's ``espn_id`` — empty when the id
+    #: is unique, which is the overwhelming majority (item 4.2b §2.9). The
+    #: crosswalk keeps the FIRST mapping and logs the rest to stderr, where the
+    #: line dies with the process; measured on the live database, 87 espn ids map
+    #: to more than one gsis and 3 of those joins are wrong, one of them a
+    #: rostered player at 61.9% ownership. Without this field a freeze cannot
+    #: later tell whether a flagged row was the right man. It is EVIDENCE, never
+    #: a rule: nothing in this module reads it, and the resolver change is
+    #: deferred to its own measurement pass.
+    id_alternates: tuple[str, ...] = ()
 
     def as_record(self) -> dict:
         """The FLAT row a writer serialises (item 4.2b, B2's payload).
@@ -327,6 +341,7 @@ class EvaluatedRow:
         record["magnitude"] = self.magnitude
         record["flagged"] = self.flagged
         record["reasons"] = list(self.reasons)
+        record["id_alternates"] = list(self.id_alternates)
         return record
 
 
@@ -395,10 +410,36 @@ class EvaluatedRows:
         ]
 
 
+def _id_alternates(espn_of: Mapping[str, str | None]) -> dict[str, tuple[str, ...]]:
+    """gsis -> the OTHER gsis ids sharing its espn id (item 4.2b §2.9).
+
+    ``base.espn_by_gsis`` maps one way and ``base.gsis_by_espn`` keeps the FIRST
+    of a colliding pair, logging the rest to a stderr line that dies with the
+    process. This inverts the map the arm already holds, so a freeze records the
+    ambiguity per row instead of losing it. Pure, and never consulted by any
+    floor: an alternate is a note that this row's ESPN join may name a different
+    player, not a verdict about which one is right.
+    """
+    by_espn: dict[str, list[str]] = {}
+    for gsis, espn in espn_of.items():
+        if espn is None or gsis is None:
+            continue
+        by_espn.setdefault(str(espn), []).append(str(gsis))
+    out: dict[str, tuple[str, ...]] = {}
+    for shared in by_espn.values():
+        if len(shared) < 2:
+            continue
+        ordered = sorted(shared)
+        for gsis in ordered:
+            out[gsis] = tuple(g for g in ordered if g != gsis)
+    return out
+
+
 def _collect_evaluated(
     collect: EvaluatedRows, *, d: Mapping, raw, snap_pct: float | None, path: str,
     hits: Mapping[str, float], magnitude: float, flagged: bool,
     espn_id: str | None, player: str | None, season, week, as_of, view,
+    id_alternates: tuple[str, ...] = (),
 ) -> None:
     """Hand ONE evaluated row to the collector. Called only when a collector was
     passed, so the production path pays nothing for it."""
@@ -412,6 +453,7 @@ def _collect_evaluated(
         levels={m: (None if raw is None else raw[m]) for m in EVALUATED_LEVELS},
         snap_pct=snap_pct, snap_resolved=snap_pct is not None,
         path=path, floors_cleared=dict(hits), magnitude=magnitude, flagged=flagged,
+        id_alternates=tuple(id_alternates),
     ))
 
 
@@ -469,15 +511,47 @@ EPISODE_LEGEND = (
     f"{EPISODE_GAP_WEEKS} weeks he was evaluated. A label, never a ranking "
     f"({EPISODE_LABEL})."
 )
+#: The legend for the UN-BADGED page. A page must never explain labels it cannot
+#: emit (item 4.2b audit, OPS-7): with no comparable archived week every row
+#: reads ``FIRST SEEN (no archive yet)``, and printing the NEW/REPEAT legend
+#: above them tells a reader the badge went live when it did not.
+EPISODE_UNBADGED_LEGEND = (
+    f"FIRST SEEN: every row below reads '{EPISODE_FIRST_SEEN}' — no earlier week "
+    "of this season is readable from the decision archive, so nothing was "
+    "compared. That is an ABSENCE OF COMPARISON, never a claim that the signal "
+    "is new."
+)
+#: ``build_candidates`` was called without an archive reader at all. Distinct
+#: from "the archive is empty": this one is a WIRING fact about the caller, and
+#: the branch production takes must not be the one branch that says nothing.
+EPISODE_UNWIRED_NOTE = (
+    f"FIRST SEEN badges are NOT WIRED on this surface — no decision-archive "
+    f"reader was passed to build_candidates, so every row reads "
+    f"'{EPISODE_FIRST_SEEN}' whatever the archive holds. That is an absence of "
+    f"comparison, not an absence of history."
+)
 
 
-def episode_legend(week: int | None) -> str:
+def _episode_empty_note(week: int) -> str:
+    return (
+        f"FIRST SEEN badges have nothing to compare against — the decision archive "
+        f"holds no readable capture for a week before wk{int(week):02d} of this "
+        f"season, so every row reads '{EPISODE_FIRST_SEEN}'. The badge goes live "
+        f"once a second Tuesday has been captured."
+    )
+
+
+def episode_legend(week: int | None, *, badged: bool = True) -> str:
     """The ONE legend sentence both surfaces print (``ziggurat candidates`` /
     the briefing SIGNALS block, and the waiver evidence block).
 
     In week 1 every badge is the same, so the NEW/REPEAT legend would be noise
-    and the week-1 sentence is what a reader needs instead."""
-    return EPISODE_WEEK1_NOTE if week is not None and int(week) <= 1 else EPISODE_LEGEND
+    and the week-1 sentence is what a reader needs instead. ``badged=False`` —
+    no archive was wired, or none is readable — swaps in the sentence that
+    describes what the rows ACTUALLY say."""
+    if week is not None and int(week) <= 1:
+        return EPISODE_WEEK1_NOTE
+    return EPISODE_LEGEND if badged else EPISODE_UNBADGED_LEGEND
 
 
 def _repeat_tag(week: int) -> str:
@@ -611,23 +685,37 @@ EpisodeHistory = Callable[..., Sequence[WeekFlags]]
 
 
 def _tag_rows(rows: Sequence[CandidateRow], *, season: int, week: int,
-              history: EpisodeHistory | None) -> tuple[list[CandidateRow], str | None]:
-    """Badge every row. Returns (rows, note) — ``note`` is a novice-legible
-    sentence when the archive could not be read, never a silent empty badge."""
+              history: EpisodeHistory | None,
+              ) -> tuple[list[CandidateRow], str | None, bool]:
+    """Badge every row. Returns ``(rows, note, badged)``.
+
+    EVERY branch that cannot badge says so. ``note`` is a novice-legible sentence
+    and ``badged`` is what the page's LEGEND keys on, because the failure that
+    matters is the silent one: before this, the ``history is None`` branch — the
+    branch production actually took — was the only one that produced no note at
+    all, while the NEW/REPEAT legend printed directly above rows that all read
+    ``FIRST SEEN`` (item 4.2b audit, OPS-7).
+    """
+    def _unbadged(note):
+        return [replace(r, episode_tag=EPISODE_FIRST_SEEN) for r in rows], note, False
+
     if int(week) <= 1:
-        return [replace(r, episode_tag=EPISODE_WEEK1) for r in rows], None
+        return [replace(r, episode_tag=EPISODE_WEEK1) for r in rows], None, True
     if history is None:
-        return [replace(r, episode_tag=EPISODE_FIRST_SEEN) for r in rows], None
+        return _unbadged(EPISODE_UNWIRED_NOTE)
     try:
         archived = tuple(history(season=int(season), before_week=int(week)))
     except Exception as exc:  # noqa: BLE001 — degrade LOUDLY, never crash the scan
-        note = (f"FIRST SEEN badges UNAVAILABLE — the decision archive could not be "
-                f"read ({type(exc).__name__}: {exc}); every row below reads "
-                f"'{EPISODE_FIRST_SEEN}'. That is a degrade, not 'nothing has fired "
-                f"before'.")
-        return [replace(r, episode_tag=EPISODE_FIRST_SEEN) for r in rows], note
+        return _unbadged(
+            f"FIRST SEEN badges UNAVAILABLE — the decision archive could not be "
+            f"read ({type(exc).__name__}: {exc}); every row below reads "
+            f"'{EPISODE_FIRST_SEEN}'. That is a degrade, not 'nothing has fired "
+            f"before'.")
+    if not [w for w in archived if int(w.week) < int(week)]:
+        return _unbadged(_episode_empty_note(week))
     return [replace(r, episode_tag=episode_tag_for(
-        r.signal_kind, r.player_key, week=week, history=archived)) for r in rows], None
+        r.signal_kind, r.player_key, week=week, history=archived))
+        for r in rows], None, True
 
 
 # ------------------------------------------------------------- week resolution
@@ -761,6 +849,11 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
     usage is sliced from the same stat read (identical rows: same accessor,
     same ``as_of``/``view``)."""
     espn_of = base.espn_by_gsis(conn)  # crosswalk-at-now, immutable identity
+    # The espn->gsis COLLISIONS, inverted once (item 4.2b §2.9, audit DC-4).
+    # Built only when a collector was passed, so the decision path is byte-for-byte
+    # what it was: this is evidence carried into the archive, and it is read by no
+    # floor, no magnitude and no ordering here.
+    alternates_of = _id_alternates(espn_of) if collect is not None else {}
     # ONE season-to-date stat read (every position; usage_deltas filters), ONE
     # membership-restricted snap fold shared across positions, and the target
     # week's snap share for the role-emergence path — all as_of- and
@@ -799,7 +892,8 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
                         magnitude=sum(v / emergence_floors[m] for m, v in hits.items()),
                         flagged=raw is not None and bool(hits),
                         espn_id=espn_of.get(gsis), player=names.get(gsis, gsis or "?"),
-                        season=season, week=week, as_of=as_of, view=view)
+                        season=season, week=week, as_of=as_of, view=view,
+                        id_alternates=alternates_of.get(gsis, ()))
                 if raw is None or not hits:
                     continue
                 usage_bits = ", ".join(_fmt_delta_abs(m, v) for m, v in sorted(
@@ -827,7 +921,8 @@ def _usage_arm(conn, *, as_of, season, week, positions, view, thresholds, names,
                     path=PATH_DIFFERENCED, hits=hits,
                     magnitude=thresholds.magnitude(hits), flagged=bool(hits),
                     espn_id=espn_of.get(gsis), player=names.get(gsis, gsis or "?"),
-                    season=season, week=week, as_of=as_of, view=view)
+                    season=season, week=week, as_of=as_of, view=view,
+                    id_alternates=alternates_of.get(gsis, ()))
             if not hits:
                 continue
             reason_bits = ", ".join(_fmt_delta(m, v) for m, v in sorted(
@@ -1252,7 +1347,8 @@ def build_candidates(
     # B3): it is a label on a decision that has already been made. Tagging
     # before the sort would put a presentation string inside the ranking path,
     # which is the one thing the header on both surfaces promises it is not.
-    ordered, episode_note = _tag_rows(ordered, season=season, week=week, history=history)
+    ordered, episode_note, badged = _tag_rows(
+        ordered, season=season, week=week, history=history)
 
     notes: list[str] = []
     if episode_note:
@@ -1275,6 +1371,7 @@ def build_candidates(
     return CandidateBoard(
         rows=tuple(ordered), week=week, freshness=freshness,
         notes=tuple(notes), as_of=normalize_as_of(as_of).isoformat(), season=int(season),
+        badged=badged,
     )
 
 
@@ -1350,7 +1447,7 @@ def format_candidates(board: CandidateBoard, *, top: int | None = None,
     # it is pinned twice and still true; these are inserted after it, never in
     # place of it.
     out.append(f"  {USAGE_EVIDENCE_BANNER}")
-    out.append(f"  {episode_legend(board.week)}")
+    out.append(f"  {episode_legend(board.week, badged=board.badged)}")
     out.append("")
 
     for kind in (SIGNAL_USAGE, SIGNAL_INJURY, SIGNAL_QB1):

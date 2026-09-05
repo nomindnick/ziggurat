@@ -10,8 +10,9 @@
 # and each run is its own capture (two captures on one Tuesday are two facts, not
 # a duplicate). This unit covers the other case: a Tuesday the operator never
 # opened. A missed Tuesday is UNRECOVERABLE — league_player_state accumulates
-# forward only (item 3.1) and four market sources serve the current value only
-# (item 3.1b) — so an un-run Tuesday is not a gap that can be backfilled later.
+# forward only (item 3.1) and six market sources serve the current value only
+# (item 3.1b, as amended by item 4.2b) — so an un-run Tuesday is not a gap that
+# can be backfilled later.
 #
 # NO NETWORK. This unit reads the local database only: it does not sync ESPN, it
 # does not pull nflverse, it does not push anything. It therefore has no

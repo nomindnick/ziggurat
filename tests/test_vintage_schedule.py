@@ -279,3 +279,46 @@ def test_the_units_state_the_consequence_they_create():
         assert "--force" in text and "anchor" in text
         assert "self-heal" in text, unit
         assert "nfl_ingest_runs" in text, unit
+
+
+# =============================== item 4.2b audit — the half-pair has a reader
+
+
+def test_ingest_status_reports_the_vintage_pair_itself(db):
+    """OPS-5. The pair is ONE mechanism and only HALF of it had an operator check:
+    the Tuesday journal line was added to the cadence, the Thursday one was not,
+    and the failure the units themselves name as the dangerous one is Thursday
+    silently stopping — after which every read serves the EARLY copy while the
+    freshness verdict says `fresh` throughout, deliberately and by test.
+
+    So the report the operator is told to check has to say it. This is the
+    cheap version the design nominates: two run-log reads, no fact-table scan.
+    """
+    _schedule_rows(db)
+    # SILENT before either unit has fired: a standing alarm about a unit that has
+    # correctly never run is how a report earns being ignored.
+    assert "VINTAGE PAIR" not in refresh.format_status(db, season=2026,
+                                                       today=WEEK["fri"])
+
+    # A HEALTHY pair: Tuesday then Thursday.
+    for source in VINTAGE_SOURCES:
+        _land(db, source, WEEK["tue"])
+        _land(db, source, WEEK["thu"])
+    healthy = refresh.format_status(db, season=2026, today=WEEK["fri"])
+    assert "VINTAGE PAIR" in healthy
+    assert WEEK["tue"] in healthy and WEEK["thu"] in healthy
+    assert "HALF A PAIR" not in healthy
+
+
+def test_a_tuesday_with_no_thursday_after_it_is_named(db):
+    """OPS-5, the failing case: exactly what a stopped Thursday unit looks like."""
+    _schedule_rows(db)
+    for source in VINTAGE_SOURCES:
+        _land(db, source, WEEK["thu"])          # last week's clean copy
+    _land(db, "weekly_stats", "2026-10-13")     # a LATER Tuesday, no Thursday after
+    report = refresh.format_status(db, season=2026, today="2026-10-16")
+    assert "HALF A PAIR" in report
+    assert "weekly_stats" in report.split("HALF A PAIR")[1].split("\n")[0]
+    assert "vintage-thu" in report, "the report must name where to look"
+    # snap_counts is still paired, so it must NOT be accused.
+    assert "snap_counts" not in report.split("HALF A PAIR")[1].split("\n")[0]

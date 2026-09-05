@@ -364,8 +364,15 @@ def test_the_market_file_carries_the_projection_input_hash(db, marginal_world, t
 
     assert ma["projection_input"]["sha256"] == mb["projection_input"]["sha256"]
     assert ma["projection_input"]["entries"] > 16
-    # The same-week market surfaces, whether or not it holds rows today.
-    assert "pages" in ma["fp_weekly_ecr"] or ma["fp_weekly_ecr"]["status"] == "absent"
+    # The same-week market surfaces. NOT a disjunction any more (item 4.2b audit,
+    # T5): `or ... == "absent"` was satisfied on the empty path, so a renamed
+    # column would have been swallowed into `status: error` and the market half of
+    # every capture would have gone quietly missing on the first live Tuesday.
+    from ziggurat.data.nfl.fp_weekly import LEAGUE_PAGES
+
+    weekly = ma["fp_weekly_ecr"]
+    assert {p["page"] for p in weekly["pages"]} == set(LEAGUE_PAGES)
+    assert weekly["board"] == []               # nothing scraped in a synthetic world
     assert ma["fpecr_panel_wp"]["rows"] == 0   # no wp rows in a synthetic world
 
 
@@ -886,7 +893,8 @@ def test_a_broken_provenance_probe_never_costs_the_tuesday(db, marginal_world,
     art = _collect(db)
     monkeypatch.setattr(
         C, "_fp_weekly_probe",
-        lambda conn, as_of: (_ for _ in ()).throw(RuntimeError("no such column: page")))
+        lambda conn, as_of, view: (_ for _ in ()).throw(
+        RuntimeError("no such column: page")))
     result = _freeze(db, art, tmp_path, capture_id="cap-1")
 
     assert result.captured is True
@@ -896,3 +904,427 @@ def test_a_broken_provenance_probe_never_costs_the_tuesday(db, marginal_world,
     # ... and the rest of the file is intact
     assert market["projection_input"]["sha256"]
     assert R.verify(result.directory).ok
+
+
+# ================================================ item 4.2b audit-fix round
+
+# The fixes below each replace a mechanism that shipped with no test, or a
+# sentence the module asserted without measuring. Every one names its finding.
+
+
+def _fp_weekly_row(fp_id, page, scrape, retrieved, rank):
+    return (str(fp_id), page, scrape, 2026, 2, "schedules", f"Player {fp_id}", "RB",
+            "ATL", None, None, rank, float(rank), 1.0, 1, 9, "RB1", 50.0, 0.0,
+            "@BUF", None, "A", 12.0, None, None, None, retrieved, scrape)
+
+
+def _seed_fp_weekly(db, rows):
+    db.executemany(
+        "INSERT OR REPLACE INTO fp_weekly_ecr VALUES ("
+        + ",".join("?" * 28) + ")", rows)
+    db.commit()
+
+
+def _seed_fpecr(db, rows):
+    db.executemany(
+        "INSERT OR REPLACE INTO fpecr_panel VALUES (" + ",".join("?" * 22) + ")", rows)
+    db.commit()
+
+
+def _fpecr_row(fp_id, scrape, retrieved, season=2026):
+    return (str(fp_id), "wp", "ppr-rb", scrape, season, 2, "schedules",
+            f"Player {fp_id}", "RB", "ATL", None, None, 5.0, 1.0, 1, 9, 50.0, 40.0,
+            1, 1, retrieved, scrape)
+
+
+def test_the_market_probes_count_only_what_the_run_could_read(db, marginal_world,
+                                                              tmp_path):
+    """R1. `market.json` prints `view` beside these numbers, so they must be the
+    numbers THAT view can serve.
+
+    Two defects in one shape: no retrieval gate (so a past `--as-of` reported rows
+    the run provably could not read — measured on the live database at 3,516
+    fpecr rows against zero servable), and no per-key resolution (so a board
+    pulled on three days counted three times). Both are fixed by going through
+    the source's own accessor; this seeds exactly those two situations."""
+    _world(marginal_world)
+    # ONE five-row board, captured on three days. Under `historical` at PULL the
+    # newest visible vintage is the one that resolves — never the sum.
+    _seed_fp_weekly(db, [
+        _fp_weekly_row(i, "ppr-rb", "2026-09-14", retrieved, i)
+        for retrieved in ("2026-09-14", "2026-09-15", "2026-09-16")
+        for i in range(1, 6)
+    ])
+    # ... plus a second page, and a row RETRIEVED AFTER the capture's as_of.
+    _seed_fp_weekly(db, [_fp_weekly_row(20 + i, "ppr-wr", "2026-09-14",
+                                        "2026-09-15", i) for i in range(1, 4)])
+    _seed_fp_weekly(db, [_fp_weekly_row(90, "ppr-te", "2026-09-16", "2026-09-16", 1)])
+
+    result = _freeze(db, _collect(db), tmp_path, capture_id="cap-1")
+    market = R.read_records(result.directory, C.MARKET_FILE)[0]
+    weekly = market["fp_weekly_ecr"]
+    by_page = {p["page"]: p for p in weekly["pages"]}
+
+    assert by_page["ppr-rb"]["rows"] == 5, "three vintages of one board are one board"
+    assert by_page["ppr-wr"]["rows"] == 3
+    # knowable_as_of = scrape_date 2026-09-16 is after PULL, and so is its
+    # retrieved_as_of: neither gate may let it through.
+    assert by_page["ppr-te"]["rows"] == 0
+    assert weekly["view"] == "historical"
+    # DC-3: the ROWS themselves, not only their cardinality.
+    assert len(weekly["board"]) == 8
+    assert {b["page"] for b in weekly["board"]} == {"ppr-rb", "ppr-wr"}
+    assert all({"rank", "ecr", "sd", "fantasypros_id", "week_basis"} <= set(b)
+               for b in weekly["board"])
+    for page, entry in by_page.items():
+        assert entry["rows"] == sum(1 for b in weekly["board"] if b["page"] == page)
+
+
+def test_the_fpecr_probe_honours_the_view_and_resolves_per_key(db, marginal_world,
+                                                               tmp_path):
+    """R1, the panel half. The bulk-history footgun in one test: rows retrieved
+    AFTER the capture's as_of are invisible under `historical`, and re-mirroring
+    the same scrape does not double the count."""
+    _world(marginal_world)
+    _seed_fpecr(db, [_fpecr_row(i, "2026-09-13", retrieved)
+                     for retrieved in ("2026-09-13", "2026-09-14")
+                     for i in range(1, 5)])
+    _seed_fpecr(db, [_fpecr_row(50, "2026-09-13", "2026-09-20")])   # retrieved later
+
+    result = _freeze(db, _collect(db), tmp_path, capture_id="cap-1")
+    panel = R.read_records(result.directory, C.MARKET_FILE)[0]["fpecr_panel_wp"]
+    assert panel["rows"] == 4, "two mirrors of one scrape are one scrape"
+    assert panel["first_scrape"] == panel["last_scrape"] == "2026-09-13"
+    assert panel["view"] == "historical"
+
+
+def test_the_board_itself_is_archived_not_only_its_count(db, marginal_world,
+                                                         tmp_path, monkeypatch):
+    """DC-1. Without `board.jsonl` the INJURY_SHOCK and QB1_CHANGE arms leave NO
+    trace in a freeze: `candidates.jsonl` is the usage arm's evaluated rows only,
+    and the board survived as an integer. Their reason text and their
+    `player_key` — the episode key — exist nowhere else once the process exits."""
+    from ziggurat.core import candidates as CAND
+
+    _world(marginal_world)
+    injury = CAND.CandidateRow(
+        player_key="espn:4242", player="Hurt Starter", position="WR", team="MIN",
+        gsis_id=None, espn_id="4242", signal_kind=CAND.SIGNAL_INJURY,
+        magnitude=3.0, week=2, prior_week=None, hypothesis=False,
+        reasons=("ruled OUT — the snaps have to go somewhere",),
+        episode_tag="REPEAT (also wk 1)",
+    )
+    qb1 = CAND.CandidateRow(
+        player_key="00-000777", player="New Starter", position="QB", team="CHI",
+        gsis_id="00-000777", espn_id="777", signal_kind=CAND.SIGNAL_QB1,
+        magnitude=1.0, week=2, prior_week=1, hypothesis=True,
+        reasons=("depth chart QB1 changed",), episode_tag="NEW",
+    )
+    board = CAND.CandidateBoard(rows=(injury, qb1), week=2, freshness=("a note",),
+                                notes=("badges unavailable",), as_of=PULL,
+                                season=SEASON, badged=False)
+    monkeypatch.setattr(waiver, "build_candidates", lambda *a, **kw: board)
+
+    result = _freeze(db, _collect(db), tmp_path, capture_id="cap-1")
+    rows = R.read_records(result.directory, C.BOARD_FILE)
+    header = rows[0]
+    flagged = [r for r in rows if r["record"] == "flagged"]
+
+    assert header["record"] == "board" and header["week"] == 2
+    assert header["notes"] == ["badges unavailable"]
+    assert len(flagged) == _manifest(result)["candidates"]["board_rows"] == 2
+    shock = next(r for r in flagged if r["signal_kind"] == CAND.SIGNAL_INJURY)
+    assert shock["player_key"] == "espn:4242"
+    assert shock["reasons"] == list(injury.reasons)      # verbatim (Rule 6)
+    assert shock["episode_tag"] == "REPEAT (also wk 1)"
+    assert next(r for r in flagged
+                if r["signal_kind"] == CAND.SIGNAL_QB1)["hypothesis"] is True
+    assert C.BOARD_FILE in _manifest(result)["files"]
+
+
+def test_the_manifest_names_both_weeks_because_they_differ(db, marginal_world,
+                                                           tmp_path, monkeypatch):
+    """DC-7. A capture is filed under the week the board PRICED; its candidate
+    rows describe the last week fully PLAYED. On an in-season Tuesday those
+    differ by one, so a reader joining on the directory name is off by one."""
+    _with_candidate_board(monkeypatch)
+    _world(marginal_world)
+    result = _freeze(db, _collect(db), tmp_path, capture_id="cap-1")
+    m = _manifest(result)
+    assert m["week"] == 3                     # the priced week (the directory)
+    assert m["candidate_week"] == 2           # the week the rows describe
+    assert "week - 1" in m["candidate_week_basis"]
+    assert "THE WEEK THE BOARD PRICED" in C.capture_dir.__doc__
+
+
+def test_the_trigger_vocabulary_is_written_down_where_it_is_written(db):
+    """DC-11. A third value (`waivers`) was invented and is what the DOMINANT
+    path writes; §2.1 named two. Useful, but it has to be recorded, or a reader
+    filtering on the decided vocabulary sees almost nothing."""
+    assert {S.TRIGGER_WAIVERS, S.TRIGGER_CLI, S.TRIGGER_TIMER} == {
+        "waivers", "cli", "timer"}
+    doc = C._write_capture.__doc__
+    assert "THREE-VALUE" in doc
+    for value in ("waivers", "cli", "timer"):
+        assert f"``{value}``" in doc or value in doc
+
+
+def test_the_capture_id_tail_is_wide_enough_for_the_claim_it_makes():
+    """T4. The docstring says the random tail is what makes two captures in the
+    same SECOND two directories. At three bytes that is 0.12% wrong over 200
+    draws — measured at 0.13% over 20,000 repetitions, which made the 200-draw
+    pin flaky at ~1 run in 800."""
+    import re as _re
+
+    ids = {C.new_capture_id(__import__("datetime").datetime(2026, 9, 15, 18, 30))
+           for _ in range(200)}
+    assert len(ids) == 200
+    tail = next(iter(ids)).split("-")[1]
+    assert _re.fullmatch(r"[0-9a-f]{8}", tail), tail
+
+
+def test_two_runs_not_only_two_writes_agree(db, marginal_world, tmp_path):
+    """T6. The determinism pin above freezes ONE `WaiverArtifacts` twice, so it
+    covers the WRITER. Its stated motivation — 'a later diff of two Tuesdays
+    reports noise as change' — depends on the RUN being deterministic too."""
+    _world(marginal_world)
+    digests = [_freeze(db, _collect(db), tmp_path / f"run{i}",
+                       capture_id=f"run{i}").payload_digest for i in range(2)]
+    assert digests[0] == digests[1]
+
+
+def test_a_populated_candidates_file_is_byte_identical_across_captures(
+        db, marginal_world, tmp_path):
+    """T3. The byte-identity pin ran over an EMPTY collector — candidates.jsonl
+    digested to sha256 of zero bytes — so the largest payload, the only one
+    carrying floats and a 30-field row, was the one file it did not cover."""
+    from ziggurat.core import candidates as CAND
+
+    _world(marginal_world)
+    art = _collect(db)
+    rows = [
+        CAND.EvaluatedRow(
+            season=SEASON, week=2, prior_week=1, as_of=PULL, view="historical",
+            gsis_id=f"00-0000{i}", espn_id=str(9000 + i), player=f"Studied {i}",
+            position="RB", team="ATL",
+            deltas={"d_carries": 5.0 + i / 3.0, "d_targets": None},
+            levels={"carries": 12.0, "targets": 3.0},
+            snap_pct=1.0 / 3.0, snap_resolved=True, path=CAND.PATH_DIFFERENCED,
+            floors_cleared={"carries": 5.0 + i / 3.0} if i == 0 else {},
+            magnitude=1.5 if i == 0 else 0.0, flagged=(i == 0),
+            reasons=("carries up",) if i == 0 else (),
+            id_alternates=("00-0009999",) if i == 1 else (),
+        )
+        for i in range(3)
+    ]
+    art.evaluated = CAND.EvaluatedRows(
+        ran=True, rows=rows, season=SEASON, week=2, as_of=PULL, view="historical",
+        positions=("RB",), floors=dict(CAND.DEFAULT_BREAKOUT.floors),
+        floors_label=CAND.DEFAULT_BREAKOUT.label, floors_source="shipped",
+        emergence_floors=dict(CAND.EMERGENCE_FLOORS), emergence_label="shipped",
+    )
+    a = _freeze(db, art, tmp_path / "a", capture_id="cap-a")
+    b = _freeze(db, art, tmp_path / "b", capture_id="cap-b")
+    blob = (Path(a.directory) / C.CANDIDATES_FILE).read_bytes()
+    assert blob, "this pin is vacuous over an empty collector — that was the defect"
+    assert blob == (Path(b.directory) / C.CANDIDATES_FILE).read_bytes()
+    # DC-4: the collision field travels with the row.
+    stored = R.read_records(a.directory, C.CANDIDATES_FILE)
+    assert [r["id_alternates"] for r in stored] == [[], ["00-0009999"], []]
+
+
+# ----------------------------------------------- the run log tells the truth
+
+
+def test_a_failure_before_the_plan_still_leaves_a_row(db, marginal_world,
+                                                      monkeypatch, tmp_path):
+    """OPS-3. Every pre-plan failure used to exit before `start_capture`, so a
+    Tuesday that failed showed NOTHING in `decisions status` while the unit file
+    asserted a failure is visible three ways. Expired ESPN cookies are the most
+    likely such failure and are a documented recurring event."""
+    _world(marginal_world)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("ESPN said no")
+
+    monkeypatch.setattr(waiver, "build_waiver_plan", _boom)
+    with pytest.raises(RuntimeError):
+        C.run_freeze(db, as_of=PULL, season=SEASON, own_team_id=TEAM,
+                     trigger=S.TRIGGER_TIMER, weeks=WEEKS, pool_limit=None,
+                     root=tmp_path)
+    row = S.last_capture(db)
+    assert row["status"] == S.STATUS_FAILED
+    assert "ESPN said no" in row["error"]
+    assert "nothing to archive" in row["error"]
+    assert S.format_status(db, today="2026-09-15").count("failed") >= 1
+
+
+def test_a_credential_failure_is_recorded_not_only_journalled(db):
+    """OPS-3, the other half: the CLI resolves credentials BEFORE run_freeze can
+    record anything, so the package owns the row."""
+    cid = C.record_prerun_failure(
+        db, season=SEASON, trigger=S.TRIGGER_TIMER, plan_as_of=PULL,
+        error="the capture never started: RuntimeError: missing ESPN pull credentials")
+    row = S.capture_by_id(db, cid)
+    assert row["status"] == S.STATUS_FAILED and row["week"] is None
+    assert "missing ESPN pull credentials" in row["error"]
+
+
+def test_status_says_how_old_the_archive_is_and_which_tuesdays_are_gone(db,
+                                                                        marginal_world,
+                                                                        tmp_path):
+    """OPS-2. The report handled the EMPTY case emphatically and then treated
+    every non-empty log as healthy — it could not tell 'captured tonight' from
+    'last captured three Tuesdays ago', which is the failure the item exists to
+    prevent. The word UNRECOVERABLE is literal here, unlike `ingest status`."""
+    _world(marginal_world)
+    _freeze(db, _collect(db), tmp_path, capture_id="cap-1",
+            captured_at=__import__("datetime").datetime(2026, 9, 15, 18, 30,
+                                                        tzinfo=C.CAPTURE_TZ))
+    fresh = S.format_status(db, today="2026-09-15")
+    assert "LAST CAPTURE : 2026-09-15 (captured today)" in fresh
+    assert "MISSING TUESDAYS : none since 2026-09-15" in fresh
+
+    stale = S.format_status(db, today="2026-10-06")
+    assert "21 day(s) old" in stale
+    assert "more than a week with no capture" in stale
+    # 09-22, 09-29 and 10-06 are Tuesdays with no capture; 09-15 has one.
+    assert "MISSING TUESDAYS : 3" in stale
+    assert "2026-09-22" in stale and "2026-10-06" in stale
+    assert "UNRECOVERABLE" in stale
+    assert "2026-09-15" not in stale.split("MISSING TUESDAYS")[1].split("\n")[0]
+
+
+def test_status_never_truncates_a_sentence_mid_word(db, marginal_world, tmp_path):
+    """OPS-9. `NOTE=... The plan hal` reads as corruption to a novice — and the
+    string being cut is the one that says a `partial` capture is EXPECTED."""
+    _world(marginal_world)
+    result = _freeze(db, _collect(db), tmp_path, capture_id="cap-1")
+    assert result.status == S.STATUS_PARTIAL
+    text = S.format_status(db, today="2026-09-15")
+    note = next(ln for ln in text.splitlines() if "NOTE=" in ln)
+    assert note.rstrip().endswith("verify --capture cap-1)")
+    assert "…" in note
+
+
+def test_status_labels_the_joint_number(db, marginal_world, tmp_path):
+    """OPS-10, Rule 6: a bare signed decimal beside three counts reads as a count
+    or a score. Every other surface names the unit."""
+    _world(marginal_world)
+    _freeze(db, _collect(db), tmp_path, capture_id="cap-1")
+    text = S.format_status(db, today="2026-09-15")
+    assert "house pts" in text
+
+
+def test_the_empty_status_counts_the_perishable_sources_correctly():
+    """OPS-8. The same wave that corrected CLAUDE.md to SIX left two operator
+    strings saying four — and this one is the first thing a fresh box prints."""
+    assert "six market sources" in S.EMPTY_STATUS
+    service = (Path(C.__file__).resolve().parents[2] / "scripts" / "systemd"
+               / "ziggurat-decisions.service").read_text(encoding="utf-8")
+    assert "six market sources" in service
+    assert "four market sources" not in service + S.EMPTY_STATUS
+
+
+def test_resolving_a_capture_target_is_package_code(db, marginal_world, tmp_path):
+    """R4, Rule 3. The choice between two lookups, two failure sentences composed
+    from row state and the digest hand-over were a 20-line CLI body; `decisions
+    record` / `classify` / `latency` all need the same resolution."""
+    with pytest.raises(R.CaptureNotFound) as exc:
+        R.resolve_capture_target(db)
+    assert "no capture recorded yet" in str(exc.value)
+    with pytest.raises(R.CaptureNotFound) as exc:
+        R.resolve_capture_target(db, capture_id="nope")
+    assert "for id nope" in str(exc.value)
+
+    freeze_id = S.start_capture(db, capture_id="cap-x", season=SEASON, week=3,
+                                trigger=S.TRIGGER_CLI, plan_as_of=PULL,
+                                started_at="2026-09-15T18:30:00")
+    S.finish_capture(db, freeze_id, status=S.STATUS_FAILED,
+                     finished_at="2026-09-15T18:30:01")
+    with pytest.raises(R.CaptureIncomplete) as exc:
+        R.resolve_capture_target(db, capture_id="cap-x")
+    assert "nothing landed to verify" in str(exc.value)
+
+    _world(marginal_world)
+    result = _freeze(db, _collect(db), tmp_path, capture_id="cap-y")
+    target, expected = R.resolve_capture_target(db, capture_id="cap-y")
+    assert str(target) == result.directory
+    assert expected == result.manifest_sha256
+    assert R.verify(target, expected_manifest_sha256=expected).ok
+
+
+# ------------------------------------------------- the episode history reader
+
+
+def test_the_archive_feeds_the_next_weeks_badge(db, marginal_world, tmp_path,
+                                                monkeypatch):
+    """DC-2. The NEW/REPEAT rule shipped INERT: no caller passed `history=` and
+    no adapter existed, so from week 2 onward every badge on every surface read
+    'FIRST SEEN (no archive yet)' forever — the sentence the module itself
+    defines as an absence of comparison, never a claim of novelty."""
+    from ziggurat.core import candidates as CAND
+
+    _world(marginal_world)
+    root = tmp_path / "archive"
+
+    def _board(week, keys):
+        rows = tuple(
+            CAND.CandidateRow(player_key=k, player=f"P {k}", position="RB",
+                              team="ATL", gsis_id=k, espn_id=None,
+                              signal_kind=CAND.SIGNAL_USAGE, magnitude=1.0,
+                              week=week, prior_week=week - 1, hypothesis=False,
+                              reasons=("up",))
+            for k in keys
+        )
+        return CAND.CandidateBoard(rows=rows, week=week, freshness=(), notes=(),
+                                   as_of=PULL, season=SEASON)
+
+    # Two archived Tuesdays, each filed under the week ITS plan priced (so the
+    # directories differ exactly as they do in production): 00-0001 fires in both,
+    # 00-0002 only in week 1.
+    for i, (week, keys) in enumerate(((1, ("00-0001", "00-0002")),
+                                      (2, ("00-0001",))), start=1):
+        frozen = _board(week, keys)
+        monkeypatch.setattr(waiver, "build_candidates",
+                            lambda *a, **kw: frozen)   # noqa: B023 — rebound each loop
+        art = _collect(db, weeks=range(week + 1, 18))
+        C.freeze_waiver_artifacts(db, art, trigger=S.TRIGGER_CLI, root=root,
+                                  capture_id=f"cap-{i}", git=GIT)
+
+    history = R.episode_history_provider(root)
+    archived = history(season=SEASON, before_week=3)
+    assert [w.week for w in archived] == [1, 2]
+    assert CAND.episode_key(CAND.SIGNAL_USAGE, "00-0001") in archived[1].flagged
+
+    assert CAND.episode_tag_for(CAND.SIGNAL_USAGE, "00-0001", week=3,
+                                history=archived) == "REPEAT (also wk 2)"
+    # 00-0002 last fired in week 1, two evaluated weeks back — inside the window.
+    assert CAND.episode_tag_for(CAND.SIGNAL_USAGE, "00-0002", week=3,
+                                history=archived) == "REPEAT (also wk 1)"
+    # and a name the archive has never seen is NEW, not FIRST SEEN
+    assert CAND.episode_tag_for(CAND.SIGNAL_USAGE, "00-9999", week=3,
+                                history=archived) == CAND.EPISODE_NEW
+    # the reader is bounded by `before_week`
+    assert [w.week for w in history(season=SEASON, before_week=2)] == [1]
+
+
+def test_an_unreadable_capture_leaves_a_hole_not_an_exception(db, marginal_world,
+                                                              tmp_path, monkeypatch):
+    """DC-2. A digest mismatch must cost that WEEK its comparison, never the badge
+    for the whole season — and `episode_tag_for` already reports a hole as a
+    BOUND ('NEW (no archive for N earlier wk(s))') rather than as a fact."""
+    from ziggurat.core import candidates as CAND
+
+    _world(marginal_world)
+    root = tmp_path / "archive"
+    _with_candidate_board(monkeypatch)
+    result = C.freeze_waiver_artifacts(db, _collect(db), trigger=S.TRIGGER_CLI,
+                                       root=root, capture_id="cap-1", git=GIT)
+    board_file = Path(result.directory) / C.BOARD_FILE
+    board_file.write_bytes(board_file.read_bytes() + b'{"record": "tampered"}\n')
+
+    history = R.episode_history_provider(root)
+    assert history(season=SEASON, before_week=9) == []
+    tag = CAND.episode_tag_for(CAND.SIGNAL_USAGE, "00-000999", week=9, history=[])
+    assert tag == CAND.EPISODE_FIRST_SEEN
