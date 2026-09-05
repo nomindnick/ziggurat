@@ -10,10 +10,17 @@ graded against.
 
 HOW THIS DIFFERS FROM ``adp_rankings`` (003), which also stores FantasyPros ECR:
 
-* ``adp_rankings`` is the LIVE, PERISHABLE feed — FantasyPros serves today's
-  scrape only, so a missed pull is a lost observation. This panel is BULK
-  IMMUTABLE HISTORY: one file, re-downloadable in full, empirically never
-  revised in place. A missed pull here is staleness, never loss.
+* ``adp_rankings`` is the LIVE, PERISHABLE feed; this panel is BULK IMMUTABLE
+  HISTORY: one file, re-downloadable in full, empirically never revised in
+  place. A missed pull here is staleness, never loss. (CORRECTED 2026-09-04,
+  item 4.2b recon §0.4: this bullet used to add "FantasyPros serves today's
+  scrape only, so a missed pull is a lost observation". Measured, the file
+  ``adp_rankings`` reads is rewritten FRIDAYS ONLY and consecutive daily pulls
+  are identical on 0 of 517 ``ro`` rows, so a missed DAY there loses nothing —
+  only a missed FRIDAY costs a scrape, and even that scrape's CONTENT is in this
+  archive. It keeps the flag because nothing re-populates THAT table. The
+  source where "today only" is literally true is item 4.2b's ``fp_weekly_ecr``,
+  rewritten twice a day.)
 * the panel keys on ``fp_page``. One ``ecr_type`` spans several distinct ranking
   PAGES, and on 215 measured occasions two of them carry THE SAME PLAYER ON THE
   SAME DAY. Loaded onto ``adp_rankings``' key ``(fantasypros_id, ecr_type,
@@ -187,9 +194,10 @@ class PanelRankDiscontinuity(ValueError):
     Fires only on a code defect: after ``_dedupe_on_key`` every ranked row is a
     distinct primary key and every distinct key is stored, so the property holds
     by construction. Raising is cheap here in a way it is not for
-    ``adp_rankings`` (whose identical check trades against a perishable daily
-    scrape): this source is a whole file, re-downloadable in full, so a refused
-    run costs nothing but the download.
+    ``adp_rankings`` (whose identical check trades against a perishable — though,
+    corrected 2026-09-04, WEEKLY rather than daily — scrape): this source is a
+    whole file, re-downloadable in full, so a refused run costs nothing but the
+    download.
     """
 
 

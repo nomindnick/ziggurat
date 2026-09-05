@@ -201,14 +201,24 @@ def _check_pos_rank_contiguous(rows) -> None:
     below it by one and the report reads perfectly normal while being wrong.
 
     RAISES rather than storing a discontinuous board, and that is a deliberate
-    trade against this source's perishability (FantasyPros serves today's scrape
-    only, so a refused run loses the day permanently). The reasoning: after
+    trade against this source's perishability. The reasoning: after
     ``_dedupe_on_key`` the property holds by construction — every ranked row is a
     distinct primary key and every distinct key is stored — so this can only fire
     on a future code defect, where publishing a wrong board is worse than losing
     one day of a market signal that moves slowly. It is also not the permanent-nag
     shape: tomorrow's pull is an independent scrape, so a bad day does not poison
     the next one.
+
+    THE TRADE IS CHEAPER THAN THIS DOCSTRING USED TO SAY (corrected 2026-09-04,
+    item 4.2b recon §0.4). It read "FantasyPros serves today's scrape only, so a
+    refused run loses the day permanently". Measured: the file this reads
+    (``db_fpecr_latest.csv``) is rewritten FRIDAYS ONLY — the 12 most recent
+    upstream commits are all "Automated FP scrape Fri", consecutive daily pulls
+    are identical on 0 of 517 ``ro`` rows, and 2026 holds 7 distinct scrape dates,
+    all Fridays, across 41 pull days. So a refused DAY costs nothing at all and
+    only a refused FRIDAY costs a scrape. The decision above stands a fortiori.
+    (The registry's ``perishable`` flag still stands too, for a different reason:
+    nothing re-populates THIS table — see ``refresh.SOURCES``' note.)
     """
     boards: dict[tuple, list[int]] = {}
     for row in rows:

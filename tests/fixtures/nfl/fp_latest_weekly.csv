@@ -1,0 +1,47 @@
+page,page_pos,scrape_date,fantasypros_id,player_name,pos,team,rank,ecr,sd,best,worst,player_positions,player_short_name,player_eligibility,player_page_url,player_filename,player_bye_week,player_owned_avg,player_opponent,player_opponent_id,player_ecr_delta,note,tag,recommendation,pos_rank,start_sit_grade,r2p_pts
+qb,QB,2026-09-04,19196,Joe Burrow,QB,CIN,1,1.73,0.91,1,4,QB,J. Burrow,QB,https://www.fantasypros.com/nfl/players/joe-burrow.php,joe-burrow.php,6,98.9,vs. TB,TB,NA,NA,NA,NA,QB1,A+,21.4
+qb,QB,2026-09-04,17298,Josh Allen,QB,BUF,2,2.64,1.23,1,6,QB,J. Allen,QB,https://www.fantasypros.com/nfl/players/josh-allen-qb.php,josh-allen-qb.php,7,99.9,at HOU,HOU,NA,NA,NA,NA,QB2,A,20.2
+qb,QB,2026-09-04,17233,Lamar Jackson,QB,BAL,3,2.82,1.03,1,5,QB,L. Jackson,QB,https://www.fantasypros.com/nfl/players/lamar-jackson.php,lamar-jackson.php,13,99.7,at IND,IND,NA,NA,NA,NA,QB3,A,19.8
+qb,QB,2026-09-04,19275,Jalen Hurts,QB,PHI,4,4.14,1.36,2,7,QB,J. Hurts,QB,https://www.fantasypros.com/nfl/players/jalen-hurts.php,jalen-hurts.php,10,98.7,vs. WAS,WAS,NA,NA,NA,NA,QB4,A-,19.3
+qb,QB,2026-09-04,18635,Justin Herbert,QB,LAC,5,4.68,1.69,1,8,QB,J. Herbert,QB,https://www.fantasypros.com/nfl/players/justin-herbert.php,justin-herbert.php,7,94.6,vs. ARI,ARI,NA,NA,NA,NA,QB5,A-,18.9
+qb,QB,2026-09-04,15600,Dak Prescott,QB,DAL,6,6.86,1.49,4,10,QB,D. Prescott,QB,https://www.fantasypros.com/nfl/players/dak-prescott.php,dak-prescott.php,14,95.5,at NYG,NYG,NA,NA,NA,NA,QB6,B+,18.5
+ppr-rb,RB,2026-09-04,22968,Jahmyr Gibbs,RB,DET,1,1,0,1,1,RB,J. Gibbs,RB,https://www.fantasypros.com/nfl/players/jahmyr-gibbs.php,jahmyr-gibbs.php,6,99.8,vs. NO,NO,NA,NA,NA,NA,RB1,A+,21.6
+ppr-rb,RB,2026-09-04,23133,Bijan Robinson,RB,ATL,2,2.33,0.71,2,4,RB,B. Robinson,RB,https://www.fantasypros.com/nfl/players/bijan-robinson.php,bijan-robinson.php,11,99.8,at PIT,PIT,NA,NA,NA,NA,RB2,A+,19.2
+ppr-rb,RB,2026-09-04,16393,Christian McCaffrey,RB,SF,3,3.86,1.46,2,7,RB,C. McCaffrey,RB,https://www.fantasypros.com/nfl/players/christian-mccaffrey.php,christian-mccaffrey.php,8,99.8,at LAR,LAR,NA,NA,NA,NA,RB3,A+,18.3
+ppr-rb,RB,2026-09-04,23136,DeVon Achane,RB,MIA,4,4.86,2.05,3,11,RB,D. Achane,RB,https://www.fantasypros.com/nfl/players/devon-achane.php,devon-achane.php,6,99.8,at LV,LV,NA,NA,NA,NA,RB4,A,18.2
+ppr-rb,RB,2026-09-04,19217,Jonathan Taylor,RB,IND,5,5.1,1.54,4,9,RB,J. Taylor,RB,https://www.fantasypros.com/nfl/players/jonathan-taylor.php,jonathan-taylor.php,13,99.8,vs. BAL,BAL,NA,NA,NA,NA,RB5,A,18.0
+ppr-rb,RB,2026-09-04,17240,Saquon Barkley,RB,PHI,6,6.95,1.96,3,10,RB,S. Barkley,RB,https://www.fantasypros.com/nfl/players/saquon-barkley.php,saquon-barkley.php,10,99.8,vs. WAS,WAS,NA,NA,NA,NA,RB6,A,17.7
+ppr-wr,WR,2026-09-04,19788,JaMarr Chase,WR,CIN,1,1.14,0.35,1,2,WR,J. Chase,WR,https://www.fantasypros.com/nfl/players/jamarr-chase.php,jamarr-chase.php,6,99.9,vs. TB,TB,NA,NA,NA,NA,WR1,A+,21.0
+ppr-wr,WR,2026-09-04,23180,Puka Nacua,WR,LAR,2,2.1,0.68,1,4,WR,P. Nacua,WR,https://www.fantasypros.com/nfl/players/puka-nacua.php,puka-nacua.php,11,99.8,vs. SF,SF,NA,NA,NA,NA,WR2,A+,19.9
+ppr-wr,WR,2026-09-04,19799,Amon-Ra St Brown,WR,DET,3,3.43,0.66,2,4,WR,A. St. Brown,WR,https://www.fantasypros.com/nfl/players/amonra-stbrown.php,amonra-stbrown.php,6,99.9,vs. NO,NO,NA,NA,NA,NA,WR3,A+,18.9
+ppr-wr,WR,2026-09-04,23070,Jaxon Smith-Njigba,WR,SEA,4,3.52,0.91,2,6,WR,J. Smith-Njigba,WR,https://www.fantasypros.com/nfl/players/jaxon-smith-njigba.php,jaxon-smith-njigba.php,11,99.8,vs. NE,NE,NA,NA,NA,NA,WR4,A+,18.8
+ppr-wr,WR,2026-09-04,19236,Justin Jefferson,WR,MIN,5,5.67,1.36,3,9,WR,J. Jefferson,WR,https://www.fantasypros.com/nfl/players/justin-jefferson.php,justin-jefferson.php,6,99.8,vs. GB,GB,NA,NA,NA,NA,WR5,A+,17.2
+ppr-wr,WR,2026-09-04,19202,CeeDee Lamb,WR,DAL,6,5.86,1.12,5,10,WR,C. Lamb,WR,https://www.fantasypros.com/nfl/players/ceedee-lamb.php,ceedee-lamb.php,14,99.8,at NYG,NYG,NA,NA,NA,NA,WR6,A+,17.1
+ppr-te,TE,2026-09-04,22955,Brock Bowers,TE,LV,1,1.43,0.49,1,2,TE,B. Bowers,TE,https://www.fantasypros.com/nfl/players/brock-bowers.php,brock-bowers.php,13,99.9,vs. MIA,MIA,NA,NA,NA,NA,TE1,A+,15.3
+ppr-te,TE,2026-09-04,22936,Trey McBride,TE,ARI,2,1.67,0.64,1,3,TE,T. McBride,TE,https://www.fantasypros.com/nfl/players/trey-mcbride.php,trey-mcbride.php,14,99.7,at LAC,LAC,NA,NA,NA,NA,TE2,A,14.3
+ppr-te,TE,2026-09-04,26006,Colston Loveland,TE,CHI,3,3.05,0.37,2,4,TE,C. Loveland,TE,https://www.fantasypros.com/nfl/players/colston-loveland.php,colston-loveland.php,10,99.7,at CAR,CAR,NA,NA,NA,NA,TE3,A,12.0
+ppr-te,TE,2026-09-04,26434,Tyler Warren,TE,IND,4,4.48,0.73,4,6,TE,T. Warren,TE,https://www.fantasypros.com/nfl/players/tyler-warren.php,tyler-warren.php,13,99.4,vs. BAL,BAL,NA,NA,NA,NA,TE4,A-,12.0
+ppr-te,TE,2026-09-04,20164,Kyle Pitts,TE,ATL,5,5.57,1.09,4,8,TE,K. Pitts Sr.,TE,https://www.fantasypros.com/nfl/players/kyle-pitts.php,kyle-pitts.php,11,97.2,at PIT,PIT,NA,NA,NA,NA,TE5,B+,10.9
+ppr-te,TE,2026-09-04,27050,Harold Fannin,TE,CLE,6,6.48,1.22,5,9,TE,H. Fannin Jr.,TE,https://www.fantasypros.com/nfl/players/harold-fannin-jr.php,harold-fannin-jr.php,11,96.6,at JAC,JAC,NA,NA,NA,NA,TE6,B+,10.9
+k,K,2026-09-04,26068,Brandon Aubrey,K,DAL,1,1.09,0.29,1,2,K,B. Aubrey,K,https://www.fantasypros.com/nfl/players/brandon-aubrey.php,brandon-aubrey.php,14,99.8,at NYG,NYG,NA,NA,NA,NA,K1,A+,9.2
+k,K,2026-09-04,23901,Cameron Dicker,K,LAC,2,2,0.43,1,3,K,C. Dicker,K,https://www.fantasypros.com/nfl/players/cameron-dicker.php,cameron-dicker.php,7,98.3,vs. ARI,ARI,NA,NA,NA,NA,K2,A-,8.8
+k,K,2026-09-04,26475,Cam Little,K,JAC,3,3.82,0.94,3,6,K,C. Little,K,https://www.fantasypros.com/nfl/players/cam-little.php,cam-little.php,7,93.4,vs. CLE,CLE,NA,NA,NA,NA,K3,B+,8.6
+k,K,2026-09-04,15756,Kaimi Fairbairn,K,HOU,4,4.36,1.23,3,7,K,K. Fairbairn,K,https://www.fantasypros.com/nfl/players/kaimi-fairbairn.php,kaimi-fairbairn.php,8,96.2,vs. BUF,BUF,NA,NA,NA,NA,K4,B,8.5
+k,K,2026-09-04,23297,Evan McPherson,K,CIN,5,6.73,2.96,3,14,K,E. McPherson,K,https://www.fantasypros.com/nfl/players/evan-mcpherson.php,evan-mcpherson.php,6,42.6,vs. TB,TB,NA,NA,NA,NA,K5,B-,8.4
+k,K,2026-09-04,27534,Tyler Loop,K,BAL,6,7.18,1.9,4,10,K,T. Loop,K,https://www.fantasypros.com/nfl/players/tyler-loop.php,tyler-loop.php,13,59.4,at IND,IND,NA,NA,NA,NA,K6,C+,8.0
+dst,DST,2026-09-04,8140,Jacksonville Jaguars,DST,JAC,1,1.45,0.66,1,3,DST,JAC DST,DST,https://www.fantasypros.com/nfl/players/jacksonville-defense.php,jacksonville-defense.php,7,75.8,vs. CLE,CLE,NA,NA,NA,NA,DST1,A+,7.4
+dst,DST,2026-09-04,8250,Los Angeles Chargers,DST,LAC,2,3.64,1.49,2,6,DST,LAC DST,DST,https://www.fantasypros.com/nfl/players/los-angeles-chargers-defense.php,los-angeles-chargers-defense.php,7,50.8,vs. ARI,ARI,NA,NA,NA,NA,DST2,A,7.4
+dst,DST,2026-09-04,8280,Los Angeles Rams,DST,LAR,3,4.55,2.23,1,8,DST,LAR DST,DST,https://www.fantasypros.com/nfl/players/los-angeles-rams-defense.php,los-angeles-rams-defense.php,11,88.3,vs. SF,SF,NA,NA,NA,NA,DST3,A-,7.3
+dst,DST,2026-09-04,8120,Houston Texans,DST,HOU,4,4.64,1.61,2,8,DST,HOU DST,DST,https://www.fantasypros.com/nfl/players/houston-defense.php,houston-defense.php,8,97.9,vs. BUF,BUF,NA,NA,NA,NA,DST4,A,6.9
+dst,DST,2026-09-04,8090,Denver Broncos,DST,DEN,5,5.27,1.29,4,7,DST,DEN DST,DST,https://www.fantasypros.com/nfl/players/denver-defense.php,denver-defense.php,10,97.9,at KC,KC,NA,NA,NA,NA,DST5,B+,6.9
+dst,DST,2026-09-04,8230,Philadelphia Eagles,DST,PHI,6,5.45,2.06,2,8,DST,PHI DST,DST,https://www.fantasypros.com/nfl/players/philadelphia-defense.php,philadelphia-defense.php,10,87.4,vs. WAS,WAS,NA,NA,NA,NA,DST6,B+,6.8
+dl,DL,2026-09-04,22738,Aidan Hutchinson,DL,DET,1,1.5,0.5,1,2,DE,A. Hutchinson,DE,https://www.fantasypros.com/nfl/players/aidan-hutchinson.php,aidan-hutchinson.php,6,69.5,vs. NO,NO,NA,NA,NA,NA,DE1,NA,21.0
+dl,DL,2026-09-04,18702,Maxx Crosby,DL,LV,2,3.5,0.5,3,4,DE,M. Crosby,DE,https://www.fantasypros.com/nfl/players/maxx-crosby.php,maxx-crosby.php,13,75.7,vs. MIA,MIA,NA,NA,NA,NA,DE2,NA,21.0
+dl,DL,2026-09-04,24717,Will Anderson,DL,HOU,3,6,3,3,9,DE,W. Anderson Jr.,DE,https://www.fantasypros.com/nfl/players/will-anderson.php,will-anderson.php,8,64.1,vs. BUF,BUF,NA,NA,NA,NA,DE3,NA,19.3
+lb,LB,2026-09-04,19292,Jordyn Brooks,LB,MIA,1,1.5,0.5,1,2,LB,J. Brooks,LB,https://www.fantasypros.com/nfl/players/jordyn-brooks.php,jordyn-brooks.php,6,76.1,at LV,LV,NA,NA,NA,NA,LB1,NA,21.0
+lb,LB,2026-09-04,27236,Carson Schwesinger,LB,CLE,2,2,1,1,3,LB,C. Schwesinger,LB,https://www.fantasypros.com/nfl/players/carson-schwesinger.php,carson-schwesinger.php,11,82.4,at JAC,JAC,NA,NA,NA,NA,LB2,NA,21.0
+lb,LB,2026-09-04,25435,Jack Campbell,LB,DET,3,3,1,2,4,LB,J. Campbell,LB,https://www.fantasypros.com/nfl/players/jack-campbell.php,jack-campbell.php,6,93.4,vs. NO,NO,NA,NA,NA,NA,LB3,NA,19.3
+db,DB,2026-09-04,17310,Derwin James,DB,LAC,1,4,2,2,6,S,D. James Jr.,S,https://www.fantasypros.com/nfl/players/derwin-james.php,derwin-james.php,7,52.2,vs. ARI,ARI,NA,NA,NA,NA,S1,NA,21.0
+db,DB,2026-09-04,16733,Budda Baker,DB,ARI,2,4.5,1.5,3,6,S,B. Baker,S,https://www.fantasypros.com/nfl/players/budda-baker.php,budda-baker.php,14,38.7,at LAC,LAC,NA,NA,NA,NA,S2,NA,21.0
+db,DB,2026-09-04,17544,Jessie Bates,DB,ATL,3,4.5,0.5,4,5,S,J. Bates III,S,https://www.fantasypros.com/nfl/players/jessie-bates-iii.php,jessie-bates-iii.php,11,15.5,at PIT,PIT,NA,NA,NA,NA,S3,NA,19.3
+db,DB,2026-09-04,27911,Max Hurleman,DB,PIT,399,408,0,408,408,CB,M. Hurleman,"RB,WR",https://www.fantasypros.com/nfl/players/max-hurleman.php,max-hurleman.php,9,1.2,vs. ATL,ATL,NA,NA,NA,NA,CB230,NA,NA
