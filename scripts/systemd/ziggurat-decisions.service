@@ -1,0 +1,50 @@
+# Ziggurat decision-time archive (item 4.2b) — systemd USER service.
+#
+# Installed by scripts/install-decisions.sh, which substitutes @REPO@ and
+# @SEASON@. Runs the Tuesday waiver plan and freezes it under the gitignored
+# data/decisions/. Then exits.
+#
+# WHY A TIMER EXISTS WHEN EVERY `ziggurat waivers` RUN ALREADY CAPTURES.
+# The always-on capture is what makes the archived page the one that actually
+# produced a decision — the operator runs `waivers` more than once on a Tuesday,
+# and each run is its own capture (two captures on one Tuesday are two facts, not
+# a duplicate). This unit covers the other case: a Tuesday the operator never
+# opened. A missed Tuesday is UNRECOVERABLE — league_player_state accumulates
+# forward only (item 3.1) and four market sources serve the current value only
+# (item 3.1b) — so an un-run Tuesday is not a gap that can be backfilled later.
+#
+# NO NETWORK. This unit reads the local database only: it does not sync ESPN, it
+# does not pull nflverse, it does not push anything. It therefore has no
+# name-resolution ExecStartPre (the briefing and ingest units need one; this one
+# would be waiting on nothing). What it DOES depend on is the 17:15 PT league
+# sync having landed — see the timer for why 18:30.
+#
+# A NON-ZERO EXIT MEANS THE TUESDAY WAS NOT ARCHIVED. `ziggurat decisions freeze`
+# exits 1 when the capture did not land, so a failure is visible three ways: the
+# journal, a `failed` row in decision_freezes, and `ziggurat decisions status`
+# (whose empty state deliberately does NOT read as healthy).
+
+[Unit]
+Description=Ziggurat decision-time archive (freeze the Tuesday waiver plan)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+# Rate limit for Restart= below; in [Unit], not [Service] (systemd >= 229).
+# Must exceed StartLimitBurst x (TimeoutStartSec + RestartSec) = 3 x (600+300).
+StartLimitBurst=3
+StartLimitIntervalSec=5400
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# --claim-budget 10 matches the Tuesday cadence step, not the quick-scan default
+# of 3: the archive should hold the deep list the operator is told to run, and
+# the chain almost always ends on its own before the cap (item 3.4b).
+ExecStart=@REPO@/.venv/bin/ziggurat decisions freeze --season @SEASON@ --claim-budget 10 --trigger timer
+Restart=on-failure
+RestartSec=300
+# Type=oneshot defaults TimeoutStartSec to INFINITY. A hung run would hold the
+# service Active forever and every later trigger would be silently skipped. The
+# measured waiver run is ~25 s; 600 s is 24x that, so a bound this generous only
+# fires on a genuine hang.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

@@ -5,6 +5,7 @@ parses arguments, calls a package function, and prints the result.
 """
 
 import json
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Optional
@@ -13,6 +14,7 @@ import typer
 
 from ziggurat.core.candidates import build_candidates, format_candidates
 from ziggurat.core.divergence import build_divergence, format_report
+from ziggurat.core.lineup_support import build_lineup, format_lineup_recommendation
 from ziggurat.core.marginal import (
     DEFAULT_POOL_LIMIT,
     WeekResolutionError,
@@ -20,7 +22,6 @@ from ziggurat.core.marginal import (
     describe_league_limits,
     format_marginal,
 )
-from ziggurat.core.lineup_support import build_lineup, format_lineup_recommendation
 from ziggurat.core.scoring import score
 from ziggurat.core.streaming import (
     StreamPositionError,
@@ -34,7 +35,7 @@ from ziggurat.core.valuation import (
     format_valuation,
     format_value_view,
 )
-from ziggurat.core.waiver import build_waiver_plan, format_waiver_plan
+from ziggurat.core.waiver import WaiverArtifacts, build_waiver_plan, format_waiver_plan
 from ziggurat.data.asof import nfl_season_of, normalize_as_of
 from ziggurat.data.nfl.adp_rankings import get_adp_rankings
 from ziggurat.data.nfl.espn_ranks import BoardCollapse, get_espn_draft_ranks
@@ -67,6 +68,9 @@ from ziggurat.data.nfl.refresh import (
 from ziggurat.data.nfl.refresh import format_run as format_ingest_run
 from ziggurat.data.nfl.refresh import format_status as format_ingest_status
 from ziggurat.data.store import apply_schema, connect, migration_alerts, open_db
+from ziggurat.decisions import capture as decisions_capture
+from ziggurat.decisions import read as decisions_read
+from ziggurat.decisions import store as decisions_store
 from ziggurat.league.state import (
     OwnTeamUnresolved,
     format_free_agents,
@@ -313,6 +317,10 @@ def waivers(
     pool_limit: Annotated[int, typer.Option("--pool-limit",
         help="Free agents scanned per position (0 = the whole pool).")] = DEFAULT_POOL_LIMIT,
     source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    no_freeze: Annotated[bool, typer.Option("--no-freeze",
+        help="Do not archive this run to data/decisions/ (item 4.2b). The capture "
+             "costs ~0 s and a missed Tuesday is unrecoverable — use this only for "
+             "a throwaway experiment.")] = False,
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Plan the week's waiver claims: roster-legality precheck (IR eligibility +
@@ -323,10 +331,19 @@ def waivers(
     refuses to plan claims and proposes the fix. All legality, claim/drop and
     ordering logic lives in ``core/waiver.py``; this command parses, calls, and
     prints (rule 3).
+
+    Every run is ARCHIVED (item 4.2b): the plan, the priced swap matrix, every
+    evaluated candidate row, the pool as priced and the roster are frozen under
+    the gitignored data/decisions/ with a sha256 manifest, because a Tuesday that
+    is not captured cannot be reconstructed later. The capture is best-effort by
+    construction — nothing on the archive side may take this page down — and
+    ``--no-freeze`` skips it entirely.
     """
     day = as_of or _today()
     resolved_season = _season(season)
     conn = open_db(path)
+    artifacts = None if no_freeze else WaiverArtifacts()
+    captured = None
     try:
         team_id = team
         if team_id is None:
@@ -345,6 +362,10 @@ def waivers(
             source=source,
             claim_budget=claim_budget,
             today=_today(),
+            collect=artifacts,
+        )
+        captured = None if artifacts is None else decisions_capture.capture_best_effort(
+            conn, artifacts, trigger=decisions_store.TRIGGER_WAIVERS, argv=sys.argv,
         )
     except (WeekResolutionError, OwnTeamUnresolved) as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -352,6 +373,8 @@ def waivers(
     finally:
         conn.close()
     typer.echo(format_waiver_plan(plan, reasons=reasons))
+    if captured is not None:
+        typer.echo(captured.line)
 
 
 @app.command()
@@ -1268,6 +1291,117 @@ def alerts_status(
     conn = open_db(path)
     typer.echo(push_runs.format_status(conn, kind="alert"))
     conn.close()
+
+
+decisions_app = typer.Typer(
+    help="Decision-time archive: freeze what the tool said, on the day (item 4.2b).",
+    no_args_is_help=True,
+)
+app.add_typer(decisions_app, name="decisions")
+
+
+@decisions_app.command("freeze")
+def decisions_freeze(
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff (default today).")] = None,
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your SWID's team).")] = None,
+    from_week: Annotated[Optional[int], typer.Option("--from-week",
+        help="First remaining week. REQUIRED whenever the week cannot be derived.")] = None,
+    last_week: Annotated[int, typer.Option("--last-week", help="Final week priced.")] = 17,
+    claim_budget: Annotated[int, typer.Option("--claim-budget", min=0,
+        help="Ceiling on the claim CHAIN, as `ziggurat waivers`.")] = 10,
+    pool_limit: Annotated[int, typer.Option(
+        help="Free agents scanned per position (0 = the whole pool).")] = DEFAULT_POOL_LIMIT,
+    source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
+    trigger: Annotated[str, typer.Option(
+        help="Who fired this capture: cli | timer (the Tuesday unit passes timer).")] = "cli",
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Run the Tuesday waiver plan and ARCHIVE it — the timer's entry point.
+
+    Same plan `ziggurat waivers` computes (which archives too); this is the run
+    that captures a Tuesday nobody opened. Before Week 1 the candidate half does
+    not exist — the generator has no fully-played REG week — and the capture
+    records that half as ABSENT with its reason rather than failing: the plan half
+    of that Tuesday is still the only record of it there will ever be. All writing
+    lives in ziggurat/decisions/; this command parses, calls, and prints (rule 3).
+    """
+    day = as_of or _today()
+    resolved_season = _season(season)
+    conn = open_db(path)
+    try:
+        team_id = _resolve_team(conn, team=team, as_of=day, season=resolved_season)
+        plan, result = decisions_capture.run_freeze(
+            conn, as_of=day, season=resolved_season, own_team_id=team_id,
+            trigger=trigger, argv=sys.argv,
+            weeks=None if from_week is None else range(from_week, last_week + 1),
+            last_week=last_week,
+            pool_limit=None if pool_limit == 0 else pool_limit,
+            source=source, claim_budget=claim_budget, today=_today(),
+        )
+    except (WeekResolutionError, OwnTeamUnresolved) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(result.line)
+    if not result.captured:
+        raise typer.Exit(code=1)
+
+
+@decisions_app.command("status")
+def decisions_status(
+    season: Annotated[Optional[int], typer.Option(help="Only this season's captures.")] = None,
+    limit: Annotated[int, typer.Option(help="How many captures to list.")] = 10,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Last decision captures. An EMPTY log is NOT healthy-empty — unlike an alert
+    tick with nothing new, a Tuesday with no capture is a Tuesday that can never be
+    reconstructed (item 3.1)."""
+    conn = open_db(path)
+    typer.echo(decisions_store.format_status(conn, season=season, limit=limit))
+    conn.close()
+
+
+@decisions_app.command("verify")
+def decisions_verify(
+    capture: Annotated[Optional[str], typer.Option("--capture",
+        help="Capture id (default: the most recent one recorded).")] = None,
+    directory: Annotated[Optional[Path], typer.Option("--dir",
+        help="Verify a capture directory directly, without the run log.")] = None,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Re-hash a capture against its own manifest and REFUSE it if a byte moved.
+
+    Checks the manifest's own digest against the one recorded when the capture
+    landed, so an edit that changed a payload file AND its manifest entry is
+    caught too. Exits non-zero on any mismatch."""
+    expected = None
+    target = directory
+    if target is None:
+        conn = open_db(path)
+        try:
+            row = (decisions_store.capture_by_id(conn, capture) if capture
+                   else decisions_store.last_capture(conn))
+            if row is None:
+                typer.echo(
+                    "error: no capture recorded"
+                    + (f" for id {capture}" if capture else " yet")
+                    + " — run `ziggurat decisions status`.", err=True)
+                raise typer.Exit(code=1)
+            if not row["artifact_dir"]:
+                typer.echo(
+                    f"error: capture {row['capture_id']} is '{row['status']}' and named "
+                    "no directory — nothing landed to verify.", err=True)
+                raise typer.Exit(code=1)
+            target = Path(row["artifact_dir"])
+            expected = row["manifest_sha256"]
+        finally:
+            conn.close()
+    report = decisions_read.verify(target, expected_manifest_sha256=expected)
+    typer.echo(report.render())
+    if not report.ok:
+        raise typer.Exit(code=1)
 
 
 @app.command()

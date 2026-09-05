@@ -424,3 +424,22 @@ def make_draft_board():
         return tuple(board)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _decision_captures_never_land_in_the_real_archive(monkeypatch, tmp_path_factory):
+    """No test may write a capture under the operator's own `data/decisions/`
+    (item 4.2b).
+
+    `ziggurat waivers` archives EVERY run, so any test that invokes it — the CLI
+    smoke tests already do — would otherwise drop a synthetic Tuesday into the
+    real archive, where the five-way classification and the latency query later
+    read it as a decision that was actually made. Same shape and same reason as
+    the backtest cache redirect above: redirecting the module default makes the
+    omission harmless everywhere rather than in the one test that was caught.
+    `tests/test_decisions_capture.py` pins the redirect.
+    """
+    from ziggurat.decisions import capture as decisions_capture
+
+    monkeypatch.setattr(decisions_capture, "DECISIONS_DIR",
+                        tmp_path_factory.mktemp("decision-captures"))

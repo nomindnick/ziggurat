@@ -1,0 +1,39 @@
+# Ziggurat decision-archive schedule (item 4.2b) — systemd USER timer.
+#
+# TUESDAY 18:30 box-local (this box runs Pacific). Three things fix that slot:
+#
+#   1. AFTER the 17:15 PT league sync. The plan reads today's rosters and today's
+#      free-agent pool; the sync that lands them is the 17:15 run (17:19 observed).
+#      Firing before it would archive yesterday's league state under today's date.
+#   2. BEFORE the operator's evening. 19:00-21:00 PT is unavailable, and the
+#      claims have to be queued in the app before ~23:59 PT to make that night's
+#      batch (the batch runs 00:01-01:13 PT, measured, item 3.8a). A capture at
+#      18:30 is the last undisturbed snapshot of the pool before the league's
+#      other managers start acting on it.
+#   3. It is a SECOND capture, never the only one. Every `ziggurat waivers` run
+#      captures too, so on a Tuesday the operator actually works, this unit adds
+#      one more directory (~450 KB) and the record command names which capture the
+#      submitted claims belong to. That is the intended cost.
+#
+# Persistent=true, and what a catch-up MEANS here: a Tuesday capture that fires
+# on Wednesday is a WEDNESDAY decision — the pool has re-formed after the
+# overnight waiver batch, so it archives a different world under a later
+# `as_of`. It is still worth having (it is the only record of that morning), and
+# `captured_at` plus `plan_as_of` in the manifest are what tell the two apart.
+# Nothing is ever back-stamped.
+#
+# RandomizedDelaySec is deliberately absent: nothing else contends for this slot,
+# and the ordering against the 17:15 sync is the whole point of the hour.
+
+[Unit]
+Description=Ziggurat decision-archive schedule (Tuesday, pre-submission freeze)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=Tue *-*-* 18:30:00
+Persistent=true
+AccuracySec=1m
+Unit=ziggurat-decisions.service
+
+[Install]
+WantedBy=timers.target
