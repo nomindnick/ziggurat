@@ -1,0 +1,29 @@
+# Ziggurat NFL stat vintage capture — THURSDAY timer (item 4.2b).
+#
+# 08:00 local, THURSDAY only — the clean post-correction copy (NFL stat
+# corrections land Monday through Wednesday), 20 minutes ahead of the 08:20
+# weekly group for the same ordering reason as the Tuesday sibling, and with the
+# same deliberately absent RandomizedDelaySec.
+#
+# THIS UNIT IS NOT OPTIONAL ONCE THE TUESDAY ONE EXISTS. The Tuesday pull anchors
+# the interval gate, so the weekly group skips weekly_stats and snap_counts for
+# the rest of the week: without this timer the system would silently trade its
+# clean copy for the early one and report `fresh` while doing it. The pair is one
+# mechanism, and installing half of it is worse than installing neither.
+#
+# Persistent=true with the same catch-up semantics as the Tuesday timer: a late
+# run is stamped with the day it actually ran, never back-stamped, and an
+# incomplete pair is refused by the diff report rather than compared.
+
+[Unit]
+Description=Ziggurat NFL stat vintage capture schedule (Thursday, post-correction copy)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=Thu *-*-* 08:00:00
+Persistent=true
+AccuracySec=1m
+Unit=ziggurat-nfl-ingest-vintage-thu.service
+
+[Install]
+WantedBy=timers.target

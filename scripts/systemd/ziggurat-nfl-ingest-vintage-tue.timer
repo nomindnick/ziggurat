@@ -1,0 +1,38 @@
+# Ziggurat NFL stat vintage capture — TUESDAY timer (item 4.2b).
+#
+# 08:00 local, TUESDAY only. Two things fix that hour and that day:
+#
+#   1. TUESDAY IS THE DECISION DAY. `ziggurat waivers` runs Tuesday, the claims
+#      are queued Tuesday before ~23:59 PT, and from Week 1 that decision reads
+#      whichever stat vintage is newest at the time. This unit is what makes the
+#      vintage the decision READ a stored fact instead of a reconstruction.
+#   2. AHEAD OF THE 08:20 WEEKLY GROUP, deliberately. The group then finds
+#      weekly_stats and snap_counts fresh and pulls only team_defense / ngs_*.
+#      That is why this timer carries NO RandomizedDelaySec: the siblings randomise
+#      by up to 30 minutes to spread load, and a 30-minute jitter here would let
+#      this unit land AFTER the group, at which point the group takes the vintage
+#      and this unit's forced pull is a duplicate under the same day stamp — the
+#      ordering, not the load spreading, is what this unit is for. One box runs
+#      the cadence, so there is nothing to spread.
+#
+# Persistent=true, and what a catch-up means here: a run that fires late is
+# stamped with the day it ACTUALLY ran (retrieved_as_of = the pull day; nothing
+# is ever back-stamped), so a Tuesday catch-up that lands on Wednesday is a
+# Wednesday vintage and the pair for that week is incomplete. The diff report
+# refuses to compare an incomplete pair rather than mislabelling one — the
+# refusal is the alarm. A catch-up landing on the same day as the Thursday
+# sibling simply re-writes that day's partition with the same file; nothing is
+# lost, because a re-pull collides with nothing (retrieved_as_of is in the PK).
+
+[Unit]
+Description=Ziggurat NFL stat vintage capture schedule (Tuesday, pre-correction copy)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=Tue *-*-* 08:00:00
+Persistent=true
+AccuracySec=1m
+Unit=ziggurat-nfl-ingest-vintage-tue.service
+
+[Install]
+WantedBy=timers.target

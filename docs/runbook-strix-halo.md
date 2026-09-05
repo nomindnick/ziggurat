@@ -135,6 +135,8 @@ What you should see:
 | `ziggurat-nfl-ingest` | 07:20 daily | players, schedules, projections, ADP, board, in-season odds + injuries |
 | `ziggurat-nfl-ingest-weekly` | 08:20 daily | fires daily, but each source's `interval_days` and the run log decide — so a failed Thursday retries Friday instead of costing an in-season week |
 | `ziggurat-nfl-ingest-gameday` | 16:20 daily | weather forecasts inside the ~10-day horizon |
+| `ziggurat-nfl-ingest-vintage-tue` | Tue 08:00 | the DECISION-DAY copy of `weekly_stats` + `snap_counts`, forced (item 4.2b) |
+| `ziggurat-nfl-ingest-vintage-thu` | Thu 08:00 | the POST-CORRECTION copy of the same two, forced. **The pair is one mechanism** — `--force` still anchors the interval gate, so the Tuesday unit alone makes the 08:20 group skip both sources all week and the clean copy is never taken. Their health signal is `nfl_ingest_runs`, never `ingest status`, which reads `fresh` off whichever anchored last. |
 
 Force one of each immediately, so a failure surfaces now rather than at 05:15:
 

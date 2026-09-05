@@ -1,0 +1,56 @@
+# Ziggurat NFL stat VINTAGE capture — THURSDAY (item 4.2b) — systemd USER service.
+#
+# Installed by scripts/install-nfl-ingest.sh, which substitutes @REPO@ and
+# @SEASON@. The Tuesday sibling's other half: the same two sources
+# (weekly_stats, snap_counts), the same --force, on the day upstream has finished
+# correcting.
+#
+# WHY IT MUST BE FORCED, which is the whole trap this pair exists around.
+# `--force` bypasses the interval gate but still writes an ANCHORING run-log row.
+# So the Tuesday unit leaves both sources reading `fresh` (age 2 < interval 7)
+# for the rest of the week, and the 08:20 weekly group — which is what used to
+# take the clean Thursday copy — SKIPS them. Adding the Tuesday pull without this
+# unit would therefore not add a vintage; it would REPLACE the good one with the
+# early one, silently, while `ziggurat ingest status` read `fresh` throughout.
+#
+# THE CONSEQUENCE OF THE PAIR: the weekly group's 7-day self-heal no longer
+# applies to weekly_stats or snap_counts. Nothing else retries them. Their health
+# signal is these two units' own rows in `nfl_ingest_runs`, and the vintage diff
+# report refuses to compare when one of the pair is missing — that refusal is the
+# alarm. A `fresh` verdict in `ingest status` says only that SOMETHING anchored,
+# never that both vintages were taken.
+#
+# 08:00, an hour before the tail of the daily unit's window and 20 minutes ahead
+# of the weekly group, so the group finds these two fresh and pulls only
+# team_defense / ngs_* — the ordering is deliberate and is why this timer carries
+# no RandomizedDelaySec (see the .timer).
+#
+# NFL stat corrections land Monday-Wednesday, so THIS is the copy every backtest
+# and every retro should read; Tuesday's is the copy the decision was actually
+# made on. Keeping both is the only way to price the difference.
+
+[Unit]
+Description=Ziggurat NFL stat vintage capture, Thursday (weekly_stats + snap_counts, forced)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+# Rate limit for the Restart= below. These live in [Unit], not [Service]
+# (systemd >= 229); putting them under [Service] is silently ignored. Must exceed
+# StartLimitBurst x (TimeoutStartSec + RestartSec) or the limiter can never engage
+# against a HANG — see the daily unit for the measured reasoning.
+StartLimitBurst=3
+StartLimitIntervalSec=10800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# `After=network-online.target` does NOT work in a USER unit (that target is a
+# system unit; `After=` on a nonexistent unit is silently ignored). Wait for name
+# resolution explicitly, bounded, and never fail the unit on it — see the daily
+# unit's note.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts github.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+ExecStart=@REPO@/.venv/bin/ziggurat ingest run --source weekly_stats --source snap_counts --force --season @SEASON@
+Restart=on-failure
+RestartSec=600
+# Type=oneshot defaults TimeoutStartSec to INFINITY — see the daily unit.
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal

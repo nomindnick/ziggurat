@@ -1443,3 +1443,265 @@ def test_the_settings_page_makes_no_unmeasured_claim_about_which_cap_is_tighter(
         decoded, limits_note=describe_league_limits({"QB": 1, "RB": 2, "WR": 8,
                                                      "TE": 3, "K": 3, "D/ST": 3}))
     assert "QB 1" in tight and "RB 2" in tight
+
+
+# ==============================================================================
+# Item 4.2b (migration 017) — acquisition TIME and the submitted -> outcome key
+# ==============================================================================
+#
+# Two questions the stored shape could not answer: WHEN was a player acquired
+# (to the millisecond, so a waiver batch is distinguishable from a first-come
+# grab six hours later), and WHICH submitted claim produced a given outcome.
+
+
+def _rostered_entry(payload, espn_player_id):
+    """The mRoster entry for one player, so a test can set ESPN's own fields."""
+    for team in payload["teams"]:
+        for entry in team["roster"]["entries"]:
+            if str(entry["playerId"]) == str(espn_player_id):
+                return entry
+    raise AssertionError(f"{espn_player_id} is not on any roster in this payload")
+
+
+def _epoch_ms(stamp: str) -> int:
+    """ISO string -> epoch milliseconds, timezone-aware. The round trip must be
+    exact, and asserting on the STRING would only assert the machine's zone."""
+    from datetime import datetime
+
+    return round(datetime.fromisoformat(stamp).timestamp() * 1000)
+
+
+# the 2026-09-02 waiver batch instant, to the millisecond (item 4.2b recon: all
+# four adds of that batch carry it)
+_BATCH_MS = 1788332772958
+
+
+def test_acquisition_at_round_trips_at_millisecond_precision(crosswalked_db, league_world):
+    """The whole point of the column: the batch instant survives storage.
+
+    At DATE granularity the overnight batch, a 6 a.m. grab and an 11 p.m. one are
+    one value, so the latency question ("was the player gone before the briefing
+    could name him?") is unanswerable no matter how often the sync runs.
+    """
+    payload, pool = league_world(holdings={"1002": 7}, acquisitions={"1002": "ADD"})
+    _rostered_entry(payload, "1002")["acquisitionDate"] = _BATCH_MS
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+
+    row = state.get_player_state(
+        crosswalked_db, as_of="2026-09-10", season=2026, espn_player_id="1002")[0]
+    assert _epoch_ms(row["acquisition_at"]) == _BATCH_MS   # exact, milliseconds and all
+    # offset-aware, three fractional digits — asserted by SHAPE, not by literal:
+    # the stored string is LOCAL time, so a literal would only assert the machine's
+    # timezone (the epoch round-trip above is the value assertion).
+    import re
+
+    assert re.search(r"T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$", row["acquisition_at"])
+
+
+def test_acquisition_date_is_byte_unchanged_beside_the_new_column(crosswalked_db, league_world):
+    """ADDITIVE, not a reinterpretation. 43 stored snapshot days hold DATES in
+    acquisition_date; a consumer reading "2026-08-29" must keep reading exactly
+    that, so the new precision arrives as a SECOND column and the old one is not
+    touched.
+
+    CATCHES: someone "upgrading" acquisition_date to a timestamp, which would
+    change the meaning of a column under every reader with nothing raising.
+    """
+    payload, pool = league_world(holdings={"1002": 7}, acquisitions={"1002": "ADD"})
+    entry = _rostered_entry(payload, "1002")
+    assert entry["acquisitionDate"] == 1788000000000       # the fixture's default epoch
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+
+    row = state.get_player_state(
+        crosswalked_db, as_of="2026-09-10", season=2026, espn_player_id="1002")[0]
+    # the SAME assertion the pre-4.2b test made, unchanged
+    assert row["acquisition_date"] == "2026-08-29"
+    assert len(row["acquisition_date"]) == 10               # a date, with no time on it
+    # and the two are the same epoch at two precisions
+    assert row["acquisition_at"].startswith(row["acquisition_date"])
+
+
+def test_a_free_agent_has_no_acquisition_time(crosswalked_db, league_world):
+    """NULL means NOT ACQUIRED here, and NULL on a pre-017 snapshot means NOT
+    CAPTURED. Neither may become an epoch: a consumer that coerces would date
+    every unowned player to 1970."""
+    payload, pool = league_world(holdings={"1002": 7})
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+    free = state.get_player_state(
+        crosswalked_db, as_of="2026-09-10", season=2026, espn_player_id="1003")[0]
+    assert free["on_team_id"] is None
+    assert free["acquisition_at"] is None and free["acquisition_date"] is None
+
+
+def test_acquisition_at_survives_a_rostered_player_missing_from_the_pool(
+        crosswalked_db, league_world):
+    """The heterogeneous-batch trap that ``_PLAYER_COLUMNS`` exists for.
+
+    A rostered player absent from the pool response is synthesized from a
+    DIFFERENT literal; ``base.upsert`` takes its column list from rows[0] alone.
+    A column present on one shape and missing from the other silently drops for
+    every row — which is why the new column is asserted on the synthesized path
+    too, not only on the mapped one.
+    """
+    payload, pool = league_world(holdings={"1002": 7}, drop_from_pool=("1002",))
+    _rostered_entry(payload, "1002")["acquisitionDate"] = _BATCH_MS
+    _ingest(crosswalked_db, payload, pool, day="2026-09-10")
+
+    row = state.get_player_state(
+        crosswalked_db, as_of="2026-09-10", season=2026, espn_player_id="1002")[0]
+    assert row["on_team_id"] == 7
+    assert _epoch_ms(row["acquisition_at"]) == _BATCH_MS
+
+
+def test_acquisition_at_leakage(crosswalked_db, league_world):
+    """Rule 1 for the new column: it inherits the snapshot's stamping, so a
+    snapshot pulled later is invisible to an earlier historical read, and the
+    explicit latest_truth view does not smuggle it backwards either (the fact
+    time is the pull day for a live mutable snapshot)."""
+    payload, pool = league_world(holdings={"1002": 7}, acquisitions={"1002": "ADD"})
+    _rostered_entry(payload, "1002")["acquisitionDate"] = _BATCH_MS
+    _ingest(crosswalked_db, payload, pool, day="2026-09-20")
+
+    historical = state.get_player_state(
+        crosswalked_db, as_of="2026-09-19", season=2026, espn_player_id="1002")
+    assert historical == []
+    read = base.latest_truth(state.get_player_state)
+    assert read(crosswalked_db, as_of="2026-09-19", season=2026, espn_player_id="1002") == []
+    visible = read(crosswalked_db, as_of="2026-09-20", season=2026, espn_player_id="1002")
+    assert visible and _epoch_ms(visible[0]["acquisition_at"]) == _BATCH_MS
+
+
+# ------------------------------------------- the submitted -> outcome join key
+
+
+def _submitted_claim():
+    """The PENDING half: what ESPN serves after the operator queues a claim.
+
+    Shaped on the live 2026-09-01 feed (item 4.2b recon): our own seat, a paired
+    ADD/DROP, proposed mid-afternoon, no processDate yet.
+    """
+    return {
+        "id": "SUBMIT-1", "teamId": 10, "type": "WAIVER", "status": "PENDING",
+        "scoringPeriodId": 1, "proposedDate": 1788306000000, "processDate": None,
+        "bidAmount": 0,
+        "items": [{"type": "ADD", "playerId": 1001}, {"type": "DROP", "playerId": 1002}],
+    }
+
+
+def _processed_claim():
+    """The EXECUTED half, minted by the overnight batch with a NEW id.
+
+    The measured fact this fixture encodes: the submitted ids and the processed
+    ids of one batch intersect in ZERO elements, `proposedDate` is REWRITTEN to
+    the batch instant, and `relatedTransactionId` is the only link back.
+    """
+    return {
+        "id": "PROCESS-9", "teamId": 10, "type": "WAIVER", "status": "EXECUTED",
+        "scoringPeriodId": 1, "proposedDate": _BATCH_MS, "processDate": _BATCH_MS,
+        "bidAmount": 0, "relatedTransactionId": "SUBMIT-1",
+        "items": [{"type": "ADD", "playerId": 1001}, {"type": "DROP", "playerId": 1002}],
+    }
+
+
+def test_related_transaction_id_is_stored_and_the_submission_carries_none():
+    submitted = state.map_transaction(_submitted_claim(), season=2026)
+    processed = state.map_transaction(_processed_claim(), season=2026)
+    assert all(r["related_transaction_id"] is None for r in submitted)
+    assert all(r["related_transaction_id"] == "SUBMIT-1" for r in processed)
+
+
+def test_transaction_key_cannot_join_a_claim_to_its_outcome_but_the_new_key_can(
+        crosswalked_db):
+    """The defect, reproduced, and then the fix — in SQL, over stored rows.
+
+    ESPN mints a new id at batch time, so a reconciliation keyed on the
+    transaction id reports every claim unresolved. And because ONE transaction is
+    stored as one row PER ITEM, ``transaction_key`` is a composite
+    (``<id>:<item>:<player>``) that ``related_transaction_id`` can never equal —
+    so the join goes through ``transaction_id_of``, the one place that surgery
+    lives.
+    """
+    submitted = state.map_transaction(_submitted_claim(), season=2026)
+    processed = state.map_transaction(_processed_claim(), season=2026)
+    state.ingest_transactions(crosswalked_db, submitted,
+                              retrieved_as_of="2026-09-01", season=2026)
+    state.ingest_transactions(crosswalked_db, processed,
+                              retrieved_as_of="2026-09-02", season=2026)
+
+    stored = state.get_transactions(crosswalked_db, as_of="2026-09-02", season=2026)
+    keys = {r["transaction_key"] for r in stored}
+    related = {r["related_transaction_id"] for r in stored if r["related_transaction_id"]}
+    assert related and not (related & keys)          # the naive join matches NOTHING
+
+    by_id = {}
+    for row in stored:
+        by_id.setdefault(state.transaction_id_of(row["transaction_key"]), []).append(row)
+    outcomes = [r for r in stored if r["related_transaction_id"]]
+    assert outcomes
+    for row in outcomes:
+        claim = by_id[row["related_transaction_id"]]
+        assert claim and all(c["status"] == "PENDING" for c in claim)
+        # ...and the submission time survives only on the PENDING row: the
+        # outcome's proposed_at was rewritten to the batch instant.
+        assert _epoch_ms(claim[0]["proposed_at"]) < _epoch_ms(row["proposed_at"])
+
+
+def test_a_late_attached_join_key_writes_a_new_version(crosswalked_db):
+    """Write-on-change compares a fixed field list, so a field left out of it is
+    swallowed whenever nothing else moved. The join key appearing late is exactly
+    the case this column exists for, so it is IN the mutable set.
+
+    CATCHES: dropping ``related_transaction_id`` from ``_TRANSACTION_MUTABLE`` —
+    which would look harmless (no test of the claim itself would fail) and would
+    lose the only link back to the submission.
+    """
+    raw = _processed_claim()
+    del raw["relatedTransactionId"]
+    first = state.map_transaction(raw, season=2026)
+    assert state.ingest_transactions(
+        crosswalked_db, first, retrieved_as_of="2026-09-02", season=2026) == 2
+
+    late = state.map_transaction(_processed_claim(), season=2026)   # same row, id attached
+    assert state.ingest_transactions(
+        crosswalked_db, late, retrieved_as_of="2026-09-03", season=2026) == 2
+    newest = state.get_transactions(crosswalked_db, as_of="2026-09-03", season=2026)
+    assert {r["related_transaction_id"] for r in newest} == {"SUBMIT-1"}
+
+
+def test_the_activity_door_has_no_join_key_and_never_pretends_to():
+    """The communication feed carries a TOPIC id, not a transaction id. Reading
+    the first segment of one of its keys would return the literal 'act' and match
+    every other activity row — a fabricated join is worse than no answer."""
+    topic = {"id": "T9", "date": _BATCH_MS, "messages": [
+        {"messageTypeId": 180, "targetId": 1001, "to": 10, "from": 0},
+    ]}
+    rows = state.map_activity_topic(topic, season=2026)
+    assert rows[0]["related_transaction_id"] is None
+    assert state.transaction_id_of(rows[0]["transaction_key"]) is None
+    # the transaction door, by contrast, yields the ESPN id
+    assert state.transaction_id_of(
+        state.map_transaction(_submitted_claim(), season=2026)[0]["transaction_key"]
+    ) == "SUBMIT-1"
+
+
+def test_transaction_columns_match_the_table(db):
+    """``_TRANSACTION_COLUMNS`` must equal the table's own column set.
+
+    Same defect class as ``test_player_columns_match_the_table``: ingest builds
+    its payload from this tuple, so a column added to the schema and to the mapper
+    but forgotten here is simply never written — silently, forever, with the
+    mapper's tests all passing.
+    """
+    declared = {r[1] for r in db.execute("PRAGMA table_info(league_transactions)")}
+    assert set(state._TRANSACTION_COLUMNS) | {"retrieved_as_of", "knowable_as_of"} == declared
+
+
+def test_no_manager_identifier_rides_along_with_the_join_key():
+    """Rule 5. ``memberId`` is on the same ESPN payload and identifies a colleague;
+    the actor a latency query needs is the TEAM id, which is already stored."""
+    raw = {**_processed_claim(), "memberId": "{SOME-MEMBER-GUID}"}
+    rows = state.map_transaction(raw, season=2026)
+    for row in rows:
+        assert "member" not in " ".join(str(k) for k in row)
+        assert "{SOME-MEMBER-GUID}" not in " ".join(str(v) for v in row.values())
+    assert "member_id" not in state._TRANSACTION_COLUMNS

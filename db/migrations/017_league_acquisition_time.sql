@@ -1,0 +1,93 @@
+-- db/migrations/017_league_acquisition_time.sql
+-- Item 4.2b (unit B6): the two fields that make an ACQUISITION answerable in
+-- time — when it happened, and which submitted claim it came from.
+--
+-- WHY. The item's acquisition-latency hypothesis asks a question the stored
+-- shape cannot answer today: does a player the Wednesday briefing names get
+-- taken before the operator can act on it? `league_player_state` is one
+-- partition per calendar DAY and the four daily syncs localise an add to a <=6 h
+-- bucket at best, so the whole question dies on granularity — while ESPN itself
+-- serves `acquisitionDate` at MILLISECOND precision for every rostered player on
+-- every team on every pull.
+--
+-- Measured on this league's only batch day (2026-09-02, item 4.2b recon): 8
+-- ownership changes, and all four ADDs carry acquisitionDate
+-- 2026-09-02T00:06:12.958-07:00 — the same instant to the millisecond, which is
+-- the batch itself (league_settings.waiver_process_status holds
+-- {"2026-09-02T07:06:12.958+00:00": 4}). A DATE cannot express that: at day
+-- granularity the batch, a 6 a.m. first-come grab and an 11 p.m. one are one
+-- value. Between that batch and the 06:03 briefing push there were 0
+-- acquisitions in a 5 h 56 m 49 s window — a baseline of one Wednesday, which is
+-- exactly why the measurement has to start accumulating now.
+--
+-- 1. league_player_state.acquisition_at — the SAME epoch as acquisition_date, in
+--    LOCAL ISO with milliseconds (2026-09-02T00:06:12.958-07:00).
+--
+--    acquisition_date IS NOT REDEFINED AND NOT REWRITTEN. Its stored values are
+--    calendar dates, 43 snapshot days of them, and a column whose meaning changes
+--    under a reader is worse than a second column: every consumer that reads
+--    "2026-08-29" keeps reading "2026-08-29" forever, and state.map_player_entry /
+--    roster_index still produce it byte-for-byte (pinned by test). The new column
+--    is ADDITIVE — one more field, never a reinterpretation of an old one.
+--
+--    NULL MEANS NOT CAPTURED, never "no acquisition". Every league_player_state
+--    row retrieved before this migration (2026-07-24..) predates the column and
+--    reads NULL, exactly as the migration-014 columns do; a free agent also reads
+--    NULL because he has no acquisition at all. A consumer must never turn either
+--    into a timestamp: "we do not know when" and "he was never acquired" are both
+--    NULL here, and only `on_team_id` separates them.
+--
+-- 2. league_transactions.related_transaction_id — the submitted -> outcome join
+--    key, and the reason a claim cannot be reconciled today.
+--
+--    ESPN MINTS A NEW ID AT BATCH TIME. Measured on the same batch: the 3 PENDING
+--    message ids and the 5 EXECUTED waiver ids intersect in ZERO elements, so
+--    joining a submitted claim to its outcome on `transaction_key` reports every
+--    claim unresolved forever. The live feed carries `relatedTransactionId` on the
+--    PROCESS transaction, pointing back at the submission, and state.map_transaction
+--    did not store it. Two more measured facts make it load-bearing rather than
+--    convenient: the EXECUTED row's `proposedDate` is REWRITTEN to the batch
+--    instant (so submission time survives only on the PENDING row), and `status`
+--    is not live state (ESPN was still serving processed claims as PENDING two
+--    days later). "Lost" must therefore be derived from the ABSENCE of an EXECUTED
+--    row referencing the submission — which needs this column to be expressible at
+--    all.
+--
+--    TEXT, not INTEGER: transaction ids arrive as ESPN strings/uuids and
+--    transaction_key is already TEXT. NULL is the normal case — only a PROCESS
+--    transaction references another one.
+--
+-- WHAT IS DELIBERATELY NOT STORED (Rule 5). `memberId` rides on the same
+-- transaction payload and is a PER-MANAGER identifier for a colleague. It is not
+-- ingested, not stored here, and never fixtured. The actor a latency query needs
+-- is the TEAM id, which league_transactions already carries; "our seat vs a
+-- rival" is answerable from that alone.
+--
+-- STAMPING (Rule 1) is unchanged by this migration. acquisition_at inherits its
+-- snapshot's retrieved_as_of / knowable_as_of (the pull day, a live mutable
+-- snapshot), and related_transaction_id inherits league_transactions' stamping,
+-- whose knowable_as_of is the EVENT's own date — the one table here whose
+-- knowledge time is not the pull day. Both are read through the existing
+-- accessors under the default `historical` view; reading a batch outcome under
+-- latest_truth would leak it into a pre-batch Tuesday read.
+--
+-- WRITE-ON-CHANGE. related_transaction_id joins `state._TRANSACTION_MUTABLE`, so
+-- an id ESPN attaches to a row we have already stored writes a NEW version
+-- instead of being swallowed by "nothing changed" — the join key appearing late
+-- is precisely the case this column exists for.
+--
+-- ADD COLUMN is metadata-only in SQLite: no table rewrite on the 840 MB live
+-- database, the columns append at the end, and every accessor reads by name
+-- (select_as_of projects "*" into sqlite3.Row), so there is no positional
+-- consumer to break.
+--
+-- No BEGIN/COMMIT and no schema_version write here: store.apply_schema wraps this
+-- script in its own transaction and stamps the version itself.
+
+ALTER TABLE league_player_state  ADD COLUMN acquisition_at         TEXT;
+ALTER TABLE league_transactions  ADD COLUMN related_transaction_id TEXT;
+
+-- The join a reconciliation runs: "which EXECUTED transaction references this
+-- submission?". Without it that is a scan of the whole feed per claim.
+CREATE INDEX IF NOT EXISTS idx_league_transactions_related
+    ON league_transactions (season, related_transaction_id);

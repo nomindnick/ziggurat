@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Install the Ziggurat NFL data refresh timers (item 3.1b) as systemd USER units.
 #
-# Three units, one per cadence group — see scripts/systemd/*.timer for why each
-# hour was chosen (they are pinned to MEASURED upstream publish times):
+# Five units — three cadence groups plus the item-4.2b vintage pair — see
+# scripts/systemd/*.timer for why each hour was chosen (they are pinned to
+# MEASURED upstream publish times):
 #   daily   07:20      projections (perishable), ADP (perishable), players,
 #                      schedules, ESPN board (preseason), odds + injuries (in-season)
 #   weekly  08:20      weekly_stats, snap_counts, team_defense, ngs_* — fires daily
@@ -10,6 +11,16 @@
 #                      anchored on Thursday (stat corrections land Mon-Wed) and
 #                      self-healing: a failed Thursday retries on Friday
 #   gameday 16:20      weather forecasts for weeks inside Open-Meteo's ~16d wall
+#   vintage 08:00      Tue AND Thu, weekly_stats + snap_counts, --force: the
+#                      decision-day copy beside the post-correction one (item
+#                      4.2b). THE PAIR IS ONE MECHANISM — installing the Tuesday
+#                      unit alone would replace the clean Thursday copy with the
+#                      early one, because --force still ANCHORS the interval gate
+#                      and the 08:20 weekly group then skips both sources all
+#                      week. That also means the weekly group's 7-day self-heal no
+#                      longer covers these two: their health signal is these units'
+#                      own rows in nfl_ingest_runs, never `ingest status`, which
+#                      reads `fresh` off whichever of the two anchored last.
 #
 #   scripts/install-nfl-ingest.sh [--season 2026] [--dry-run] [--uninstall]
 #
@@ -19,7 +30,10 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-UNITS=(ziggurat-nfl-ingest ziggurat-nfl-ingest-weekly ziggurat-nfl-ingest-gameday)
+# Both vintage units or neither — see the header. `--uninstall` removes the same
+# list, so the pair is also removed together.
+UNITS=(ziggurat-nfl-ingest ziggurat-nfl-ingest-weekly ziggurat-nfl-ingest-gameday
+       ziggurat-nfl-ingest-vintage-tue ziggurat-nfl-ingest-vintage-thu)
 SEASON=""
 DRY_RUN=0
 UNINSTALL=0
@@ -29,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --season) SEASON="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;   # the header block, up to `set -euo`
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -104,6 +118,10 @@ cat <<EOF
 next steps
   see the plan     : $REPO/.venv/bin/ziggurat ingest run --dry-run --season $SEASON
   run one now      : systemctl --user start ziggurat-nfl-ingest.service
+  the vintage pair : systemctl --user list-timers 'ziggurat-nfl-ingest-vintage-*'
+                     (Tue+Thu 08:00; a missing run shows ONLY in nfl_ingest_runs
+                      and in the vintage diff refusing to compare — `ingest
+                      status` will still say fresh)
   watch it         : journalctl --user -u ziggurat-nfl-ingest.service -n 50 -f
   check staleness  : $REPO/.venv/bin/ziggurat ingest status
   the registry     : $REPO/.venv/bin/ziggurat ingest sources
@@ -114,4 +132,6 @@ no equivalent of TimeoutStartSec and a hung pull would otherwise never end:
   20 7  * * *   cd $REPO && timeout 1800 .venv/bin/ziggurat ingest run --group daily   --season $SEASON >> data/nfl-ingest.log 2>&1
   20 8  * * *   cd $REPO && timeout 1800 .venv/bin/ziggurat ingest run --group weekly  --season $SEASON >> data/nfl-ingest.log 2>&1
   20 16 * * *   cd $REPO && timeout 1800 .venv/bin/ziggurat ingest run --group gameday --season $SEASON >> data/nfl-ingest.log 2>&1
+  0  8  * * 2   cd $REPO && timeout 1800 .venv/bin/ziggurat ingest run --source weekly_stats --source snap_counts --force --season $SEASON >> data/nfl-ingest.log 2>&1
+  0  8  * * 4   cd $REPO && timeout 1800 .venv/bin/ziggurat ingest run --source weekly_stats --source snap_counts --force --season $SEASON >> data/nfl-ingest.log 2>&1
 EOF

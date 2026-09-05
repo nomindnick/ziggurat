@@ -56,6 +56,10 @@ _PLAYER_COLUMNS = (
     "on_team_id", "roster_status", "lineup_slot", "acquisition_type",
     "acquisition_date", "injury_status", "percent_owned", "percent_started",
     "percent_change", "scoring_period",
+    # item 4.2b — the same acquisition epoch at MILLISECOND precision, beside the
+    # date (never instead of it). Same rule as the 014 columns: forgetting it here
+    # costs the whole day's snapshot, not one column.
+    "acquisition_at",
     # item 3.8a — ESPN's own machine truth (migration 014). Every one of these MUST
     # stay in this tuple: base.upsert takes its column list from rows[0] ONLY, and
     # ingest_player_state writes a HETEROGENEOUS batch (mapped pool rows plus
@@ -79,10 +83,23 @@ _MATCHUP_COLUMNS = (
 _TRANSACTION_COLUMNS = (
     "season", "transaction_key", "week", "team_id", "espn_player_id", "action",
     "source", "status", "bid_amount", "proposed_at", "processed_at",
+    # item 4.2b (migration 017) — the submitted -> outcome join key. ESPN mints a
+    # NEW id at batch time (measured: the PENDING ids and the EXECUTED waiver ids
+    # of one batch intersect in ZERO elements), so transaction_key cannot join a
+    # claim to its result; relatedTransactionId on the PROCESS transaction can.
+    "related_transaction_id",
 )
 # The transaction fields whose change makes a stored event stale (write-on-change,
 # §3.4 of the design): a claim really does mutate PENDING -> EXECUTED overnight.
-_TRANSACTION_MUTABLE = ("action", "source", "status", "bid_amount", "proposed_at", "processed_at")
+#
+# related_transaction_id is in this set (item 4.2b) because the join key APPEARING
+# LATE is the case it exists for: if ESPN attaches it to a row we already stored
+# and nothing else about that row moved, leaving it out here would swallow the one
+# field a reconciliation needs and report the claim unresolved forever.
+_TRANSACTION_MUTABLE = (
+    "action", "source", "status", "bid_amount", "proposed_at", "processed_at",
+    "related_transaction_id",
+)
 _SETTINGS_COLUMNS = (
     "season", "scoring_period", "acquisition_type", "is_using_acquisition_budget",
     "acquisition_budget", "acquisition_limit", "matchup_acquisition_limit",
@@ -193,12 +210,21 @@ def is_starting_slot(slot) -> bool:
     return slot in _STARTING_SLOTS
 
 
-def _epoch_ms_to_iso(value, *, date_only: bool = False) -> str | None:
+def _epoch_ms_to_iso(value, *, date_only: bool = False,
+                     timespec: str = "seconds") -> str | None:
     """ESPN epoch-milliseconds -> ISO string in LOCAL time, or None.
 
     Timestamps are kept at FULL precision (offset-aware) for transactions — they
     are the only intraday-accurate record in the system (design §3.4).
     ``date_only`` truncates to the calendar day the as-of gate reads.
+
+    ``timespec`` is passed through to ``datetime.isoformat``. It stays at seconds
+    for every existing caller — the stored strings must not move — and only
+    ``acquisition_at`` (item 4.2b, migration 017) asks for "milliseconds", because
+    that is the precision ESPN serves and the precision the question needs: the
+    four adds of the 2026-09-02 waiver batch share one instant to the millisecond,
+    and matching an acquisition to the batch is what tells a claim apart from a
+    first-come grab.
 
     LOCAL, not UTC, and that matters: every other date in this system is a local
     calendar day (the CLI stamps ``retrieved_as_of`` from ``date.today()``).
@@ -215,7 +241,7 @@ def _epoch_ms_to_iso(value, *, date_only: bool = False) -> str | None:
         moment = datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc).astimezone()
     except (TypeError, ValueError, OSError, OverflowError):
         return None
-    return moment.date().isoformat() if date_only else moment.isoformat(timespec="seconds")
+    return moment.date().isoformat() if date_only else moment.isoformat(timespec=timespec)
 
 
 def _flag(value) -> int | None:
@@ -346,6 +372,14 @@ def roster_index(payload: dict) -> dict[str, dict]:
                 "lineup_slot": decode_slot(entry.get("lineupSlotId")),
                 "acquisition_type": entry.get("acquisitionType"),
                 "acquisition_date": _epoch_ms_to_iso(entry.get("acquisitionDate"), date_only=True),
+                # The SAME epoch at millisecond precision (item 4.2b, migration 017).
+                # Additive: acquisition_date above keeps producing the identical date
+                # string it always has, because 43 snapshot days of stored values mean
+                # that column's MEANING may not move under a reader. NULL when ESPN
+                # serves no acquisitionDate — never "not acquired", which is on_team_id's
+                # answer, not this column's.
+                "acquisition_at": _epoch_ms_to_iso(
+                    entry.get("acquisitionDate"), timespec="milliseconds"),
                 # The ROSTER ENTRY's own injuryStatus — a DIFFERENT field from
                 # player.injuryStatus, which map_player_entry reads (item 3.8a).
                 # Stored raw and interpreted NOWHERE: it read NORMAL on all 160
@@ -391,6 +425,7 @@ def map_player_entry(entry: dict, *, season: int, scoring_period=None) -> dict |
         "lineup_slot": None,
         "acquisition_type": None,
         "acquisition_date": None,
+        "acquisition_at": None,        # overlaid from roster_index when rostered
         "injury_status": player.get("injuryStatus"),
         # ESPN's OWN flags (item 3.8a, migration 014). NULL means NOT CAPTURED,
         # never False: an absent key on a pre-014 snapshot, or on a rostered player
@@ -551,6 +586,33 @@ def validate_settings_row(row: dict | None) -> str | None:
     return None
 
 
+#: Prefix of a transaction_key minted from the COMMUNICATION (activity) feed.
+#: Those keys carry a topic id, not a transaction id — see ``transaction_id_of``.
+_ACTIVITY_KEY_PREFIX = "act"
+
+
+def transaction_id_of(transaction_key) -> str | None:
+    """The ESPN TRANSACTION id inside a stored ``transaction_key``, or None.
+
+    ``map_transaction`` mints ``"<espn transaction id>:<item index>:<player id>"``
+    because one ESPN transaction adds and drops several players and each item is
+    its own row. ``related_transaction_id`` (item 4.2b, migration 017) references
+    the ESPN id ALONE, so joining ``related_transaction_id = transaction_key``
+    matches NOTHING and a reconciliation written that way reports every claim
+    unresolved forever — the same shape as the defect the column exists to fix
+    (ESPN mints a new id at batch time, so the ids of a submission and its outcome
+    already intersect in zero elements). This is the one place that surgery lives.
+
+    None for an ACTIVITY-door key: those carry a communication TOPIC id, not a
+    transaction id, so nothing can legitimately reference them and a fabricated
+    match would be worse than no answer.
+    """
+    if not transaction_key:
+        return None
+    head = str(transaction_key).partition(":")[0]
+    return None if head == _ACTIVITY_KEY_PREFIX else head
+
+
 def map_transaction(raw: dict, *, season: int) -> list[dict]:
     """Map one raw ESPN transaction to one row PER ITEM (a transaction can add and
     drop several players at once).
@@ -580,6 +642,14 @@ def map_transaction(raw: dict, *, season: int) -> list[dict]:
             "bid_amount": raw.get("bidAmount"),
             "proposed_at": proposed,
             "processed_at": processed,
+            # The submitted -> outcome join key (item 4.2b, migration 017). ESPN
+            # carries it on the PROCESS transaction and mints a NEW `id` for that
+            # transaction, so this is the ONLY link back to the claim the operator
+            # queued. Stored raw as TEXT and interpreted nowhere here.
+            "related_transaction_id": (
+                None if raw.get("relatedTransactionId") is None
+                else str(raw.get("relatedTransactionId"))
+            ),
         })
     return rows
 
@@ -607,7 +677,7 @@ def map_activity_topic(topic: dict, *, season: int) -> list[dict]:
         stamp = _epoch_ms_to_iso(msg.get("date") or topic.get("date"))
         rows.append({
             "season": season,
-            "transaction_key": f"act:{topic_id}:{index}:{player_id}",
+            "transaction_key": f"{_ACTIVITY_KEY_PREFIX}:{topic_id}:{index}:{player_id}",
             "week": None,
             "team_id": team_id,
             "espn_player_id": None if player_id is None else str(player_id),
@@ -618,6 +688,11 @@ def map_activity_topic(topic: dict, *, season: int) -> list[dict]:
             "bid_amount": msg.get("from") if msg_type == 180 else None,
             "proposed_at": stamp,
             "processed_at": stamp,
+            # The activity feed is a MESSAGE stream, not the transaction feed: it
+            # carries no relatedTransactionId, so this door can never supply the
+            # join key (item 4.2b). Written explicitly rather than left to
+            # `row.get` defaulting, so the absence reads as measured, not forgotten.
+            "related_transaction_id": None,
         })
     return rows
 

@@ -1,0 +1,68 @@
+# Ziggurat NFL stat VINTAGE capture — TUESDAY (item 4.2b) — systemd USER service.
+#
+# Installed by scripts/install-nfl-ingest.sh, which substitutes @REPO@ and
+# @SEASON@. Pulls exactly two sources, forced: weekly_stats and snap_counts.
+#
+# WHY A SECOND COPY OF THE SAME WEEK EXISTS. NFL stat corrections land Monday
+# through Wednesday, which is why the weekly group anchors on Thursday — its copy
+# is the clean one. But the OPERATOR decides on TUESDAY: the waiver chain, the
+# claims, the drops. From Week 1 the Tuesday decision reads whatever vintage is
+# newest at that moment, so "what did the tool see when it decided" and "what was
+# true once upstream finished correcting" are two different numbers, and today
+# only the second one survives — a re-pull REPLACES nothing (retrieved_as_of is
+# in the primary key) but the Tuesday copy is never taken at all.
+#
+# Measured on the two vintages that exist by accident (2026-07-25 vs 2026-09-01,
+# 94,734 shared keys): 55 usage keys moved, 3 of them at or over the shipped 0.10
+# breakout floor, and `position` moved on 882 keys — 38 of those crossing the
+# QB/RB/WR/TE gate the candidate generator filters on. Vintage drift changes
+# ELIGIBILITY, not just magnitude. This unit is what makes that measurable
+# forward instead of reconstructible never.
+#
+# THE CONSEQUENCE, STATED RATHER THAN DISCOVERED. `--force` bypasses the interval
+# gate but still writes an ANCHORING run-log row, so after this unit runs on
+# Tuesday the weekly group reads these two sources as `fresh` (age 2 < interval
+# 7) every day until the following Tuesday. THE WEEKLY GROUP'S 7-DAY SELF-HEAL IS
+# THEREFORE EFFECTIVELY DISABLED FOR weekly_stats AND snap_counts: if this unit
+# fails, nothing else retries them, and `ziggurat ingest status` will keep
+# reading `fresh` throughout because it reads the same anchor. The health signal
+# is THESE UNITS' OWN RUN-LOG ROWS (`nfl_ingest_runs`, source weekly_stats /
+# snap_counts), and the vintage diff report refuses to compare when a vintage is
+# missing — that refusal is the alarm, not a "fresh" verdict.
+#
+# It is also why the Thursday sibling exists and is ALSO forced: without it, the
+# clean post-correction copy would silently stop being taken (Thursday would read
+# fresh at age 2), which is the exact opposite of what this design wants.
+#
+# Neither source is perishable — both are whole-season nflverse files, re-pullable
+# any time. What is perishable is the OBSERVATION that they differed, and only a
+# capture on the day makes that a fact.
+
+[Unit]
+Description=Ziggurat NFL stat vintage capture, Tuesday (weekly_stats + snap_counts, forced)
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+# Rate limit for the Restart= below. These live in [Unit], not [Service]
+# (systemd >= 229); putting them under [Service] is silently ignored. Must exceed
+# StartLimitBurst x (TimeoutStartSec + RestartSec) or the limiter can never engage
+# against a HANG — see the daily unit for the measured reasoning.
+StartLimitBurst=3
+StartLimitIntervalSec=10800
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+# `After=network-online.target` does NOT work in a USER unit (that target is a
+# system unit; `After=` on a nonexistent unit is silently ignored). Wait for name
+# resolution explicitly, bounded, and never fail the unit on it — see the daily
+# unit's note.
+ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 12 ]; do getent hosts github.com >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done; exit 0'
+# --source is repeatable and is mutually exclusive with --group, so this cannot
+# be folded into the weekly unit. --force is the whole point: without it the
+# interval gate skips both sources on every day but the anchor day.
+ExecStart=@REPO@/.venv/bin/ziggurat ingest run --source weekly_stats --source snap_counts --force --season @SEASON@
+Restart=on-failure
+RestartSec=600
+# Type=oneshot defaults TimeoutStartSec to INFINITY — see the daily unit.
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal
