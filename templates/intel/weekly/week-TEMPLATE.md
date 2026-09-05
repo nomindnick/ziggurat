@@ -25,6 +25,36 @@ Two disciplines, from SPEC.md:
 - **Alternatives considered:** <and why they lost>
 - **What would change my mind:** <the observable that flips this decision>
 
+## Submitted claims & departures (Tuesday)
+<!-- Item 4.2b. The freeze records what the TOOL printed; only this block records
+     what YOU DID, and the two are joined by capture_id. ESPN stamps a won claim
+     and a grab you made yourself both as `ADD` on the same day, so without this
+     block Wednesday cannot tell them apart. Fill it the night you submit, then
+     run `ziggurat decisions record --capture <id>`. -->
+
+- **Tool run:** `<the exact command, including --as-of and --claim-budget>`
+- **capture_id:** <from the freeze line the run printed>
+- **Wall clock (PT):** <when the run happened>
+- **Chain total the page printed:** <the "IF EVERY CLAIM AND GRAB LISTED WINS" line, verbatim>
+- **Why the list ended, quoted:** <the tool's own stop sentence, verbatim — then mark it VERDICT (the next add is worth nothing or less) or BOOKKEEPING (pairs ran out / position limit / pricing ceiling)>
+- **Submitted in the app at:** <HH:MM PT — the batch runs 00:01-01:13 PT, so this must be before ~23:59 PT>
+
+<!-- ONE ROW PER PRINTED LINE, submitted or not. Both espn_ids because two
+     players can share a display name; both gain columns because since 2026-09-02
+     a bare `gain` is CONDITIONAL and `gain_alone` is what the line is worth if
+     the ones above it lose. -->
+
+| # | kind | add + POS | add espn_id | drop + POS | drop espn_id | gain | gain_alone | submitted? | departure reason |
+|---|------|-----------|-------------|------------|--------------|------|------------|------------|------------------|
+|   |      |           |             |            |              |      |            |            |                  |
+
+- **Departures — printed but NOT submitted:** <which #, and why. "none" is a valid entry.>
+- **Departures — submitted but NOT printed:** <what you added off your own read, and why. "none" is a valid entry.>
+- **Departures — order changed:** <if you queued them in a different order than the printed #. "none" is a valid entry.>
+- **Did USAGE / ROLE EVIDENCE change anything?** <yes/no — and if yes: which player, his NEW or REPEAT badge, and what it changed. A **no** week is still a data point: that column does not change the claim order, and this field is the only record of whether it changed YOURS.>
+- **Projection-only chain:** <"identical to the page above", or the diff>
+- **Outcome (fill in Wednesday):** <per #: WON / LOST / not processed — plus your new waiver priority>
+
 ## Sunday late swaps
 <!-- GTD contingency branches executed: the trigger news, the clock time, the
      swap. "None" is a fine entry. -->

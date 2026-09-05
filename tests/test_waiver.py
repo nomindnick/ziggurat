@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ziggurat.core import candidates as C
 from ziggurat.core import waiver
 from ziggurat.core.marginal import SwapRow
 from ziggurat.core.valuation import DEFAULT_ROSTER
@@ -26,6 +27,7 @@ from ziggurat.core.waiver import (
     IR_ELIGIBLE_LABEL,
     KIND_FREE_AGENT,
     KIND_WAIVER,
+    USAGE_EVIDENCE_HEADER,
     build_waiver_plan,
     check_legality,
 )
@@ -655,6 +657,11 @@ def test_a_candidate_load_failure_is_disclosed_not_silent(db, marginal_world):
                side_effect=RuntimeError("schema drift")):
         plan = _plan(db)
     assert any("opportunity signals UNAVAILABLE" in n for n in plan.notes)
+    # item 4.2b, B3: the degrade note used to read as if the CLAIMS had lost
+    # something load-bearing. They never used this column; say so in the same
+    # breath as the alarm, or a novice re-reads a correct chain as damaged.
+    assert any("claim ORDER is unaffected (it never used this column)" in n
+               for n in plan.notes)
 
 
 def test_illegal_path_reports_the_window_that_priced_the_drop(db, marginal_world):
@@ -824,7 +831,19 @@ def test_a_completed_week_opportunity_signal_lands_on_the_matching_claim(db, mar
     match = [c for c in recs if c.add == "Breakout FA"]
     assert match, "the breakout RB should surface as a positive add"
     assert match[0].add_espn_id == str(rb_espn)
-    assert any("opportunity signal [USAGE_BREAKOUT]" in r for r in match[0].reasons)
+    # item 4.2b, B3: the evidence rows now sit under ONE header that states what
+    # they are not, and each carries its NEW/REPEAT badge. With no decision
+    # archive in this fixture the honest badge is FIRST SEEN, never "NEW".
+    reasons = match[0].reasons
+    assert USAGE_EVIDENCE_HEADER in reasons
+    assert reasons.count(USAGE_EVIDENCE_HEADER) == 1, "the header lands once per claim"
+    evidence = [r for r in reasons if r.startswith("  [USAGE_BREAKOUT] ")]
+    assert evidence, f"no usage-evidence row in {reasons}"
+    assert all(C.EPISODE_FIRST_SEEN in r for r in evidence)
+    # and it is the LAST block of the claim's reasons — appended after the chain
+    # was selected, which is what makes the header true.
+    assert reasons.index(USAGE_EVIDENCE_HEADER) > 0
+    assert reasons[-1] == evidence[-1]
 
 
 

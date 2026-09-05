@@ -16,7 +16,6 @@ operator the underlying facts (R1's degrade-gracefully requirement).
 
 import json
 import os
-from pathlib import Path
 
 from ziggurat.core import alerts as alerts_mod
 from ziggurat.core import briefing as briefing_mod
@@ -30,12 +29,22 @@ ALERTS_DIR = INTEL_DIR / "weekly" / "alerts"
 PHONE_CHANNEL = "phone"
 DEFAULT_ALERT_CAP = 4
 
+# The highest-leverage string in the push layer: it is what turns a correct
+# briefing into the sentence the operator acts on. Item 4.2b, B3 added the
+# SIGNALS clause — without it the instruction to "lead with the single most
+# urgent action" is an open invitation to promote a context row into an action,
+# which is exactly what the two surfaces underneath it now say they never do.
+# Pinned by test (it had none before).
 BRIEFING_SYSTEM = (
     "You are Ziggurat's briefing summarizer for a fantasy-football novice. You are "
     "given a full, already-correct markdown briefing. Rewrite it as a two-minute "
     "read: lead with the single most urgent action (roster legality, then top "
     "waiver claim), then lineup flags, then signals/alerts. Keep every number and "
-    "player name EXACTLY as given — invent nothing, drop nothing load-bearing. Plain "
+    "player name EXACTLY as given — invent nothing, drop nothing load-bearing. "
+    "The SIGNALS section is USAGE / ROLE EVIDENCE — observed usage from one game. "
+    "It is context, not a recommendation: never turn a SIGNALS row into an action, "
+    "and never re-order or re-weight the waiver claim chain because of one. The "
+    "claim order comes from the WAIVERS section only. Plain "
     "prose and short bullets, no preamble."
 )
 
