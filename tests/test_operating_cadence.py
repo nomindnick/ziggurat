@@ -88,6 +88,11 @@ def test_the_week_journal_template_ships_and_scaffolds():
     assert "Decision log" in body and "Monday retro" in body
     # the one line the whole retro hinges on
     assert "PROCESS, not outcome" in body or "process, not outcome" in body.lower()
+    # item 4.2b: the freeze records what the TOOL printed; only this block records
+    # what the operator SUBMITTED, and ESPN stamps a won claim and a self-made
+    # grab identically, so without it Wednesday cannot tell them apart.
+    assert "Submitted claims & departures" in body
+    assert "Did USAGE / ROLE EVIDENCE change anything?" in body
 
 
 # ==================== item 3.8a audit fix — the cadence quotes OUTPUT too
@@ -132,3 +137,70 @@ def test_every_stop_sentence_the_cadence_quotes_still_exists_in_the_tool():
             f"CLAUDE.md quotes a sentence `waiver.py` no longer prints: {fragment!r}"
         assert fragment in section, \
             f"this pin has drifted from the cadence it guards: {fragment!r}"
+
+
+# The item-4.2b half of the same doc-to-code link. B3 shipped the presentation
+# strings but could not add this pin (CLAUDE.md was outside its lane), so the
+# cadence and the tool could have drifted apart in the one direction that
+# matters: the Tuesday step tells a fresh session what the evidence column IS
+# NOT, and the tool's own header is what makes that true. If either side loses
+# the sentence, the other is quoting a promise nobody keeps.
+def _occurrences(haystack: str, needle: str):
+    start = haystack.find(needle)
+    while start != -1:
+        yield start
+        start = haystack.find(needle, start + 1)
+
+
+def test_the_cadence_states_what_the_evidence_column_is_not():
+    section = re.sub(r"\s+", " ", _cadence_section())
+    for fragment in (
+        "USAGE / ROLE EVIDENCE",
+        "does not change the claim order",
+        "REPEAT (also wk N)",
+        "FIRST SEEN (no archive yet)",
+    ):
+        assert fragment in section, \
+            f"the Tuesday step no longer states this: {fragment!r}"
+
+    waiver_src = _joined_source(REPO_ROOT / "ziggurat" / "core" / "waiver.py")
+    assert "USAGE / ROLE EVIDENCE" in waiver_src
+    assert "does not change the claim order" in waiver_src
+
+    # The forbidden promise. Item 4.1 measured the instrument as AGREEMENT with
+    # the market, not a lead over it, so the cadence may never send a session out
+    # to promise a lead. The naive check — "this phrase is absent" — is WRONG
+    # here and is worth saying why: the cadence quotes the sentence in order to
+    # FORBID it, so an absence test fails on correct text and passes the moment
+    # someone deletes the prohibition. What must hold is that every occurrence is
+    # a prohibition.
+    lowered = section.lower()
+    assert "never tell the operator" in lowered, \
+        "the Tuesday step no longer forbids promising the market"
+    for phrase in ("the market will agree", "the market usually follows"):
+        for idx in _occurrences(lowered, phrase):
+            window = lowered[max(0, idx - 200):idx]
+            assert "never" in window, (
+                f"{phrase!r} appears in the cadence as a PROMISE, not a "
+                "prohibition")
+
+
+def test_the_cadence_names_the_decision_archive_and_its_operator_asks():
+    """Item 4.2b: the capture is only worth its disk if the Tuesday step tells
+    the operator it happened, and the submission-time ask is time-critical —
+    the millisecond stamp lives on the PENDING row and the EXECUTED row
+    overwrites it, so "sync later" is the same as "never captured"."""
+    section = re.sub(r"\s+", " ", _cadence_section())
+    for fragment in (
+        "the run captures a decision freeze",
+        "capture_id",
+        "Submitted claims & departures (Tuesday)",
+        "IMMEDIATELY after submitting",
+    ):
+        assert fragment in section, \
+            f"the Tuesday step no longer states this: {fragment!r}"
+
+    template = (REPO_ROOT / "templates" / "intel" / "weekly"
+                / "week-TEMPLATE.md").read_text()
+    assert "## Submitted claims & departures (Tuesday)" in template, \
+        "the cadence points at a journal block the shipped template does not carry"

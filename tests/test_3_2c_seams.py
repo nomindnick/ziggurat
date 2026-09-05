@@ -52,13 +52,15 @@ from ziggurat.data.nfl import (
     base,
     depth_charts,
     depth_charts_weekly,
+    espn_projections,
     espn_ranks,
+    ff_opportunity,
+    fp_weekly,
+    fpecr,
     game_odds,
     injuries,
     news,
     ngs,
-    espn_projections,
-    fpecr,
     players,
     projections,
     refresh,
@@ -134,6 +136,22 @@ _ACCESSORS = {
     # not `gsis_id`: DST rows and unresolved crosswalk ids have no gsis, and an
     # accessor keyed on gsis would fold every one of them into a single NULL row.
     "sleeper_ownership": (sleeper_ownership.get_sleeper_ownership, {}),
+    # Item 4.2b ffverse expected points (migration 015). The identity is
+    # (player_id, season, week) and `retrieved_as_of` is the VERSION axis — which
+    # is the whole design here, not an incidental key choice: upstream REWRITES
+    # each season's file in place several times a week, so a capture must land
+    # beside its predecessor rather than on top of it. An accessor that resolved
+    # on the version column too would return every vintage of every player-week
+    # at once.
+    "ffopp_weekly": (ff_opportunity.get_ff_opportunity, {}),
+    # Item 4.2b same-week FantasyPros weekly board (migration 016). The identity
+    # is (fantasypros_id, page, scrape_date); `page` is in it because a
+    # dual-eligibility player is published on two positional pages of one series
+    # on one day — two genuine market facts, and an accessor resolving on two
+    # columns would let one shadow the other (the same 215 measured collisions
+    # that put `fp_page` in migration 011's key). `retrieved_as_of` is the
+    # VERSION axis: upstream rewrites this file twice a day.
+    "fp_weekly_ecr": (fp_weekly.get_fp_weekly_ecr, {}),
 }
 
 #: Columns that are in the PK but are NOT part of the identity a read resolves
@@ -160,7 +178,8 @@ def captured_keys(db, monkeypatch):
     for module in (players, schedules, weekly_stats, snap_counts, ngs, injuries,
                    team_defense, game_odds, weather, adp_rankings, espn_ranks,
                    projections, depth_charts_weekly, depth_charts, news,
-                   espn_projections, fpecr, sleeper_ownership):
+                   espn_projections, fpecr, sleeper_ownership, ff_opportunity,
+                   fp_weekly):
         if hasattr(module, "base"):
             monkeypatch.setattr(module.base, "select_as_of", spy_as_of, raising=False)
             monkeypatch.setattr(module.base, "select_observed_as_of", spy_observed,
@@ -204,6 +223,12 @@ def test_every_table_with_an_as_of_accessor_is_covered(db):
         "meta", "nfl_ingest_runs", "league_sync_runs",
         # Item 3.6 push-layer operational tables: run log + dedup ledger, no as-of.
         "push_runs", "alert_ledger",
+        # Item 4.2b decision-archive run log: operational, no as-of gate. Its
+        # `plan_as_of` is the run PARAMETER (which gate the plan was priced at),
+        # not a knowledge time — `tests/test_decisions_capture.py` asserts the
+        # table carries no knowable_as_of/retrieved_as_of column and that no file
+        # in `ziggurat/decisions/` calls `select_as_of(`.
+        "decision_freezes",
         # player_news_links carries as-of columns but is read by EXACT article-
         # version match (not select_as_of) — the ghost-link fix; leakage-tested
         # transitively through recent_news (see the _ACCESSORS note above).

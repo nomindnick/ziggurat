@@ -1212,8 +1212,12 @@ git config core.hooksPath scripts/hooks   # per clone, required
 scripts/install-league-sync.sh            # item 3.1 — systemd user timer, 4x/day
 scripts/install-nfl-ingest.sh             # item 3.1b — daily / weekly / gameday timers
 scripts/install-push.sh                   # item 3.6 — Wed briefing + 20-min alert tick
+scripts/install-decisions.sh              # item 4.2b — Tuesday 18:30 PT freeze timer
 # re-run install-league-sync.sh on any box where it is ALREADY installed: the 3.1b
 # audit corrected that unit's no-op After=network-online.target and its restart limiter.
+# re-run install-nfl-ingest.sh on any box where it is ALREADY installed too: item 4.2b
+# took it from THREE units to FIVE (the daily/weekly/gameday groups plus the Tue/Thu
+# 08:00 VINTAGE pair). Install both vintage units or neither — see the note below.
 # install-push.sh needs NTFY_TOPIC in .env (a high-entropy string = the topic password);
 # the outbound scrub is what keeps a public topic safe. Test first without pushing:
 #   ziggurat brief run --no-push --no-llm   ;   ziggurat alerts run --no-push
@@ -1224,6 +1228,12 @@ loginctl enable-linger "$USER"            # or every timer dies at logout
 .venv/bin/ziggurat ingest status          # per-source last successful pull + staleness
 .venv/bin/ziggurat brief status           # item 3.6 — last briefing runs
 .venv/bin/ziggurat alerts status          # item 3.6 — last alert ticks ('empty' is healthy)
+.venv/bin/ziggurat decisions status       # item 4.2b — last decision captures ('none' is NOT healthy)
+.venv/bin/ziggurat decisions verify       # item 4.2b — re-hash the last capture against its manifest
+# The decisions timer is a SECOND capture, never the only one: EVERY `ziggurat waivers`
+# run archives itself (measured 0.02 s on top of a 24.4 s run, ~446 KiB), and
+# `--no-freeze` opts a throwaway experiment out. The timer covers the Tuesday you
+# never open.
 
 # before any first/manual NFL pull, see the plan without touching the network:
 .venv/bin/ziggurat ingest run --dry-run
@@ -1245,14 +1255,33 @@ sync machine changes.
 Every nflverse source (`schedules`, `weekly_stats`, `snap_counts`, `ngs_*`,
 `injuries`, `team_defense`, `game_odds`) is a whole-season file re-downloaded in
 full, so a missed `ziggurat ingest` run is **staleness, not loss** — re-pullable
-any time. Exactly four sources serve the CURRENT value only and lose an
-observation permanently when missed: **`projections`** (Sleeper), **`adp_rankings`**
-(FantasyPros scrape), **`espn_ranks`** (the draft board), and **`game_weather` in
-forecast mode**. `ziggurat ingest status` says which is which, and deliberately
+any time. Exactly SIX sources serve the CURRENT value only: **`projections`**
+(Sleeper), **`adp_rankings`** (FantasyPros scrape — corrected 2026-09-04: the file
+it reads is rewritten **Fridays only**, so a missed DAY loses nothing and only a
+missed FRIDAY costs a scrape, whose content is re-derivable from the `db_fpecr`
+archive; it keeps the flag because nothing re-populates that TABLE),
+**`espn_ranks`** (the draft board), **`game_weather` in forecast mode**, and —
+since item 4.2b — **`ff_opportunity`** (ffverse expected points, re-uploaded into
+one `latest-data` release tag and rewritten on a game-window cron) and
+**`fp_weekly_ecr`** (the same-week FantasyPros weekly board, rewritten TWICE DAILY
+in-season: 81 of 159 ppr-rb ids changed integer rank in one 5.7-hour window).
+`fp_weekly_ecr` is where "today only" is literally true.
+`ziggurat ingest status` says which is which, and deliberately
 never uses the league sync's "unrecoverable / missing days" language — an
 undifferentiated alarm is how the one report where those words are literal gets
 ignored. Freshness is read from `nfl_ingest_runs`, never from
 `MAX(retrieved_as_of)` on a fact table (that lies three measured ways).
+
+**Two sources are now pulled TWICE a week on purpose (item 4.2b).**
+`weekly_stats` and `snap_counts` are captured Tuesday 08:00 — the vintage the
+waiver decision is actually made on — and again Thursday 08:00, the clean copy,
+because NFL stat corrections land Mon–Wed. `--force` bypasses the interval gate
+but **still writes an anchoring run-log row**, so the 08:20 weekly group now skips
+both sources all week and its 7-day self-heal no longer covers them: their health
+signal is their own rows in `nfl_ingest_runs`, and `ziggurat ingest status` will
+read `fresh` off whichever of the pair anchored last even when the other never
+ran. Installing the Tuesday unit without the Thursday one would not ADD a vintage,
+it would trade the clean copy for the early one — install both or neither.
 
 **The timers fire more often than the sources need.** Each source carries an
 `interval_days`, and `ziggurat ingest run` SKIPS one whose last successful pull is
@@ -1329,6 +1358,11 @@ Missing league days go in the journal (that history is gone — item 3.1). A
 source that `ingest status` calls stale and that feeds today's decision gets
 disclosed alongside the recommendation, not silently priced through.
 
+On a Tuesday, also run `.venv/bin/ziggurat decisions status`. Unlike an empty
+alert tick, an EMPTY capture log is NOT healthy: it means no Tuesday has ever
+been archived on this box, and a Tuesday that is not captured cannot be
+reconstructed later (item 3.1).
+
 Two output notes: (1) `'empty' is healthy` refers to empty alert TICKS — the
 distinct string `no push runs recorded yet` means the push layer has never run
 on this box (not installed, or `NTFY_TOPIC` unset; see `scripts/install-push.sh`
@@ -1339,7 +1373,13 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 
 ### Tuesday — roster legality + waiver claims
 1. Preflight. If today's league sync hasn't landed, run
-   `.venv/bin/ziggurat league sync` — Tuesday reads today's rosters.
+   `.venv/bin/ziggurat league sync` — Tuesday reads today's rosters. Tuesday's
+   08:00 VINTAGE unit (item 4.2b) has already run by the time this workflow
+   starts, and `ingest status` cannot tell you whether it did — it reads `fresh`
+   off whichever half of the Tue/Thu pair anchored last. Confirm with
+   `journalctl --user -u ziggurat-nfl-ingest-vintage-tue.service -n 20`, and
+   journal a missed one: the Tuesday copy of that week's stats cannot be
+   re-taken.
 2. `.venv/bin/ziggurat waivers --reasons --claim-budget 10` — the deeper
    budget is deliberate: `--claim-budget` is the CEILING on the whole claim
    chain, and the quick-scan default of 3 can cut it off while the last line
@@ -1356,9 +1396,38 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    Out → Questionable and breaks legality. On a refusal: relay the proposed
    fix (usually a costless IR move) to the operator, re-sync after they apply
    it, re-run.
+   **Every `ziggurat waivers` run is ARCHIVED (item 4.2b): the run captures a
+   decision freeze.** The plan, the priced swap matrix, every evaluated
+   candidate row, the pool as priced and the roster are frozen under the
+   gitignored `data/decisions/<season>/wk<NN>/<capture_id>/` with a sha256
+   manifest, and the command prints one line naming the directory. It costs
+   ~0.02 s on a 24 s run. Two runs on one Tuesday are two captures, not a
+   duplicate — that is what lets the journal say which one you acted on.
+   Before Week 1 the capture is `partial` and says why (the candidate generator
+   has no fully-played REG week); that is the expected state, not a fault.
+   `--no-freeze` opts a throwaway experiment out of the archive.
 3. Cross-reference `.venv/bin/ziggurat candidates --reasons` for the breakout
-   context behind each add. Where the two disagree, surface the disagreement —
-   never smooth it over.
+   context behind each add — and read it as what its own header calls it:
+   **USAGE / ROLE EVIDENCE, which does not change the claim order.** Those
+   bullets are OBSERVED usage from ONE game (or one injury designation): not a
+   forecast, not a probability, not a tie-break. The +/− number beside a claim
+   was priced from projections alone, and nothing on the candidates page
+   re-orders it (the column is appended after the chain is chosen — pinned by
+   test). It has never been graded as a lead over the market — item 4.1
+   measured the instrument as AGREEMENT with the market, not a lead over it —
+   so never tell the operator "the market will agree by Friday", or anything
+   that means it.
+   Each bullet carries a FIRST SEEN badge: **NEW** = this signal has not fired
+   for him recently; **REPEAT (also wk N)** = it fired in wk N, within the last
+   2 weeks he was EVALUATED (a bye or an inactive week is not a gap — he was
+   never looked at). In week 1 every row reads **WEEK 1** instead, because week
+   1 is every player's first observation, not a role change. With no decision
+   archive yet the badge is **FIRST SEEN (no archive yet)** — an absence of
+   comparison, never a claim of novelty.
+   Where the two tools disagree, surface the disagreement — never smooth it
+   over — and **journal whether any bullet here changed what you
+   recommended**; a "no" week is still a data point, because it is the only
+   record of whether this column is worth anything.
 4. Recommend the claim list **as a chain, in the NUMBERED order printed**
    (item 3.4b, 2026-09-02). Every chained line carries a `#K`; the numbers run
    across BOTH the WAIVER CLAIMS and FREE-AGENT GRABS sections, which are split
@@ -1404,6 +1473,17 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    step 2, right after the sync and BEFORE any step-3 grab. ESPN stamps a won
    claim `ADD` on the day it processed, exactly like a grab you make yourself, so
    after a grab the journal is the only thing that tells them apart.
+   **Two operator asks the moment you submit.** (a) Run
+   `.venv/bin/ziggurat league sync` IMMEDIATELY after submitting in the app —
+   the millisecond submission time lives only on the PENDING transaction row,
+   and the EXECUTED row that the overnight batch writes overwrites it, so a
+   sync that waits until the 23:15 tick has already lost it. (b) Fill the week
+   journal's **## Submitted claims & departures (Tuesday)** block that night —
+   one row per PRINTED line whether or not you queued it, with BOTH espn_ids
+   and BOTH gain columns, the tool's stop sentence quoted, the app submission
+   time, the `capture_id` the archive printed, and the "Did USAGE / ROLE
+   EVIDENCE change anything?" field. That `capture_id` is the join key between
+   what the tool said and what you actually submitted.
 
 ### Wednesday — post-waiver scan
 1. The 06:00 PT briefing (timer) is on the phone; the full text is in

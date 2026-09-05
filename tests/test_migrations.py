@@ -49,7 +49,7 @@ from ziggurat.paths import MIGRATIONS_DIR, SCHEMA_PATH
 
 #: Bump with every migration. A literal, not a computed value: if this file
 #: derived the number from the directory it would agree with any mistake.
-LATEST_SCHEMA_VERSION = 14
+LATEST_SCHEMA_VERSION = 18
 
 #: sha256 of every shipped migration. Pinned as literals for the reason spelled
 #: out in `test_an_applied_migration_is_never_edited` — this is the guard against
@@ -82,6 +82,14 @@ MIGRATION_DIGESTS: dict[str, str] = {
         "158fe1778ebf88e8b000c86cbfc29085364f7967a1ef8ff00fc3c32bbf1d9d7b",
     "014_league_ground_truth.sql":
         "3f7b424cbba214fd98e78296989f4661492b73e82fa42a8d159c5e7485ef6d0d",
+    "015_ff_opportunity.sql":
+        "312381828e81bbf7636e31ca841b0cdc09d489ea9cb55651654e9c723c3a32c4",
+    "016_fp_weekly_ecr.sql":
+        "b063e384f63bfbd39295dca1e8d81b94e9eca6b15f4851c6db9d09cb15e29fdf",
+    "017_league_acquisition_time.sql":
+        "fb5a5e851761a1c6494c5fc62fd4b5a1b2897735ad2a0a12e318aef1a2e1e565",
+    "018_decision_freezes.sql":
+        "4f48b58c589e9175dc90fc908299efbec969d359b70a25cf5f78471fadb91b1d",
 }
 
 #: The doctrine, printed by the test that enforces it. Long on purpose: the next
