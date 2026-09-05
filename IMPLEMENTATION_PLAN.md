@@ -4267,6 +4267,28 @@ says.
 > the chain's order-inertness — stated structurally, because a TIE-BREAK
 > promotion fires only on exactly equal gains and passed both behavioural
 > pins).
+> **Merged and installed 2026-09-05 (operator: yes to all four decisions).**
+> Fast-forward of `wt/4.2b-decision-archive` onto main at `ed8abc8` after
+> the merge gate (3,108 passed / 5 skipped in the worktree); main's 15
+> uncommitted errata copies were byte-identical to the branch's first commit
+> and were discarded, not lost. Migrations 015–018 applied on the live DB by
+> the first command after the merge (`meta.schema_version` 14 → 18; backup
+> `db/ziggurat.sqlite.bak-v14-pre-4.2b` taken first). Installed:
+> `scripts/install-nfl-ingest.sh` (now five units; the Tue/Thu vintage pair
+> first fires Tue 09-08 08:00 / Thu 09-10 08:00) and
+> `scripts/install-decisions.sh` (Tue 18:30; first fires 09-08). D2b:
+> `ZIGGURAT_FP_WEEK_PAGE=1` in `.env`. The gitignored journal template was
+> overwritten from `templates/` (verified identical to the OLD committed copy
+> first). `ff_opportunity.mirror_only` run for 2021–2025 into `data/ffopp/`
+> (~1.1 MB each; 2025's asset is frozen upstream). Production smoke: `decisions
+> status` refused to call an empty log healthy; `decisions freeze` produced
+> the first real capture in 25 s (`partial`, candidate half ABSENT with the
+> NoCompletedWeek reason — correct before Week 1); `decisions verify` matched
+> every file's sha256; `brief run --no-push --no-llm` composed. Worktree
+> removed; the branch ref is kept (merged). Not pushed.
+> **Remaining for this item:** the first live Tuesday (2026-09-15) captured
+> end-to-end with the candidate half present; the three-week five-way
+> classification; Wave 2.
 
 ### 4.2c [Experiment] Realised-points instrument — pre-registered (added 2026-09-04; opens 2026-09-15)
 **Goal:** Replace market-rank movement as the PRIMARY objective with what the

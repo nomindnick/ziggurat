@@ -1106,6 +1106,18 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   league's live transaction feed populates (32 rows), so "who claimed whom,
   when" is already recorded forward; no candidate flag has ever touched a
   submitted claim (`candidates` exits pre-Week-1 by design).
+  **2026-09-05: 4.2b Wave 1 MERGED (`ed8abc8`, fast-forward from the isolated
+  worktree) and INSTALLED.** Schema 14 → 18 applied on the live DB (backup
+  `db/ziggurat.sqlite.bak-v14-pre-4.2b`); timers now firing: the Tue/Thu 08:00
+  vintage pair and the Tue 18:30 decision freeze (first fires Tue 09-08, a
+  pre-Week-1 partial capture that doubles as the timer's live test);
+  `ZIGGURAT_FP_WEEK_PAGE=1` set (D2b); the live journal template carries the
+  Submitted-claims block; `ep_weekly_2021..2025` mirrored under `data/ffopp/`;
+  first real capture taken, verified and `partial` for the expected reason.
+  Operator steps now in the cadence: Tuesday step 5's `league sync` right after
+  submitting, and the Mon 09-14 belt-and-braces forced stats pull. Wave 2 (the
+  tie-bug fix + frozen re-run, the vintage diff, the coverage note, `decisions
+  record/classify/latency`, migration 019) has no date; 4.2c opens 09-15.
 
 Update this section whenever a phase or checkpoint closes.
 
