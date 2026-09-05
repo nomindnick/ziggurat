@@ -146,10 +146,12 @@ def test_hit_at_r1_is_lead_1_concurrent(db, panel):
     assert (p.status_l1, p.rank_l1) == (S.S_HIT, 19)
     assert p.hit is True and p.lead == 1
     assert card.overall.lead1 == 1 and card.overall.lead2 == 0
-    assert "CONCURRENT" in S.LEAD_LABELS[1]
+    # C3/C30 (2026-09-04): the labels are SNAPSHOT names, not lead measurements
+    assert "FIRST-SNAPSHOT CROSSING" in S.LEAD_LABELS[1]
+    assert "concurrent" in S.LEAD_LABELS[1]
 
 
-def test_first_hit_at_r2_is_lead_2_a_genuine_lead(db, panel):
+def test_first_hit_at_r2_is_lead_2_a_second_snapshot_only_crossing(db, panel):
     card = _card(db, [_record([_decision("B", r0_rank=29)])])
     p = _pick(card, "B")
     assert p.status_l1 == S.S_MISS and p.status_l2 == S.S_HIT
@@ -186,7 +188,7 @@ def test_bye_at_r1_is_reported_not_counted_as_a_miss_on_the_weekly_market(db, pa
     assert card.overall.lead2 == 0 and card.overall.lead_bye_deferred == 1
     assert card.overall.lead1 == 0
     text = S.render(card)
-    assert "lead2=0 (one-week lead)  bye-deferred=1  bye at lead1=1" in text
+    assert "lead2=0 (second snapshot only)  bye-deferred=1  bye at lead1=1" in text
     (row,) = [w for w in card.weeks if w.week == WEEK]
     assert (row.lead1, row.lead2, row.lead_bye_deferred) == (0, 0, 1)
     # the ROS market keeps bye teams, so an absence there is a plain miss
@@ -204,6 +206,8 @@ def test_lead_of_never_calls_a_bye_deferred_hit_a_one_week_lead():
     assert S.lead_of(S.S_BYE, S.S_MISS) is None
     assert "BYE-DEFERRED" in S.LEAD_LABELS[S.LEAD_BYE_DEFERRED]
     assert "never counted" in S.LEAD_LABELS[S.LEAD_BYE_DEFERRED]
+    # C3: a bye-deferred hit is never reported as a lead over the market
+    assert "never counted as a lead over the market" in S.LEAD_LABELS[S.LEAD_BYE_DEFERRED]
 
 
 def test_absent_from_a_page_whose_team_is_present_is_a_miss(db, panel):
@@ -579,6 +583,12 @@ def test_holdout_seasons_are_labelled_and_banner_printed(db, panel):
     assert [s.split for s in card.seasons] == ["TRAIN", "HOLDOUT"]
     text = S.render(card)
     assert "holdout seasons present: do not tune thresholds on these" in text
+    # external review C1, 2026-09-04: the bare instruction read as if the holdout
+    # seasons were clean.  All 12 shipped generator floors carry documented 2025
+    # provenance, so the card must say a HOLDOUT read is a RE-read.
+    assert "the 12 shipped generator floors already carry documented "\
+           "2025 provenance" in text
+    assert "a HOLDOUT card is a re-read, not a clean out-of-sample read" in text
     assert "HOLDOUT 2024-25" in text and "TRAIN 2021-23" in text
 
 

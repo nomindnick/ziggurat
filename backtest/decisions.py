@@ -44,7 +44,18 @@ HOLDOUT_SEASONS: tuple[int, ...] = (2024, 2025)
 
 #: The gitignored ledger every HOLDOUT unlock is appended to (under the replay
 #: cache dir, ``data/backtest/replay/``): one JSON line per completed run.
+#: It is written publish-then-record, i.e. AFTER the run completes (``replay.py``),
+#: so a crashed or killed holdout read leaves no row.
 UNLOCK_LEDGER = "holdout-unlocks.jsonl"
+
+# SCOPE OF THE LOCK (external review C1, 2026-09-04). It is a ``backtest/``
+# fence and nothing else: ``grep -rn "require_holdout_unlock|HOLDOUT_SEASONS"
+# ziggurat/`` returns 0 hits. In particular ``ziggurat/cli/main.py``'s
+# ``candidates --validate`` binds ``base.latest_truth`` and will read a 2025
+# (HOLDOUT) season with no unlock, no flag and no ledger row — that is how item
+# 3.3 validated the shipped floors, and it is why "the holdout seasons were
+# never opened" was an overstatement: the ledger counts REPLAY unlocks, not
+# every read. All 12 shipped floors carry documented 2025 provenance.
 
 
 class HoldoutLocked(ValueError):
@@ -147,9 +158,17 @@ def default_generator() -> tuple[tuple[str, float], ...]:
     Read from ``ziggurat.core.candidates`` at call time (a lazy import: this
     module stays free of the generator otherwise), so the replay's cache key
     hashes the VALUES the production generator runs with.  If someone edits
-    ``DEFAULT_BREAKOUT`` the key changes and every old freeze becomes
-    unreachable — which is the point: a freeze decided under other floors
+    ``DEFAULT_BREAKOUT``, a run that takes the MODULE DEFAULTS computes a
+    different key — which is the point: a freeze decided under other floors
     must never be graded as if it were this generator's.
+
+    The old freeze is NOT orphaned by that: it keeps its own key and stays
+    loadable by naming those floors explicitly (``--breakout-floor`` /
+    ``--emergence-floor``).  Measured under a simulated adoption of
+    ``carries=1`` (external review C14, 2026-09-04): 0 of 44 round-1 grid keys
+    move, all 44 verify ``ok``, the paired TRAIN reference still loads its 162
+    week records, and one flag re-addresses both item-4.1 keys.  What actually
+    moves is 5 pinned key LITERALS in the tests.
     """
     from ziggurat.core import candidates as C
 

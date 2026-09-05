@@ -1283,7 +1283,11 @@ populatable today.
 > upstream data while the suite was green** (624 passed). Independently re-verified before
 > touching anything: `pull_injuries` raised `ValueError: missing required columns
 > ['date_modified']` (nflverse dropped the column from the 2025+ release — 2024 has it,
-> 2025 does not); `pull_depth_charts` raised for every season (upstream replaced the weekly
+> 2025 does not; **Corrected 2026-09-04 (C15):** the pre-2025 injury source DIED after the
+> 2024 season and 2025 exists only as a one-shot post-season backfill from a replacement
+> producer, published 2026-03-18 — 6,068 rows, `season_type` in and `date_modified` out —
+> produced outside the scheduled pipeline, which has not run since 2025-08-07; no 2026 file
+> exists as of 2026-09-04, so re-check after Week 1 before asserting anything about 2026); `pull_depth_charts` raised for every season (upstream replaced the weekly
 > table with a **daily snapshot panel** keyed on a `dt` timestamp, no `season`, no `week`,
 > IDP rows included — 554,215 × 12 for 2025); `pull_weekly_stats` raised
 > `IntegrityError: NOT NULL constraint failed: weekly_stats.player_id` (22 all-zero
@@ -1971,12 +1975,19 @@ Findings that reshape the item:
   red-zone column; NGS has expected *yards* and *completions*, never expected *TDs*), so the design
   proposed adding ffverse `ff_opportunity`. Measured via the GitHub release API: it is a **model
   output published months after each season ends** (`ep_weekly_2021.parquet` written 2023-01-05;
-  2025's written 2026-02-10) **by a model trained on the season it scores**. Stamping a 2021 week-5
+  2025's written 2026-02-10) ~~**by a model trained on the season it scores**~~. Stamping a 2021 week-5
   row `knowable_as_of = 2021-10-10` passes every leakage test while contaminating a Phase-4 backtest
   with the outcome distribution of the season it is grading. Its `model_version` pin pins a release
-  *tag*, not a build, and both tags' assets straddle a model refresh on 2025-12-11. There is no
-  in-season file at all — that is structural, not calendar. It lands in Phase 4 as a
+  *tag*, not a build, and both tags' assets straddle a model refresh on 2025-12-11. ~~There is no
+  in-season file at all — that is structural, not calendar.~~ It lands in Phase 4 as a
   backtest-only, `latest_truth`-only source stamped from the asset's `updated_at`.
+  **Corrected 2026-09-04 (C28):** `ff_opportunity` IS published in-season — upstream's GitHub
+  Action rebuilds the current season's file after every game window (TNF / early / late / SNF-MNF,
+  Sep-Feb; 91 successful runs 2025-09..2026-02) and the models are a documented, pinned 2006-2020
+  fit, not a fit on the season they score. The 2026 asset 404s only because the season opens
+  2026-09-09, so the real disqualifier is that the file is OVERWRITTEN IN PLACE with no
+  point-in-time archive (the 2025 asset was rewritten twice in three days during the 2026-09-04
+  review) — calendar and mutability, not structure.
 - **Store the panel as a change log + tombstones, not verbatim.** Verbatim 2025+2026 (923,162 source
   rows) measured **255.4 MB** on a 43.4 MB database. A row only when a slot's occupant changes, plus
   a tombstone when a slot vacates, measured **31,085 rows / 6.50 MB** with indexes — and it is
@@ -2161,6 +2172,9 @@ real waiver-day as-of).
 **(b) TD regression has no source, before or after 3.2c.** No ingested table carries expected TDs,
 and the obvious candidate is disqualified — see 3.2c's `ff_opportunity` finding. This arm of the
 done-when cannot be built in-season; it moves to Phase 4 alongside the backtest-only source.
+**Corrected 2026-09-04 (C28):** the disqualifier is the missing point-in-time archive (the file is
+rebuilt in place after every game window), not the absence of an in-season file — see the
+correction under 3.2c; capturing `ep_weekly_2026.parquet` forward from Week 1 is item 4.2b's.
 
 **Consequence for this item's scope:** what 3.2c actually unblocks is the **usage-delta** arm
 (`usage_deltas` already exists and was validated in 1.4) plus **injury-triggered** opportunity
@@ -2183,8 +2197,11 @@ deferred to Phase 4** (recorded per the amendment). Thresholds ship as labelled
 **Operator decision (2026-07-26): the injury arm ships BOTH sources now.** The
 nflverse `get_injuries` feed grades the done-when on 2021–2024 lead time but is
 **backtest-only for 2025+** (nflverse dropped `date_modified`, so 100% of 2025
-rows are gameday-stamped, 0-day lead) and is blind to IR/season-enders entirely
-(measured: James Conner, Najee Harris = 0 rows). So the **live** in-season source
+rows are gameday-stamped, 0-day lead — 5,783 of 5,783 REG rows fall on their own team's
+gameday, against 12 of 5,952 in 2024) and is blind to IR/season-enders entirely
+(measured: James Conner, Najee Harris = ~~0 rows~~ **one row each — Conner wk4, Harris
+wk1, both with a NULL `report_status`, neither at or after the injury week; Corrected
+2026-09-04 (C15)**). So the **live** in-season source
 is a NEW `state.injury_transitions()` in `ziggurat/league/state.py` — a pure
 read-time diff of consecutive `league_player_state` snapshots for availability
 crossings (ACTIVE/QUESTIONABLE/None ↔ OUT/INJURY_RESERVE), as-of-gated, no
@@ -3538,7 +3555,16 @@ Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 > with a sha256 manifest + the HOLDOUT lock), `replay.py` (DECIDE: one call to
 > PRODUCTION `core.candidates.build_candidates` per week through
 > `base.latest_truth` at `as_of(T)` = the first Tuesday STRICTLY after the
-> week's last REG gameday, shared by every strategy; `python -m
+> week's last REG gameday, shared by every strategy **[Corrected 2026-09-04
+> (C16): in TRAIN exactly ONE week decides 7 days late — 2021 wk15's last REG
+> game was a Tuesday, so its clock is 2021-12-28, after every week-16 game and
+> sharing week 16's clock; 48 weeks sit at 1 day and 5 at 2, and the grader
+> already excludes those 3 picks as `G_REFERENCE_PRECEDES`.]** **[Corrected
+> 2026-09-04 (C17): `knowable_as_of` on `weekly_stats`/`snap_counts` is the team
+> GAMEDAY, so the replay is a game-date cut over the FINALISED season files —
+> 87.8% of TRAIN week-T lines sit inside nflverse's Mon–Wed correction window,
+> and the DB already holds two vintages differing on 55 of 94,734 keys, 0 of
+> them in TRAIN.]**; `python -m
 > backtest.replay`, Rule-3 shaped) and `scorecards.py` (GRADE: pure over the
 > frozen decisions at a strictly-later `grade_as_of`, never imports the
 > generator). Three strategies over the generator's pool: `signal_topk`,
@@ -3586,9 +3612,20 @@ Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 > depth-matched +36.8pp [+31.7, +41.8] \*. **TRAIN 2021–23** p@3 83.0% [75.7,
 > 88.4] n=135, +33.6 / block +32.6 [+16.4, +48.9] n=3 \*; **HOLDOUT 2024–25**
 > p@3 82.1% [72.6, 88.9] n=84, +34.6 [+26.4, +42.9] \* / block +33.7 [−6.4,
-> +73.9] n=2 (two seasons cannot exclude zero — printed, not hidden). Hits by
-> lead: **158 concurrent (lead 1), 12 genuine one-week leads (lead 2), 11
+> +73.9] n=2 (~~two seasons cannot exclude zero~~ — printed, not hidden).
+> **Corrected 2026-09-04 (C13):** this PAIR does not exclude zero; an n=2 block
+> can and does — 4 of the 12 n=2 holdout season-block intervals in this record
+> exclude zero, because at df=1 the interval excludes zero whenever the two
+> seasons' gap is under 15.7% of their mean. Hits by
+> lead: **158 concurrent (lead 1), 12 ~~genuine one-week leads~~ (lead 2), 11
 > bye-deferred (unmeasurable), 16 bye at lead 1, 15 truncated (r2 page absent).**
+> **Corrected 2026-09-04 (C3/C30):** the two categories are renamed the
+> **first-snapshot crossing** (r1) and the **second-snapshot-only crossing**
+> (r2) and the word "genuine" is struck everywhere it qualified them — 52 of 54
+> TRAIN weeks hold no market observation at all between the week's last game and
+> the Tuesday flag, and on the one Tuesday-vintage page that survives (2021 wk4)
+> 91 of 150 crossings had ALREADY happened by the flag, so r2 is an upper bound
+> on a one-week lead, never a measurement of one.
 > HIT sensitivity H=3/5/8/10: p@3 87.7/82.6/75.8/68.9% vs base
 > 57.2/49.5/39.7/34.0 — the lift is flat, the levels are not. Corroboration
 > 30.1% (66/219) vs 6.0% of null lines. ros (the honest bar, base 30.2%):
@@ -3601,7 +3638,8 @@ Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 > **Headline lesson, in two halves. (1) The instrument grades AGREEMENT with
 > the market, not a lead over it.** 158 of 181 wp hits are lead 1 — the
 > market's first scrape after the event, three days after the Tuesday flag —
-> and only 12 (6.6%) are genuine one-week leads; the first draft's "23 leads"
+> and only 12 (6.6%) are ~~genuine one-week leads~~ second-snapshot-only
+> crossings (C3/C30); the first draft's "23 leads"
 > was 12 + 11 bye-deferred picks whose lead is unmeasurable (STAT-1). A 49.5%
 > base rate says "up 5 places" on a weekly page is easy. On the ONE number the
 > panel has that would mean "beat the market" — the raw lead-2 rate — the
@@ -3680,7 +3718,9 @@ Sleeper `/research` ownership series is REQUIRED for the 2024–25 holdout.
 > comparison block, so the objective 4.2's amendment names ("precision@≤3
 > AND lead-time") did not exist as a number; the verifier also found
 > `LEAD_LABELS[2]` calling a bye-at-r1 row "a genuine one-week lead" (fixed by
-> the STAT-1 split). The hits-by-lead line now prints on every card; **the
+> the STAT-1 split; the label's remaining "genuine one-week lead" wording is
+> itself renamed to "second-snapshot-only crossing" — **Corrected 2026-09-04
+> (C3/C30)**, above). The hits-by-lead line now prints on every card; **the
 > conditional bye-corrected lead-2 RATE as one per-strategy number with its
 > null and interval is still open — it is 4.2's, and it is the number 4.2's
 > objective needs.** Also: STAT-3 /
@@ -3794,7 +3834,14 @@ runtime — 4.1's recon measured that runtime and it decides whether this is an
 afternoon or an overnight. "Ideal" is bounded from above by the base rate the
 harness prints and by the soft ECR bar; a tuned setting that beats the null
 by less than its season-block interval is reported as no evidence, not as a
-small win. Deployed defaults change only at Checkpoint 4, with the holdout
+small win. **Corrected 2026-09-04 (C26):** this rule was superseded by 4.2's
+own G1-G6 gates, and its premise — that the season-block interval is the
+conservative one — is false: the block interval is NARROWER than the pooled
+interval in 6 of 45 graded cells and on both load-bearing numbers (TRAIN depth
+8.29 vs 12.80pp; the winner 7.83 vs 14.92pp, excluding zero where the pooled
+interval spans it). Pooled and block are different estimands, not a
+liberal/conservative pair, and `stats.py` labels both "miscalibrated under
+sparsity — never a gate". Deployed defaults change only at Checkpoint 4, with the holdout
 numbers beside them.
 **Handover from 4.1 (2026-09-01):** both seams exist — the holdout lock
 (`backtest/decisions.py::require_holdout_unlock`, ledger
@@ -3810,8 +3857,11 @@ DEPTH-MATCHED lift** — the raw lift rewards picking deeper (4.1 STAT-2). Two
 4.1 deferrals are this item's: **`ff_opportunity` is 4.2's TD-regression
 source** (backtest-only, `latest_truth`-only, stamped from the nflverse
 asset's `updated_at` — see item 3.2c's "leak wearing a valid timestamp"
-finding above: there is NO in-season file, so it can only ever grade, never
-run live; it is not ingested today) and the conditional bye-corrected lead-2 RATE as one per-strategy
+finding above: ~~there is NO in-season file, so it can only ever grade, never
+run live~~; it is not ingested today. **Corrected 2026-09-04 (C28):** the file
+IS published in-season and CAN run live; what it cannot do is be replayed,
+because each season's asset is overwritten in place with no point-in-time
+archive) and the conditional bye-corrected lead-2 RATE as one per-strategy
 number with its null (4.1 LEAD-1, partially closed).
 **Update:**
 > **Done 2026-09-03 — verdict, in the pre-registered words: "no setting
@@ -3836,8 +3886,17 @@ number with its null (4.1 LEAD-1, partially closed).
 > over the 45 common weeks of TRAIN 2021–23, on a frozen DB snapshot
 > (`data/backtest/ziggurat-4.2-snapshot.sqlite`; panel fingerprint and preflight/
 > postflight digest `0a98eff6…` equal on both sides, three ways). Six gates
-> stood between any winner and the ONE ledgered holdout read: G1 `D ≥ +5.4pp`;
-> **G2 a max-null step-down over the whole family (B=10,000)**; G3 the HARD
+> stood between any winner and the ONE ledgered holdout read: G1 `D ≥ +5.4pp`
+> (**Corrected 2026-09-04 (C22):** that constant is the rounded half-width of
+> the argmax-INELIGIBLE FLOOD-1 probe's own paired interval — 2.0154 × one
+> cell's SE — not a power calculation and not a decision-utility bar; the
+> measured family max-null bar sits 1.8pp above it, and 15.3% of sign-flip
+> replicates clear it on noise alone);
+> **G2 a max-null step-down over the whole family (B=10,000)**
+> (**Corrected 2026-09-04 (C18):** the symbol keeps its frozen pre-registration
+> name; the procedure is SINGLE-STEP — only the winner is ever tested, against
+> one bar — and the bar is exact only under exchangeability of the per-week
+> signs); G3 the HARD
 > admissibility screen; G4 3-of-3 per-season sign; G5 leave-one-out; G6 sign at
 > HIT = 3 and 8. `backtest/tune.py` refuses the live DB and the canonical cache
 > dir by name, has no holdout flag at all, and raises on a holdout-season
@@ -3850,34 +3909,66 @@ number with its null (4.1 LEAD-1, partially closed).
 > **The result.** 47 of the 80-setting cap, ≈7 min elapsed in an 8-way pool
 > (34.4 s per fresh cell; the pre-registered 31.26 s was serial). Winner
 > `carries=1` (shipped 6): **D = +0.05408, clearing G1 by 8e-05 — 1/95th of one
-> hit's quantum — and FAILING G2**: the family-wise null-max bar is 0.07206
-> (adjusted p 0.153, `clearing: []`; 15.3% of pure-noise replicates exceed G1's
-> floor on their own). G3 passes with the A9 (depth) and A12 (position-mix)
+> hit's quantum** (**Corrected 2026-09-04 (C6):** 1/93.03 — see F4-4(b) line
+> 2476) **— and FAILING G2**: the family-wise null-max bar is 0.07206
+> (adjusted p 0.153, `clearing: []`; 15.3% of ~~pure-noise~~ replicates exceed
+> G1's floor on their own — **Corrected 2026-09-04 (C23): 15.3% ± 0.36pp (MC
+> SE at B=10,000) of SIGN-FLIP replicates produce a FAMILY MAXIMUM above the
+> floor; the per-CELL exceedance is 0.66% on average and 7.3% for the winner's
+> own cell, a 23× difference**). G3 passes with the A9 (depth) and A12 (position-mix)
 > flags raised; G4 passes; G5 vacuous (single axis); G6 passes as a sign gate
 > only (H=3 +2.1pp, H=8 +5.2pp with 2023 NEGATIVE and p > 0.05 at every H).
 > Round 2 was empty — 0 axes survived the single-cell p < 0.05 entry rule, 8
-> skipped. FLOOD-1 has the largest D on the page (+6.24pp, pool 187) and is
+> skipped. **Corrected 2026-09-04 (C19/C24):** on 14 of the 45 graded cells
+> that rule was arithmetically unopenable — with `m` non-zero paired weekly
+> differences the exact one-sided p cannot fall below 2^-m, so m ≤ 4 floors it
+> at 0.0625 (all three `receptions` levels sit there) — and NO multi-knob
+> combination cell was ever built or graded (`round2.json`: `candidates {}`,
+> `forward_attempts 0`, 0 cells setting two axes independently), so two-knob
+> nesting is UNTESTED, not tested and failed. FLOOD-1 has the largest D on the page (+6.24pp, pool 187) and is
 > argmax-ineligible by construction — **§13.1 predicted every clause of this
 > outcome before the first cell ran.** The 40-cell D histogram: median −0.3pp,
 > 27 of 40 negative, 2 reach G1, 0 reach G2. §7.3 LOSO: three folds, three
-> different winners, LOSO mean +1.2pp vs TRAIN +5.4pp — a **+4.2pp winner's
-> curse, all of it selection switching** (forcing every fold to `carries=1`
-> reproduces TRAIN exactly). The runner-up is 1.26 tie-bands away and would win
+> different winners (`gs=2.0` / `rushing_yards=5` / `carries=1`), LOSO mean
+> +1.2pp vs TRAIN +5.4pp — a **+4.2pp winner's curse, all of it selection
+> switching** (forcing every fold to `carries=1` reproduces TRAIN exactly).
+> **Corrected 2026-09-04 (C21):** that parenthetical is an arithmetic IDENTITY,
+> not a measurement — the three folds are 15 weeks each, so a forced-LOSO mean
+> IS the pooled `D` (exact `Fraction` equality; max gap 6.9e-18 across all 40
+> cells) — and the +4.2pp curse itself carries a 95% CI of [−0.007, +0.091],
+> i.e. it does not exclude zero. The runner-up is 1.26 tie-bands away and would win
 > the closest-to-shipped tie-break.
 >
 > **What the +5.4pp is made of** (the decomposition the pre-registration
 > demanded): `D = D_hit − Δbar` splits **54.8% more hits / 45.2% lower null bar**
 > — near half is the winner picking shallower, not better. `rho(D, pool)` over
-> the grid is −0.10; the pure pool lever is −0.83 (n=6): "recall, not
-> thresholds" is NOT the read, and neither is its opposite. At the pick level
+> the grid is −0.10; the ~~pure pool lever~~ **uniform-scale family** is −0.83
+> (n=6): "recall, not thresholds" is NOT the read, and neither is its opposite.
+> **Corrected 2026-09-04 (C7):** those six cells are not a pure pool lever —
+> 23-26% of the control's shared rows are not a 1/c rescale at all, and
+> `global_scale=2.0`, which is strictly TIGHTER, still changes 40 of 54 top-3
+> sets — so the family varies WHICH rows enter as well as how many. At the pick level
 > the winner swaps 68 RBs in for 61 WRs + 7 TEs out (winner-only hit rate 81.4%
 > vs default-only 75.7%, backup/committee backs), with a Simpson's reversal
-> under position standardisation. And the §9 secondaries say what "better"
-> means here: **genuine one-week leads FALL 10 → 7 (wp) and 20 → 17 (ros)**,
-> the entire +4 hit gain is concurrent or bye-deferred, the conditional lead-2
-> denominator collapses 29 → 19 and loses the default's only interval that
-> excluded zero, and Sleeper corroboration at Δ20 rises 1.74× — `carries=1`
-> agrees with the market sooner and beats it less. The §9.8 pool-invariant
+> under position standardisation. **Corrected 2026-09-04 (C8):** it is a mix
+> change AND a heterogeneous within-position quality change, not a pure mix
+> shift — a pure mix change makes BOTH standardised differences identically
+> 0.000000, while the measured pair is −0.0416 / +0.0580, with RB −11.3pp and
+> WR +10.3pp within position. The strata are thin (Fisher RB p 0.29, WR 0.15,
+> TE 1.00), so neither standardised number is "the" answer. And the §9 secondaries say what "better"
+> means here: **~~genuine one-week leads~~ second-snapshot-only crossings FALL
+> 10 → 7 (wp) and 20 → 17 (ros)**, the entire +4 hit gain is concurrent or
+> bye-deferred, the conditional lead-2 denominator collapses 29 → 19, and
+> Sleeper corroboration at Δ20 rises 1.74× — `carries=1` agrees with the market
+> sooner and ~~beats it less~~. **Corrected 2026-09-04 (C9/C25):** "beats it
+> less" is struck — the conditional RATE RISES in both markets (34.5 → 36.8% wp,
+> 28.6 → 31.5% ros) and no test distinguishes any of it from noise (slot-paired
+> exact McNemar p 0.581 / 0.664; Fisher on the counts 0.618 / 0.724), while the
+> denominator falls for a post-treatment reason (−4 extra first-snapshot hits,
+> −6 extra bye-at-r1) rather than an economic one. **Also struck: "loses the
+> default's only interval that excluded zero"** — the default has three, and the
+> winner KEEPS the `ros` conditional depth interval at a higher +18.4pp
+> [+6.4, +30.4]. The §9.8 pool-invariant
 > read cannot rank settings (its correlation with pool size is carried entirely
 > by the random arm getting worse).
 >
@@ -3886,8 +3977,15 @@ number with its null (4.1 LEAD-1, partially closed).
 > CONTEXT bullets, the briefing SIGNALS block, the backtest); the phone teaser
 > and the 20-min alert tick are NOT consumers; only the usage arm is graded,
 > and a floor change alters injury-arm reason text the grade never sees; a
-> deploy orphans 50 of 51 freeze keys incl. both 4.1 holdout freezes (whose
-> re-creation is a ledger event) and fails six pinned literals in four tests;
+> deploy ~~orphans 50 of 51 freeze keys incl. both 4.1 holdout freezes (whose
+> re-creation is a ledger event) and fails six pinned literals in four tests~~;
+> **Corrected 2026-09-04 (C14): nothing is orphaned.** Cache keys are hashed
+> from parameter VALUES, so a simulated adoption of `carries=1` moves 0 of the
+> 44 round-1 grid keys, 44/44 still verify `ok`, the paired reference
+> `28007210abc5` still loads its 162 week records, and one flag
+> (`--breakout-floor carries=6`) re-addresses both item-4.1 reference keys
+> exactly; what actually moves is FIVE key-literal sites (two distinct keys)
+> plus ~14 shipped-anchor assertions;
 > the null universe is read at the grade clock and the pool at the decision
 > clock (PF-21, identical for every setting). Harness defects found by the
 > analysis, recorded not fixed: `sign_flip_permutation` mis-resolves exact
@@ -3912,9 +4010,213 @@ number with its null (4.1 LEAD-1, partially closed).
 > untouched. Suite green (**2,854 passed, 4 skipped**; +111 over the 3.8A
 > baseline). **Standing lesson: a search that pre-registers its own null
 > distribution finds out what its instrument can see — here, nothing smaller
-> than ~7pp on 45 weeks — and a winner that clears the practical floor by
+> than ~7pp on 45 weeks** [**Corrected 2026-09-04 (C20):** that ~7pp is the
+> SELECTION bar (the family max-null p95), not an 80%-power MDE. At
+> sd(d_w) = 0.2483 and n = 45 the SE is 3.70pp, so 80% power needs +9.2pp
+> against a single-cell bar or +10.3pp against the family bar, and detecting a
+> true +5.4pp at 80% needs ≈131 paired weeks — n = 100 delivers ~70%] **— and a
+> winner that clears the practical floor by
 > 8e-05 while sitting 1.8pp under the noise maximum is the noise maximum
 > wearing a label.** The item's value is the number it did NOT change.
+
+### 4.2a [Triage] External review of 4.1/4.2 — corrections, suggestions, decisions (added 2026-09-04)
+**Goal:** Two independent external reviews (GPT and GPT Pro, both 2026-09-04,
+both report-based — neither ran the code or opened an artefact) of the 4.1/4.2
+program answered the brief `intel/research/breakout-review-brief-2026-09-04.md`.
+Work through them without re-deriving anything: verify every claimed
+correction against the artefacts (two refute-first verifiers per claim, an
+artefact lens and an independent-recomputation lens, a third on
+disagreement), bin every suggestion by what it NEEDS (presentation / new
+instrument / new generator / start-recording-in-2026 / strategy rework),
+decide PURSUE / FOLD / DEFER / REJECT with the reason written down, and hand
+the whole record back out for a second round. The working ledger is
+`intel/research/external-review-tracker-2026-09.md` (gitignored, written
+scrubbed so it can be handed over unedited); this item OWNS that file. It is
+a triage item: anything pursued becomes its own plan item (4.2b, 4.2c, later
+4.2d) and this item never carries a build.
+**Done when:** every correction row in the tracker has a cited verdict; every
+suggestion has a decision and, if pursued, a plan item; the brief carries a
+dated errata section (never silently edited); the lead-category rename
+("first-snapshot crossing" / "second-snapshot-only crossing") and the holdout
+relabel ("previously inspected external evaluation set") are applied in cards,
+notes, CLAUDE.md and this plan; and the handoff package (tracker §6) has gone
+back to the reviewers.
+**Standing constraints (from the tracker header):** floors unchanged; 2024–25
+locked AND relabelled — the shipped floors were chosen against five
+hand-verified 2025 breakouts, so those seasons were never pristine; no second
+search on 2021–23 under the `wp`-hit metric; nothing rebuilds the generator
+during Week 1.
+**Update:**
+> **Interim, 2026-09-04 — corrections verified.** Both reviews are on disk
+> (`intel/research/GPT-*.md`); the tracker is written and binned; 29 claimed
+> corrections (C1, C3–C30; C2 resolved by inspection) went through 65 Opus
+> agents — two refute-first lenses each (artefact / recomputation), a tiebreak
+> on the six splits, one synthesis: **17 CONFIRMED · 11 PARTLY · 1 REFUTED
+> (C29, the ESPN-transactions claim — the brief stands) · 0 JUDGMENT.** Record:
+> `intel/research/external-review-verdicts-2026-09-04.md` (+ `.json`). The
+> brief carries an appended dated ERRATA section (body untouched); the plan
+> §4.1/§4.2 Update blocks, the CLAUDE.md bullets and the code-facing text
+> (card labels, docstrings, `tune.py` printing m beside p) are applied as one
+> small gated build. Headline corrections: 2024–25 is a *previously inspected
+> external evaluation set* (all twelve floors carry 2025 provenance; the
+> unlock ledger evidences completed `backtest/` reads only). **Corrected
+> 2026-09-04 (C1):** the lock exists SOLELY in `backtest/` — `ziggurat
+> candidates --season 2025 --validate` is an ungated 2025 read path — and the
+> ledger is written AFTER a run completes, so a spent-but-unlogged read is
+> possible; at least three further holdout reads are named in the artefacts
+> (the pre-lock `110ba96ae988` freeze, item 3.3's 2025 five-target + control
+> validation, and 4.1's COST-1 2025 re-check); the lead labels
+> become first-snapshot / second-snapshot-only crossings (52 of 54 TRAIN weeks
+> hold no market observation at the flag); 80 % power needs +9.2–10.3pp or
+> ≈131 weeks (the "≈100" was the 70 % figure); the round-2 rule was
+> arithmetically unopenable on 14 of 45 cells (m ≤ 4 ⇒ p ≥ 2^-m); the tie bug
+> moves 10 cells (largest 0.0141, none across α) and the control's true
+> two-sided p is 0.0625, not 1e-4; `weekly_stats` already holds two vintages
+> differing on 55 keys; `ff_opportunity` IS published in-season (game-day
+> cron, pinned 2006–20 models) and becomes a Week-1 CAPTURE in 4.2b; nothing
+> is orphaned by a default change (value-hashed keys). Holdout: ledger 4 → 4;
+> one disclosed near-miss (two verifiers globbed holdout freeze MANIFESTS —
+> parameters and digests only, no outcomes). Remaining for this item: the
+> errata build, then the handoff package after the first live weeks.
+> **Errata build landed the same evening** (6 agents: build ×2 → audit ×2 →
+> fix → gate): 57 entries applied, 9 audit findings fixed (1 major — the
+> tune summary rows lacked m beside p), **suite 2,856 passed / 4 skipped**
+> (+2 pins), frozen pre-registration prefix byte-unchanged with F4-4 appended,
+> `repo_guard` clean; uncommitted pending the operator. Remaining for this
+> item: the handoff package only.
+
+### 4.2b [Build] Decision-time archive & usage-evidence presentation (added 2026-09-04; deadline Tue 2026-09-15)
+**Goal:** The reviewers' unanimous #1, and the one item with a hard date: the
+richest waiver weeks are the first three and a missed Tuesday cannot be
+reconstructed. ONE per-Tuesday FREEZE that ties together what already
+accumulates (daily whole-universe `league_player_state` = the FA pool as a
+positive fact; `league_transactions` with ESPN timestamps — 32 rows by
+2026-09-04, so "who claimed whom, when" is already recorded forward; daily
+Sleeper projections = a same-week forecast at several days; weekly `fpecr`
+Friday pages; the journal) with what does not yet exist: the candidate board
+with features for EVERY evaluated row (false negatives must be studyable), the
+printed claim chain and its projection-input hash, the projection-only chain
+beside the page the operator saw, the operator's submitted claims plus any
+departure and its stated reason, and a Tuesday pull of `weekly_stats` kept
+beside Thursday's for the same week — the data-vintage diff: the historical
+replay is a game-date cut over FINALISED values (`weekly_stats.knowable_as_of`
+is the gameday; nflverse corrections land Mon–Wed), and only a forward
+measurement says whether that ever moves a pick. Episode-aware NEW / REPEAT
+marking per flagged player. Recon question: can same-week `wp` ECR be captured
+on Mon/Tue/Wed from the free page — if not, Sleeper projections are the
+same-week forecast we have. Presentation: the candidates column on `waivers`
+and the briefing SIGNALS block are relabelled "USAGE / ROLE EVIDENCE — does
+not change the claim order" (never "the market will agree by Friday"), and the
+column is never auto-promoted to a tie-break before a shadow comparison.
+Also carries the two integrity fixes both reviewers rank ahead of any new
+experiment: the `stats.sign_flip_permutation` tie bug (exact enumeration for
+small m, identical observed/null statistic computation, regression fixtures
+for m = 4, m = 5, tied statistics, all-zero and repeated-zero weeks), after
+which the FROZEN 4.2 analysis is re-run with corrected arithmetic — an
+implementation correction, not a new search; both outputs preserved — and a
+crosswalk-coverage measurement weighted by decision impact (unresolved joins
+among eligible / selected / near-cutoff players; pick changes under corrected
+joins). And one query the frozen data enables: the acquisition-latency
+hypothesis — the batch runs 00:01–01:13 PT and the briefing lands 06:00; are
+valuable free agents taken inside that window? A positive answer is a CADENCE
+change, not a threshold change.
+**Amendment (2026-09-04, after the corrections verification):** three
+additions from the verdicts. (a) **S10 capture** — `ff_opportunity` publishes
+the in-progress season's `ep_weekly_<season>.parquet` after every game window
+(C28: 91 successful game-day runs 2025-09..2026-02; the 2025 file was rewritten
+2026-09-01 AND 2026-09-04) and the models are a pinned 2006–2020 fit, so it is a
+MUTABLE current-value source whose observations are lost if not captured — the
+same class as `espn_ranks`. Pull it on the ingest cadence from Week 1 with its
+`updated_at` recorded, PERISHABLE, `latest_truth`-only for any backtest; no
+integration and no R port (that stays deferred). (b) **S2 fixtures** — the tie
+bug moves 10 of 45 cells (C5) and can breach the exact 2^-m floor downward
+(C19, ~10 % of all-favourable m = 4 vectors): fixtures must include the
+control's own 5-informative-week all-negative vector, an all-favourable m = 4
+vector, and an exactness assertion against full enumeration. (c) **S26
+watch** — re-check for an `injuries_2026` upstream file after Week 1 (none
+exists at 2026-09-04; the 2025 file was a one-shot post-season backfill).
+**Done when:** the first live Tuesday (2026-09-15) is captured end-to-end and
+reconstructible; completeness targets are stated IN the item before that
+Tuesday (every submitted claim; ≥ 95 % of evaluated candidates); the
+presentation change is live and pinned by test; the tie bug is fixed with
+exact-case fixtures and the re-run 4.2 gate table is recorded (verdict expected
+unchanged — a changed verdict is a finding, not a promotion); the crosswalk
+measurement is written down with its decision-impact number. After three live
+weeks the archive must let every flagged player be classified as one of
+{useful & acquired, already priced in, already rostered, claim lost, surfaced
+too late} — if flagged players are routinely gone before the system can act,
+the operational-lead hypothesis is refuted whatever the Friday rank precision
+says.
+**Update:**
+> **Interim, 2026-09-04 — recon done, design proposed.** Nine read-only
+> scouts + synthesis wrote `intel/research/decision-archive-4.2b-recon.md`:
+> the freeze is a sha256-manifested JSONL payload under gitignored
+> `data/decisions/<season>/wk<NN>/<capture_id>/` plus ONE run-log table
+> (`decision_freezes`, migration 018), fired always-on inside every `waivers`
+> run AND by a Tue 18:30 PT timer, through passive collector seams on
+> `build_waiver_plan` / `build_candidates` (no import cycle; Rule 3 kept);
+> the enriched and projection-only chains are IDENTICAL by construction
+> today and the freeze asserts it; every evaluated candidate row (30 fields)
+> is emitted from the table `_usage_arm` already holds; NEW/REPEAT is an
+> episode rule (gap > 2 EVALUATED weeks, labelled hypothesis) with a Week-1
+> tag because Week 1 is the all-emergence regime; `ff_opportunity` is
+> fetched by URL into a lean 25-column table (015) plus a lossless parquet
+> mirror; same-week ECR is DynastyProcess `fp_latest_weekly` daily (016) with
+> one FantasyPros page per Tuesday as the week-label authority; Tue/Thu
+> vintages are two forced systemd units at 08:00; `acquisition_at`
+> (millisecond) + `related_transaction_id` land in 017. **Schedule: every
+> core/registry unit must land by Mon 2026-09-08 (Week-1 rule + 09-15
+> deadline).** Two operational findings: the Week-1 stat-anchor trap (Tue
+> 09-15 could price an opener-only vintage with `ingest status` reading
+> `fresh`) — B6 fixes it; and the 4.1 design note's Sleeper settling
+> measurement targets a URL that 404s. Ten operator decisions are listed in
+> the brief; the build proceeds on the recommendations in an isolated
+> worktree against a scratch DB copy, and NOTHING touches the production
+> tree, its DB or the timers until the operator approves the merge.
+
+### 4.2c [Experiment] Realised-points instrument — pre-registered (added 2026-09-04; opens 2026-09-15)
+**Goal:** Replace market-rank movement as the PRIMARY objective with what the
+waiver decision cashes in: realised house-scoring points. Per the reviewers'
+shared spec: four CALENDAR weeks after the flag (byes and confirmed
+non-participation score zero; missing data does not; horizon-truncated
+decisions excluded by a rule fixed beforehand; negatives kept — no oracle
+option to keep the good weeks), house scoring via `core/scoring.py` (Rule 2,
+touchdowns retained), against a frozen benchmark basket B(p,T) chosen with
+Tuesday-available information only. Two definitions are on the table — top-3
+by week-T carries+targets at the position within the eligible universe (R1);
+top-3 highest-ranked eligible players on the reference page (R2) — and the
+pre-registration picks one as primary and the other as a secondary WITHOUT
+looking at results. Three strategies on a COMMON eligible universe, not only
+inside the signal's own gate: the shipped signal, volume, and market-only
+(best available by r0) — the last answers "does Tuesday usage add information
+beyond the observed Friday rank?", which is the question the ECR panel CAN
+answer (it cannot measure a lead at weekly resolution). Role persistence over
+the next two team games is a secondary. The four-week window is justified
+against the pricer's rest-of-season horizon, not assumed. Method requirements
+written in BEFORE the first grade: a studentised paired statistic with
+dependence-aware block resampling and block-length sensitivity (weeks are not
+independent — repeated players, overlapping windows); a practical floor stated
+in house points from decision utility, not from an interval width
+(**Amended 2026-09-04 (C22):** name the UNIT explicitly — extra correct claims
+per season, or house points — pin it BEFORE any probe, and print the
+detectable-effect bar beside it as a SEPARATE row; 4.2's whole +5.41pp
+translates to 4 net extra correct picks in 135 slots, ~1.3 per season, 45% of
+which is a lower null bar rather than extra hits); the
+informative-week count m and its 2^-m p-floor printed per cell (4.2's round-2
+rule could not open at p < 0.05 on any cell with m ≤ 4, whatever the
+direction); a selection-aware family rule if any search is run. TRAIN 2021–23
+only — grading the SHIPPED default under a new objective is a measurement, not
+a search. 2024–25 stay locked.
+**Done when:** the pre-registration is frozen and sha256-pinned before the
+first grade; scorecards for the three strategies on TRAIN exist under the new
+objective; the ECR-hit instrument is retained as a SECONDARY with the lead
+categories renamed; the challenger seam for 4.2d (the explainable role-state
+challenger — admission / role estimation / presentation separated, trailing
+three-game baseline, an active-game record that distinguishes zero involvement
+from inactive from bye from missing) is defined so it can be shadow-run on
+2026 without a second search.
+**Update:**
+> _[To be completed]_
 
 ### 4.3 [Build] Podcast pipeline
 **Goal:** RSS archive harvest for a chosen pod slate (must have existed 2021–2025 and still publish), local Whisper with vocabulary biasing + phonetic entity resolution against the player table, claim extraction to the SPEC schema via the routing interface, claim-resolution logic (did the claimed thing happen?).

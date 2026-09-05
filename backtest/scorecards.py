@@ -17,20 +17,50 @@ Timing model (item 4.1 recon; the panel's own scrape cadence):
   already seen their game.  The reference every hit is measured from.  A
   player the market did not rank at all enters at ``page_size + 1`` — one
   place past the last ranked player, the most conservative placement that
-  still lets "unranked -> ranked" count as movement.
+  still lets "unranked -> ranked" count as movement.  That is a CENSORED
+  observation, not a rank, and the censor is applied at ``r0`` ONLY: a player
+  unranked at a LEAD page is a miss (``absent``), never a censored entrant, so
+  a double-unranked hit is impossible.  The floor also MOVES week to week —
+  pages run 31 to 243 rows and 123 of 184 consecutive TRAIN page pairs differ
+  by >= 5 rows — so some measured movement is the page resizing under the
+  player.  Measured (external review C27, 2026-09-04): of 5,578
+  censored-then-ranked TRAIN lines 82.6% hit and 17.4% do NOT, and 3.4% hit
+  only because the r0 page was the larger of the two.  The "unranked" depth
+  band therefore MIXES never-ranked lines (an automatic miss) with ranked ones.
 * ``as_of(T)`` — the Tuesday after week T's last game: the decision clock.
+  The rule is "first Tuesday STRICTLY after", so a TUESDAY game slips the clock
+  a full week and the slipped clock can then coincide with the NEXT week's.
+  Exactly one TRAIN week does it (external review C16, 2026-09-04): 2021 wk15
+  lands on 2021-12-28 — seven days on, after every week-16 game, sharing week
+  16's own clock — against 48 TRAIN weeks at 1 day and 5 at 2.  Its picks are
+  dropped as ``reference_precedes_decision``, so nothing is graded across it.
 * ``r1`` — the week-T+1 page, scraped the Friday after ``as_of(T)``.  Three
-  days after the flag.  This is CONCURRENCE, not lead: the market and the
-  tool saw the same box score.  A lead page scraped at or before ``as_of(T)``
-  is not a post-flag observation at all; such a pick is UNGRADEABLE
+  days after the flag.  A hit here is a FIRST-SNAPSHOT CROSSING — concurrence,
+  not lead: the market and the tool saw the same box score.
+  A lead page scraped at or before ``as_of(T)`` is not a post-flag
+  observation at all; such a pick is UNGRADEABLE
   (``reference_precedes_decision``), never read from the next page instead.
-* ``r2`` — the week-T+2 page.  A hit first seen here is a genuine one-week
-  lead over the market's weekly re-rank ONLY when the T+1 page could have
-  ranked the player: a T+1 bye (the weekly page drops bye teams) makes the
-  T+2 page the market's first rankable scrape, so that hit counts as a hit
-  but its lead is BYE-DEFERRED — reported apart, never as a one-week lead.
+* ``r2`` — the week-T+2 page.  A hit first seen here is a SECOND-SNAPSHOT-ONLY
+  CROSSING: the player did not clear the bar on the first post-flag page and
+  does on the next.  It is readable as a lead over the market's weekly re-rank
+  ONLY when the T+1 page could have ranked the player: a T+1 bye (the weekly
+  page drops bye teams) makes the T+2 page the market's first rankable scrape,
+  so that hit counts as a hit but its crossing is BYE-DEFERRED — reported
+  apart, never as a lead.
 
 The lead readings are never blended; the report prints them apart.
+
+NAMING (external review C3 / C30, 2026-09-04).  These are SNAPSHOT labels, not
+measurements of a lead over the market, and the old names ("lead 1 =
+CONCURRENT", "lead 2 = a genuine one-week lead") overclaimed.  The panel is
+scraped roughly weekly: 52 of the 54 TRAIN weeks have NO scrape at all between
+the week's last game and the Tuesday clock, so what the market believed AT the
+flag is UNOBSERVED; on the one Tuesday-vintage page that does exist (2021 wk4)
+91 of 150 r0 -> r1 crossings had ALREADY happened by the flag, and 80 of 98
+week-5 Friday crossings were already on it.  So a first-snapshot crossing is
+concurrence at best, and a second-snapshot-only crossing is a crossing the
+market's FIRST post-flag page did not show — not a demonstrated one-week lead.
+The ``lead`` FIELD keeps its 1 / 2 / 3 encoding so frozen records stay readable.
 
 Every threshold is a labelled hypothesis with a default and sensitivities
 (Rule 6): ``HIT_PLACES`` (how many places the market must move a player for
@@ -81,6 +111,7 @@ from ziggurat.data.nfl.weekly_stats import get_weekly_stats
 
 __all__ = [
     "COND_LEAD2_LABEL",
+    "DATA_VINTAGE_LABEL",
     "DEPTH_BANDS",
     "DEPTH_LABEL",
     "HIT_PLACES_DEFAULT",
@@ -213,15 +244,36 @@ DEPTH_LABEL = (
 
 NULL_LABEL = "eligibility-matched null (week-T universe; NOT depth-matched — see DEPTH)"
 
+#: DATA VINTAGE (external review C17, 2026-09-04) — printed beside
+#: ``HIT_DEPTH_CAVEAT`` on every card.  Not a hypothesis and not tunable: it is
+#: what the graded values ARE.  A replay that reads finalised season files is a
+#: game-date cut, not a point-in-time capture, and saying so on the card is the
+#: only place a reader of one scorecard can learn it.
+DATA_VINTAGE_LABEL = (
+    "DATA VINTAGE (honest limit, not a hypothesis): the week-T usage these decisions were "
+    "made on is a 2026 BULK PULL of nflverse's finalised season files, read through "
+    "base.latest_truth and gated on knowable_as_of = the team's GAMEDAY. That is a "
+    "GAME-DATE CUT OF FINALISED DATA, not a point-in-time capture of what upstream had "
+    "published at the Tuesday clock: 87.8% of week-T lines were played 1-2 days before the "
+    "clock, i.e. inside nflverse's own stated Monday-to-Wednesday correction window. "
+    "In-place revision is demonstrated rather than hypothetical — the two stored vintages "
+    "(2026-07-25, 2026-09-01) differ on 55 of 94,734 shared keys, 54 of them "
+    "air_yards_share and three by at least the shipped 0.10 floor's width, all in 2024-25 "
+    "and none in TRAIN."
+)
+
 LEAD_BYE_DEFERRED = 3
 LEAD_LABELS: Mapping[int, str] = {
-    1: "lead 1 = CONCURRENT: the market's first post-event scrape, 3 days after the Tuesday flag",
-    2: ("lead 2 = a genuine one-week lead: first re-rank one full scrape later, and ONLY "
-        "when the T+1 page could have ranked the player (a T+1 bye is bye-deferred, below; "
-        "a missing T+1 page is truncated_r1 — the pick is graded on one scrape and disclosed)"),
+    1: ("lead 1 = FIRST-SNAPSHOT CROSSING (concurrent): the market's first post-event "
+        "scrape, 3 days after the Tuesday flag — the same box score the tool read"),
+    2: ("lead 2 = SECOND-SNAPSHOT-ONLY CROSSING: not crossed on the first post-flag page, "
+        "crossed on the next, and read that way ONLY when the T+1 page could have ranked "
+        "the player (a T+1 bye is bye-deferred, below; a missing T+1 page is truncated_r1 "
+        "— the pick is graded on one scrape and disclosed).  NOT a demonstrated one-week "
+        "lead: the market's state AT the flag is unobserved in 52 of 54 TRAIN weeks (C30)"),
     3: ("lead 3 = BYE-DEFERRED: the player's team was on bye at T+1 so the T+2 page is the "
-        "market's first rankable scrape — a hit, but the lead is unmeasurable; never counted "
-        "as a one-week lead"),
+        "market's first rankable scrape — a hit, but the crossing is unmeasurable; never counted "
+        "as a lead over the market"),
 }
 
 #: Grade statuses per lead.  ``precedes`` = the lead page's scrape is at or
@@ -872,7 +924,7 @@ class Summary:
     corroboration_unavailable: tuple[str, ...]
     null_corroborated: int
     null_corroboration_covered: int
-    #: hits whose lead is BYE-DEFERRED (a hit; never a one-week lead)
+    #: hits whose crossing is BYE-DEFERRED (a hit; never a lead over the market)
     lead_bye_deferred: int = 0
     null_lead_bye_deferred: int = 0
     #: graded picks that were graded on ONE scrape: (truncated_r2 | truncated_r1, n)
@@ -1602,10 +1654,14 @@ def build_scorecard(
         ELIGIBILITY_LABEL,
         params.generator_label,
         f"HIT (hypothesis, untuned): market moves the player >= {places} places up "
-        f"the {market} page from the week-T reference (unranked enters at page_size+1); "
+        f"the {market} page from the week-T reference (unranked enters at page_size+1 — "
+        "a CENSOR, not a rank, applied at r0 ONLY, so an unranked lead page is a miss; "
+        "the floor MOVES week to week as the page resizes, and the 'unranked' depth band "
+        "mixes never-ranked lines with ranked ones); "
         f"sensitivities {tuple(sorted(set(places_sensitivity)))}.  The week-T page is "
         "the market's last scrape at or before as_of(T) — the Friday OF week T, after "
         f"Thursday's game, so a Thursday breakout is already priced into r0.  {HIT_DEPTH_CAVEAT}.",
+        DATA_VINTAGE_LABEL,
         LEAD_LABELS[1],
         LEAD_LABELS[2],
         LEAD_LABELS[LEAD_BYE_DEFERRED],
@@ -1734,7 +1790,8 @@ def _render_summary(s: Summary, k: int, out: list[str]) -> None:
                        for st, n in s.truncated))
     for kk, _hits, _n in s.precision:
         out.append(f"    precision@{kk}: {_rate_iv(s.precision_at(kk))}  (Wilson, pooled per-pick)")
-    out.append(f"    hits by lead: lead1={s.lead1} (concurrent)  lead2={s.lead2} (one-week lead)"
+    out.append(f"    hits by lead: lead1={s.lead1} (first snapshot)  "
+               f"lead2={s.lead2} (second snapshot only)"
                f"  bye-deferred={s.lead_bye_deferred}"
                + (f"  bye at lead1={s.bye_at_l1}" if s.bye_at_l1 else "")
                + (f"  (lead2 impossible for {n_r2} truncated_r2 picks)" if n_r2 else "")
@@ -1787,12 +1844,18 @@ def render(card: MarketScorecard, *, reasons: bool = False) -> str:
                f"grade_as_of={card.grade_as_of}")
     out.append("=" * 78)
     out.append(f"HIT = the player moves >= {card.places} places up the {card.market} page by "
-               "the second post-flag scrape; lead1 = same scrape as the market's first "
-               "re-rank (does NOT beat the market), lead2 = one full scrape ahead (does); "
-               "bye-deferred = a hit whose lead is unmeasurable (T+1 bye)")
+               "the second post-flag scrape; lead1 = FIRST-SNAPSHOT crossing, the same "
+               "scrape as the market's first re-rank (does NOT beat the market), lead2 = "
+               "SECOND-SNAPSHOT-ONLY crossing, one full scrape later (a lead over the "
+               "market ONLY if the market had not already moved before the flag — "
+               "unobserved in 52 of 54 TRAIN weeks, so this is not a demonstrated lead); "
+               "bye-deferred = a hit whose crossing is unmeasurable (T+1 bye)")
     out.append("* = interval excludes zero (a collapsed or missing interval never earns it)")
     if any(w.split == "HOLDOUT" for w in card.weeks):
-        out.append("holdout seasons present: do not tune thresholds on these")
+        out.append("holdout seasons present: do not tune thresholds on these — and "
+                   "note the 12 shipped generator floors already carry documented "
+                   "2025 provenance (external review C1, 2026-09-04), so a HOLDOUT "
+                   "card is a re-read, not a clean out-of-sample read")
     out.append("")
     out.append("PER WEEK  (split season wk  as_of  status  pool  dec  grad  hits  L1  L2  BD  "
                "base%  r1 r2)")

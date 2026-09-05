@@ -110,14 +110,29 @@ def open_ro(path: str | os.PathLike) -> sqlite3.Connection:
 def calendar_as_of(season: int) -> str:
     """The clock a season's CALENDAR is read at: the schedule is a structural
     fact published before the season, and this is the same fact-time
-    ``backtest/draft_backtest.py`` grades a season at."""
+    ``backtest/draft_backtest.py`` grades a season at.
+
+    This February read is a UNIFORM fact-time and is INERT for reschedules, so
+    it neither honours nor hides them: all 272 season-2021 REG rows carry
+    ``knowable_as_of`` 2021-08-01, and the clock computed at 2021-12-19 is
+    identical to the one computed at 2022-02-28 (external review C16,
+    2026-09-04).
+    """
     return f"{season + 1}-02-28"
 
 
 def week_as_of(conn: sqlite3.Connection, season: int, week: int) -> str:
     """The decision clock for week ``T``: the first Tuesday strictly after the
     week's last REG gameday.  A Monday game rolls to the next day; a Sunday
-    to two days on; a Tuesday game to the FOLLOWING Tuesday."""
+    to two days on; a Tuesday game to the FOLLOWING Tuesday.
+
+    That last case is a SEVEN-DAY slip and it can land the clock after the NEXT
+    week's games, sharing that week's clock.  Exactly one TRAIN week does it:
+    2021 wk15 (last REG gameday Tuesday 2021-12-21, clock 2021-12-28, after
+    every week-16 game), against 48 TRAIN weeks at 1 day and 5 at 2.  Its picks
+    are dropped as ``reference_precedes_decision`` rather than graded (external
+    review C16, 2026-09-04).
+    """
     rows = base.latest_truth(get_schedule)(
         conn, as_of=calendar_as_of(season), season=season, week=week
     )

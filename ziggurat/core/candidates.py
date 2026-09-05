@@ -14,17 +14,25 @@ season):
       historical / 2025-validation source; ``league.state.injury_transitions``
       is the LIVE in-season source (the nflverse feed has ~no waiver-day lead time
       in 2025+ and is 100% gameday-stamped). Both are merged, de-duped by gsis.
-      **IR / season-ending injuries are INVISIBLE to the nflverse feed** (measured:
-      James Conner, Najee Harris = 0 rows) — those shocks are carried by the usage
+      **IR / season-ending injuries are INVISIBLE to the nflverse feed** (measured,
+      corrected 2026-09-04 / external review C15: James Conner and Najee Harris
+      carry exactly ONE row each — wk4 and wk1 — both with a NULL ``report_status``,
+      i.e. no usable designation) — those shocks are carried by the usage
       arm alone; the live league-state arm surfaces them as ``INJURY_RESERVE``.
   (3) QB1_CHANGE      — a LABELLED HYPOTHESIS only (``depth_charts.
       qb1_change_candidates``), QB-only, season >= 2025 (panel regime). Its own
       precision was never measured; the folded reasons say so. FORBIDDEN: any
       RB/WR/TE rank-change trigger; treating absence-of-demotion as availability.
 
-  TD-regression is DEFERRED to Phase 4 (no in-season source; ``ff_opportunity`` is
-  a post-season model output whose stamp leaks the outcome distribution). There is
-  NO red-zone signal (the sources carry no such column).
+  TD-regression is DEFERRED to Phase 4. CORRECTED 2026-09-04 (external review C28):
+  the reason recorded here — "no in-season source; ``ff_opportunity`` is a post-season
+  model output whose stamp leaks the outcome distribution" — is FALSE and is struck.
+  ffverse publishes ``ep_weekly`` IN-SEASON on a game-window cron (91 successful runs
+  2025-09..2026-02) and its models are a pinned 2006-2020 fit, not a per-season refit.
+  What it really is: a MUTABLE current-value source (the 2025 file was rewritten on
+  2026-09-01 and again on 2026-09-04), so the obstacle is capture-and-stamp discipline,
+  not availability. It stays deferred on that corrected premise (item 4.2b captures it
+  forward-only). There is NO red-zone signal (the sources carry no such column).
 
 Standing rules. Rule 1 — every read is keyword-only ``as_of`` with no default and
 threads ``view`` straight into the underlying accessors; the live path is
@@ -76,7 +84,16 @@ class BreakoutThresholds:
     cleared metrics. Verified on the live 2025 backfill: the five §7.3 targets
     (Dowdle, Tucker, Monangai, Henderson, Wilson) each clear >= 1 floor and the
     negative control (Gibbs) clears none. Precision tuning is Phase 4 (item 4.2),
-    which is why ``label``/``source`` travel into the reason text (Rule 6)."""
+    which is why ``label``/``source`` travel into the reason text (Rule 6).
+
+    HOLDOUT DISCLOSURE (external review C1, 2026-09-04). "The live 2025 backfill"
+    is a HOLDOUT season under ``backtest/decisions.py``: these floors were chosen
+    while looking at 2025 outcomes, so a later backtest that reports them on
+    2024-25 is not a clean out-of-sample read, and the sentence "the holdout
+    seasons were never opened" is an overstatement of what the unlock ledger
+    counts. The ``backtest/`` lock does not fence this path at all —
+    ``ziggurat candidates --validate`` binds ``base.latest_truth`` and reads a
+    2025 season with no unlock, no flag and no ledger row."""
 
     floors: MappingProxyType
     label: str
@@ -129,6 +146,10 @@ DEFAULT_BREAKOUT = BreakoutThresholds(
 # LABELLED HYPOTHESIS: conservative, NOT tuned to outcomes — precision tuning is
 # deferred to Phase 4/4.2 (same status as DEFAULT_BREAKOUT). Source: item 3.3 F1,
 # floors chosen so the ~11-23 debut rows/week stay a trickle, not a flood.
+# HOLDOUT DISCLOSURE (external review C1, 2026-09-04): that trickle was counted on
+# 2025, which is a HOLDOUT season under `backtest/decisions.py`. All 12 shipped
+# floors (8 differenced + these 4) therefore have documented 2025 provenance, so
+# a backtest reporting them on 2024-25 is not a clean out-of-sample read.
 EMERGENCE_FLOORS = MappingProxyType({
     "carries": 10.0,
     "targets": 5.0,

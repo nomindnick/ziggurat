@@ -302,6 +302,33 @@ def test_every_row_carries_the_per_season_paired_differences(cfg, ro):
     assert T.summary_row(stored)["per_season_D"] == {"2023": d["per_season"][2023]}
 
 
+def test_every_row_carries_m_beside_p(cfg, ro):
+    # C19 (external review, 2026-09-04).  Mutant killed: dropping `m` /
+    # `min_attainable_p` from the paired record, or reporting p without them.
+    # `m` is the count of NON-ZERO paired weekly differences — the only weeks
+    # carrying sign information — so the exact one-sided p can never fall below
+    # 2**-m.  Without m on the row, a cell that COULD NOT have cleared the gate
+    # arithmetically is indistinguishable from one that failed on direction.
+    default = T.evaluate_cell(ro, G.DEFAULT_CELL, cfg)
+    res = T.evaluate_cell(ro, G.cell_by_id("carries=2"), cfg, reference=default)
+    perm = res["D"]["permutation"]
+    nonzero = sum(1 for v in res["D"]["d_w"].values() if v != 0.0)
+    assert perm["m"] == nonzero and 0 < perm["m"] <= perm["n"]
+    assert perm["min_attainable_p"] == 2.0 ** -perm["m"]
+    assert perm["p"] >= perm["min_attainable_p"]
+    # the default pairs against itself: every d_w is zero, so NOTHING is
+    # informative and the floor is 1.0 — a p of 1.0 is the only value possible
+    dperm = default["D"]["permutation"]
+    assert dperm["m"] == 0 and dperm["min_attainable_p"] == 1.0 and dperm["p"] == 1.0
+    assert T._m(res) == perm["m"] and T._min_p(res) == perm["min_attainable_p"]
+    # `summary.jsonl` is the surface an analyst reads: "recorded beside `p`
+    # everywhere `p` is reported" is pinned here, not merely asserted in a comment.
+    row = T.summary_row(res)
+    assert row["p"] == perm["p"]
+    assert row["m"] == perm["m"]
+    assert row["min_attainable_p"] == perm["min_attainable_p"]
+
+
 # ---------------------------------------------------------------------------
 # round 2 — the procedure, exercised on canned per-week vectors.  No harness
 # runs here: `evaluate` and `decide` are mocks that return the lift vector the
@@ -410,8 +437,15 @@ def test_round2_forward_greedy_keeps_only_permutation_cleared_additions(round1_d
     assert [a["axis"] for a in fwd["kept"]] == ["carries", "receptions"]
     assert [a["axis"] for a in fwd["skipped"]] == ["targets"]
     skipped = fwd["skipped"][0]
+    # C19 (2026-09-04): m rides with p on every row that reports p, so the
+    # reason names the informative-week count too.  This one is m=40, well
+    # clear of the 2**-m floor, so no UNSATISFIABLE clause is appended.
     assert skipped["increment_p"] >= G.PERMUTATION_ALPHA and skipped["reasons"] == [
-        f"increment p={skipped['increment_p']} not < {G.PERMUTATION_ALPHA}"]
+        f"increment p={skipped['increment_p']} (m={skipped['increment_m']}) "
+        f"not < {G.PERMUTATION_ALPHA}"]
+    assert skipped["increment_m"] == 40
+    assert skipped["increment_min_attainable_p"] == 2.0 ** -40
+    assert "UNSATISFIABLE" not in skipped["reasons"][0]
     assert all(a["increment_p"] < G.PERMUTATION_ALPHA for a in fwd["kept"])
     # the skipped addition is undone: targets back at shipped, carries + receptions moved
     ff = fwd["final_floors"]
@@ -1364,6 +1398,33 @@ def test_an_inert_level_is_never_a_round_two_candidate(cfg):
     rows["b"] = row("carries=5", "carries", 0.20, p=0.20)
     cands, skipped = T.pick_candidates(rows)
     assert "carries" not in cands and len(skipped) == len(G.ROUND2_AXIS_ORDER)
+
+
+def test_an_axis_no_level_could_ever_open_says_so(cfg):
+    # C19: `receptions` had three levels and all three sat at m=4, where the
+    # exact one-sided floor 2**-4 = 0.0625 exceeds alpha — the axis was
+    # ARITHMETICALLY unopenable, not out-evidenced.  Mutant killed: reporting
+    # the bare "no argmax-eligible level with p < 0.05" for such an axis, which
+    # reads as a measurement when nothing was measurable.
+    def row(cell_id, axis, d, p, m):
+        return {"cell_id": cell_id, "axis": axis, "round": 1, "eligible": True,
+                "argmax_eligible": True, "inert": False, "level": cell_id.split("=")[1],
+                "floors": dict(G.DEFAULT_CELL.floors), "log_ratios": {"carries": 0.1},
+                "D": {"mean": d, "permutation": {"p": p, "m": m}}}
+    rows = {"a": row("receptions=2", "receptions", 0.40, 0.0625, 4),
+            "b": row("receptions=4", "receptions", 0.30, 0.0625, 4),
+            "c": row("receptions=5", "receptions", 0.20, 0.0653, 4),
+            "d": row("carries=5", "carries", 0.20, 0.30, 30)}
+    _cands, skipped = T.pick_candidates(rows)
+    rec = next(s for s in skipped if s["axis"] == "receptions")
+    assert "NO level could have one" in rec["reason"] and "2**-m" in rec["reason"]
+    assert set(rec["unsatisfiable_levels"]) == {"receptions=2", "receptions=4", "receptions=5"}
+    assert rec["levels"]["receptions=2"] == {
+        "p": 0.0625, "m": 4, "min_attainable_p": 0.0625, "argmax_eligible": True}
+    # an axis whose levels COULD have cleared keeps the plain reason
+    car = next(s for s in skipped if s["axis"] == "carries")
+    assert car["reason"] == "no argmax-eligible level with p < 0.05"
+    assert car["unsatisfiable_levels"] == []
 
 
 def test_round_two_stamps_the_fingerprint_it_read_not_the_default_rows_copy(round1_done):

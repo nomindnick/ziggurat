@@ -2408,12 +2408,20 @@ BACKFILL_EXCLUDED: dict[str, str] = {
     ),
     "ff_opportunity": (
         "out of scope for 3.2c and never registered: ffverse expected-TD data is a MODEL "
-        "OUTPUT published months after each season ends, by a model trained on the season "
-        "it scores (ep_weekly_2021.parquet written 2023-01-05; 2025's written 2026-02-10). "
-        "Stamping a 2021 week-5 row knowable_as_of = 2021-10-10 passes every leakage test "
-        "while contaminating a Phase-4 backtest with the outcome distribution of the "
-        "season it is grading. Lands in Phase 4, latest_truth-only, stamped from the "
-        "ASSET's updated_at."
+        "OUTPUT, and the ARCHIVE files this project looked at were written long after "
+        "their season (ep_weekly_2021.parquet written 2023-01-05). Stamping a 2021 week-5 "
+        "row knowable_as_of = 2021-10-10 would pass every leakage test while pricing a "
+        "Phase-4 backtest off a file that did not exist then. CORRECTED 2026-09-04 "
+        "(external review C28): the 'published months after each season ends, by a model "
+        "trained on the season it scores' half of that sentence is FALSE and is struck. "
+        "The feed publishes IN-SEASON on a game-window cron (months 1-2 and 9-12, at TNF "
+        "/ early / late / SNF-MNF — 91 successful runs 2025-09..2026-02), and the models "
+        "are a PINNED 2006-2020 fit, not a per-season refit. What it actually is: a "
+        "MUTABLE CURRENT-VALUE source in the same class as espn_ranks — ep_weekly_2025 "
+        "was rewritten on 2026-09-01 and again on 2026-09-04 — so the real hazard is "
+        "revision-in-place, not a post-season stamp, and capture must record the ASSET's "
+        "updated_at per pull. ep_weekly_2026.parquet did not exist on 2026-09-04. Lands "
+        "in Phase 4 (item 4.2b capture, forward-only), latest_truth-only."
     ),
 }
 

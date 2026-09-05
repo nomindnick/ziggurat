@@ -746,10 +746,30 @@ def paired_lift(l_g: Mapping, l_ref: Mapping, cfg: SearchConfig) -> dict:
         "only_default": list(paired.only_b), "equal_count_keys": paired.equal_count_keys,
         "per_season": dict(paired.per_season), "per_season_n": dict(paired.per_season_n),
         "d_w": {f"{k[0]},{k[1]}": v for k, v in paired.diffs},
+        # C19 (external review, 2026-09-04): `m` is the count of NON-ZERO paired
+        # weekly differences — the only weeks that carry sign information.  The
+        # exact one-sided p cannot fall below 2**-m, so a cell at m <= 4 has
+        # `min_attainable_p` >= 0.0625 > PERMUTATION_ALPHA and CANNOT clear the
+        # gate whatever its effect.  Recorded beside `p` everywhere `p` is
+        # reported so an arithmetically unsatisfiable comparison is visible on
+        # the row rather than reconstructed later (14 of the 45 graded cells sat
+        # at m <= 4, all three `receptions` levels among them).
         "permutation": {"p": perm.p, "p_two": perm.p_two, "n": perm.n, "b": perm.b,
                         "seed": perm.seed, "ge_count": perm.ge_count,
-                        "abs_ge_count": perm.abs_ge_count},
+                        "abs_ge_count": perm.abs_ge_count,
+                        "m": _m_informative(paired.diffs),
+                        "min_attainable_p": 2.0 ** -_m_informative(paired.diffs)},
     }
+
+
+def _m_informative(diffs) -> int:
+    """``m``: how many paired weekly differences are non-zero (C19).
+
+    A zero difference is an unflipped constant under the sign-flip null, so it
+    carries no sign information; only these ``m`` weeks do.  The exact
+    one-sided p therefore has an attainable floor of ``2**-m``.
+    """
+    return sum(1 for _k, v in diffs if float(v) != 0.0)
 
 
 def _parse_key(k: object) -> tuple[int, int]:
@@ -1222,7 +1242,9 @@ def summary_row(r: Mapping) -> dict:
         "hard_failures": r.get("hard_failures", []), "flags": r.get("flags", []),
         "infeasible": r.get("infeasible"), "inert": r.get("inert"),
         "M": (r.get("M") or {}).get("mean"), "M_minus_default": r.get("M_minus_default"),
-        "D": d.get("mean"), "p": perm.get("p"), "n_common": d.get("n_common"),
+        "D": d.get("mean"), "p": perm.get("p"), "m": perm.get("m"),
+        "min_attainable_p": perm.get("min_attainable_p"),
+        "n_common": d.get("n_common"),
         "per_season_D": d.get("per_season"), "D_hit": dh.get("mean"),
         "n_weeks": r.get("n_weeks"), "graded": r.get("graded"),
         "pool_median": (r.get("pool") or {}).get("median"),
@@ -1313,6 +1335,17 @@ def _p(r: Mapping) -> float | None:
     return ((r.get("D") or {}).get("permutation") or {}).get("p")
 
 
+def _m(r: Mapping) -> int | None:
+    """The cell's informative-week count (C19) — always reported beside ``_p``."""
+    return ((r.get("D") or {}).get("permutation") or {}).get("m")
+
+
+def _min_p(r: Mapping) -> float | None:
+    """``2**-m``: the smallest one-sided p this cell could ever return (C19)."""
+    m = _m(r)
+    return None if m is None else 2.0 ** -m
+
+
 def _log_ratio_norm(r: Mapping) -> float:
     return sum(abs(v) for v in (r.get("log_ratios") or {}).values())
 
@@ -1384,6 +1417,7 @@ def _greedy_chain(order: Sequence[str], candidates: Mapping[str, Mapping], defau
         except InfeasibleSetting as exc:
             inc = {"infeasible": str(exc)}
         inc_p = (inc or {}).get("permutation", {}).get("p")
+        inc_m = (inc or {}).get("permutation", {}).get("m")
         inc_d = (inc or {}).get("mean")
         d_now = _d(res)
         clears_g1 = d_now is not None and d_now >= G.PRACTICAL_FLOOR
@@ -1396,14 +1430,25 @@ def _greedy_chain(order: Sequence[str], candidates: Mapping[str, Mapping], defau
         # changing the nesting nothing pre-registered it to change.
         reasons = []
         if inc_p is None or not inc_p < G.PERMUTATION_ALPHA:
-            reasons.append(f"increment p={inc_p} not < {G.PERMUTATION_ALPHA}")
+            # C19: m rides with p.  When 2**-m >= alpha the comparison was
+            # arithmetically unsatisfiable and the reason has to say so — the
+            # cell did not fail on direction, it could not have passed.
+            floor = None if inc_m is None else 2.0 ** -inc_m
+            unsat = ("" if floor is None or floor < G.PERMUTATION_ALPHA else
+                     f" (UNSATISFIABLE: m={inc_m} informative weeks, so the exact "
+                     f"one-sided p cannot fall below 2**-m = {floor:g})")
+            reasons.append(f"increment p={inc_p} (m={inc_m}) not < "
+                           f"{G.PERMUTATION_ALPHA}{unsat}")
         if prev_cleared_g1 and not clears_g1:
             reasons.append(f"predecessor cleared G1 (+{G.PRACTICAL_FLOOR}) and this does not")
         keep = not reasons
         attempts.append({
             "cell_id": res["cell_id"], "cache_key": res["cache_key"], "axis": axis,
             "level": cand["level"], "kept": keep, "increment_D": inc_d,
-            "increment_p": inc_p, "D_vs_default": d_now, "p_vs_default": _p(res),
+            "increment_p": inc_p, "increment_m": inc_m,
+            "increment_min_attainable_p": (None if inc_m is None else 2.0 ** -inc_m),
+            "D_vs_default": d_now, "p_vs_default": _p(res),
+            "m_vs_default": _m(res), "min_attainable_p_vs_default": _min_p(res),
             "clears_G1": clears_g1, "reasons": reasons, "floors": dict(floors),
             "hard_failures": list(res.get("hard_failures") or []),
             "infeasible": res.get("infeasible"),
@@ -1439,7 +1484,25 @@ def pick_candidates(results: Mapping[str, Mapping]) -> tuple[dict[str, Mapping],
                 and _p(r) is not None and _p(r) < G.PERMUTATION_ALPHA]
         best = _argmax(rows)
         if best is None:
-            skipped.append({"axis": axis, "reason": "no argmax-eligible level with p < 0.05"})
+            # C19: report each level's m and 2**-m, so an axis that was
+            # arithmetically unopenable (every level at m <= 4) is legible as
+            # that, not as an axis that failed on evidence.
+            levels = [r for r in results.values()
+                      if r["axis"] == axis and r["round"] == 1 and not r.get("inert")]
+            per_level = {r["cell_id"]: {"p": _p(r), "m": _m(r),
+                                        "min_attainable_p": _min_p(r),
+                                        "argmax_eligible": bool(r.get("argmax_eligible"))}
+                         for r in levels}
+            blocked = [c for c, v in per_level.items()
+                       if v["min_attainable_p"] is not None
+                       and v["min_attainable_p"] >= G.PERMUTATION_ALPHA]
+            reason = "no argmax-eligible level with p < 0.05"
+            if levels and len(blocked) == len(levels):
+                reason += (f" — and NO level could have one: all {len(levels)} sit at "
+                           f"m <= {max(v['m'] for v in per_level.values())} informative "
+                           f"weeks, where the exact floor 2**-m >= {G.PERMUTATION_ALPHA}")
+            skipped.append({"axis": axis, "reason": reason, "levels": per_level,
+                            "unsatisfiable_levels": blocked})
         else:
             cands[axis] = best
     return cands, skipped
@@ -1491,7 +1554,8 @@ def run_round2(cfg: SearchConfig, *, evaluate: Callable | None = None,
                               "fingerprint": sanitise(fp_block)}
     # step 1 — candidates
     cands, skipped_axes = pick_candidates(results)
-    report["candidates"] = {a: {"cell_id": r["cell_id"], "D": _d(r), "p": _p(r)}
+    report["candidates"] = {a: {"cell_id": r["cell_id"], "D": _d(r), "p": _p(r),
+                                "m": _m(r), "min_attainable_p": _min_p(r)}
                             for a, r in cands.items()}
     report["skipped_axes"] = skipped_axes
     log(f"round 2: {len(cands)} candidate axes, {len(skipped_axes)} skipped")
@@ -1520,7 +1584,8 @@ def run_round2(cfg: SearchConfig, *, evaluate: Callable | None = None,
     per_season_w = ((winner.get("D") or {}).get("per_season") or {})
     g4_seasons = {str(s): v for s, v in per_season_w.items()}
     report["winner"] = {"cell_id": winner["cell_id"], "cache_key": winner["cache_key"],
-                        "D": _d(winner), "p": _p(winner), "floors": winner["floors"],
+                        "D": _d(winner), "p": _p(winner), "m": _m(winner),
+                        "min_attainable_p": _min_p(winner), "floors": winner["floors"],
                         "is_default": winner["cell_id"] == G.DEFAULT_CELL_ID,
                         "clears_G1": (_d(winner) or 0.0) >= G.PRACTICAL_FLOOR,
                         # G4 (§7.2): the per-season mean of d_w is > 0 in each of
@@ -1558,7 +1623,7 @@ def run_round2(cfg: SearchConfig, *, evaluate: Callable | None = None,
             res = evaluate(cell, default)
             loo["attempts"].append({
                 "axis": axis, "cell_id": res["cell_id"], "cache_key": res["cache_key"],
-                "D": _d(res), "p": _p(res),
+                "D": _d(res), "p": _p(res), "m": _m(res), "min_attainable_p": _min_p(res),
                 "drop_from_winner": (None if _d(res) is None or _d(winner) is None
                                      else _d(winner) - _d(res)),
                 "hard_failures": res.get("hard_failures"), "infeasible": res.get("infeasible"),
@@ -1617,7 +1682,8 @@ def run_round2(cfg: SearchConfig, *, evaluate: Callable | None = None,
                                  note="scale-only control matched on median pool")
             res = evaluate(cell, default)
             control["grade"] = {"cell_id": res["cell_id"], "cache_key": res["cache_key"],
-                                "D": _d(res), "p": _p(res),
+                                "D": _d(res), "p": _p(res), "m": _m(res),
+                                "min_attainable_p": _min_p(res),
                                 "pool_median": (res.get("pool") or {}).get("median"),
                                 "hard_failures": res.get("hard_failures")}
             control["churn"] = churn(winner, res)

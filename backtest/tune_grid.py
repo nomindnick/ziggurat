@@ -310,6 +310,14 @@ TIE_BAND = 0.005
 #: §4.4 steps 1 and 3: the single-cell and increment permutation bar (unadjusted).
 PERMUTATION_ALPHA = 0.05
 #: §7.1 G1 — the practical floor D(g) must clear (pp of depth-matched lift).
+#: PROVENANCE (external review C22, 2026-09-04): this is the rounded half-width
+#: of the ARGMAX-INELIGIBLE FLOOD-1 cell's own paired interval — 5.369pp =
+#: 2.0154 x that ONE cell's SE, i.e. ~2 standard errors of a single cell,
+#: rounded up to 0.054. It is NOT a power calculation and NOT a
+#: decision-utility bar (the 2,333-line pre-registration contains no
+#: decision-utility language), and it sits BELOW the measured family max-null
+#: bar of 0.0721: 15.3% of pure-noise replicates clear it. Read it as "bigger
+#: than one cell's noise", never as "big enough to matter".
 PRACTICAL_FLOOR = 0.054
 
 #: The frozen §7.4 values every setting asserts before it reads a byte.

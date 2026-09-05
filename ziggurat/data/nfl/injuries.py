@@ -47,6 +47,23 @@ _COLUMNS = (
 # Wednesday practice report becomes knowable only on Sunday. Consumers that need
 # mid-week injury news must use a live feed (ESPN league state carries
 # injury_status 4x/day via item 3.1), not this table.
+#
+# PROVENANCE of the 2025 rows (external review C15, verified live 2026-09-04).
+# The weekly feed DIED after 2024: upstream's scheduled injury workflow last ran
+# 2025-08-07 and every run that summer failed. 2025 exists only because the
+# collector was rewritten against a new upstream route (nflverse's `nflapi`
+# path) and the whole season was published ONCE, as a post-season bulk backfill:
+# `injuries_2025.parquet` was created 2026-03-18, carries 6,068 rows, and swaps
+# the schema (`season_type` in, `date_modified` out) — which is why the fallback
+# fires for all of them (5,783 of 5,783 REG rows stamped at their own team's
+# gameday). So this is NOT a weekly feed for 2025+; it is one file that appeared
+# months later, and reading it as if it had arrived weekly is the mistake. There
+# is NO `injuries_2026.parquet` yet (HTTP 404 on 2026-09-04, five days before
+# the 2026 opener) — re-check after Week 1 before relying on any 2026 row.
+# CONSEQUENCE the design note got wrong: season-ending cases are not "0 rows" in
+# this table — 2025 carries exactly ONE row each for James Conner (wk4) and
+# Najee Harris (wk1), both with a NULL `report_status`, which is still useless
+# as an IR/season-ender signal and is why item 3.3's live arm reads league state.
 _OPTIONAL_COLUMNS = ("date_modified",)
 _REQUIRED_COLUMNS = tuple(c for c in _COLUMNS if c not in _OPTIONAL_COLUMNS)
 

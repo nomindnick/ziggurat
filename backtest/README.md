@@ -18,7 +18,7 @@ claim budget).
 | `replay.py` | The weekly replay harness — the DECIDE phase. Runs the production candidate generator (`ziggurat.core.candidates.build_candidates`) at each week's decision clock (the first Tuesday strictly after the week's last REG game) and freezes what it picked. `python -m backtest.replay` is the CLI. |
 | `decisions.py` | The freeze: `ReplayParams` (hashed into the cache key — including the generator's floors), `WeekRecord`/`Decision`, the JSONL + sha256 manifest writer/reader, the TRAIN/HOLDOUT split and the holdout lock. |
 | `scorecards.py` | The GRADE phase, pure over a freeze: precision@k against the FantasyPros weekly (`wp`) and rest-of-season (`ros`) ECR pages, an eligibility-matched null (the whole week-T universe), depth-matched lifts by r0 band, Sleeper ownership corroboration, and the rendered scorecard whose HYPOTHESES block names every threshold and its source. |
-| `stats.py` | Wilson, pooled-t and season-block intervals — one implementation, so no report can quietly print only the flattering one. An interval that collapses to a point never earns the `*`. Item 4.2 adds the paired machinery: `paired_by_key`, the sign-flip permutation test, the shared-flip `max_null_step_down` multiplicity bar and the exact McNemar fence. Stdlib only. |
+| `stats.py` | Wilson, pooled-t and season-block intervals — one implementation, so no report can quietly print only the flattering one. An interval that collapses to a point never earns the `*`. Item 4.2 adds the paired machinery: `paired_by_key`, the sign-flip permutation test, the shared-flip **single-step max-statistic** multiplicity bar (the symbol is still `max_null_step_down` — the frozen pre-registration names it, and the procedure is single-step, C18) and the exact McNemar fence. Stdlib only. |
 | `tune_grid.py` | Item 4.2's pre-registered grid as LITERAL data: the 31 round-1 single-axis levels, the 5 global-scale, 4 emergence-scale and 3 recall-flood 12-pair maps (every map spelled out, never computed at import time), each with its `cell_id` and `eligible` label, plus the round-2 rules (declaration-order axis list, budgets, cap 80). A test recomputes each scale map from the shipped floors × c and pins the counts (31 / 5 / 4 / 3 + default = 44). |
 | `tune.py` | Item 4.2's search runner over that grid — TRAIN 2021–23 only. `python -m backtest.tune` is the CLI. It has **no holdout flag** (the two holdout commands are `backtest.replay` invocations), it **refuses the live database** and it **refuses the canonical `data/backtest/replay/` as a cache dir**, it asserts every frozen §7.4 value per setting before a byte is read, and it refuses the 81st setting. |
 
@@ -41,9 +41,12 @@ Two phases, deliberately separated by a file on disk:
 2. **grade** — read the freeze back (refused if a digest disagrees), and
    score it against the market at a strictly later `--grade-as-of`. A HIT is
    the player moving up the page by `--hit-places` by the second post-flag
-   scrape; **lead 1 is the same scrape as the market's first re-rank
-   (concurrent — it does NOT beat the market), lead 2 is one full scrape
-   ahead (it does)**; a bye at lead 1 defers to lead 3 and is counted apart.
+   scrape; **lead 1 is a FIRST-SNAPSHOT crossing — the same scrape as the
+   market's first re-rank (concurrent; it does NOT beat the market) — and
+   lead 2 is a SECOND-SNAPSHOT-ONLY crossing, one full scrape later**, which
+   is a lead over the market only if the market had not already moved before
+   the flag (unobserved in 52 of 54 TRAIN weeks, C30 — so lead 2 is not a
+   demonstrated lead); a bye at lead 1 defers to lead 3 and is counted apart.
    A lead page scraped at or before the decision clock is `reference
    precedes` and ungradeable, never a hit or a miss.
 

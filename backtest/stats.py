@@ -8,8 +8,15 @@ by side, so that no report can quietly show only the flattering one:
   season share the same market, the same injuries and the same scrape
   cadence, so they are not independent draws.
 * the **season-block** interval — each SEASON is one observation, a Student-t
-  on ``df = seasons - 1``.  Honest and wide: with five seasons the critical
-  value is 2.776, not 1.96.
+  on ``df = seasons - 1``: with five seasons the critical value is 2.776, not
+  1.96.  It is NOT reliably the wider of the two, and it is MISCALIBRATED
+  UNDER SPARSITY — which is why neither interval is ever a gate (``tune.py``
+  labels them the same way).  Measured over item 4.2's 45 graded cells
+  (external review C26, 2026-09-04): the block interval is NARROWER than the
+  pooled one in 6 of 45 cells, including both load-bearing numbers — TRAIN
+  depth-matched 8.29pp block vs 12.80pp pooled, and the winner's D 7.83pp vs
+  14.92pp, where the block interval EXCLUDES zero and the pooled one spans
+  it.  Print both; read neither alone.
 
 The Student-t machinery is stdlib only (scipy is not a dependency) and is a
 verbatim copy of the pinned helpers in ``ziggurat/draft/evaluate.py``.  It is
@@ -450,6 +457,17 @@ class Permutation:
     and no p can be 0.  ``p_two`` counts ``|D*_i| >= |D|`` the same way.
     ``null_means`` are the ``b`` flipped means, in draw order, so a caller can
     read any quantile without re-drawing.
+
+    CONTRACT VIOLATION, recorded not fixed (item 4.2b): those counts are float
+    comparisons between a null mean accumulated by naive summation
+    (:meth:`FlipPattern.flipped_means`) and an observed mean from
+    ``statistics.fmean``, so a draw that is an EXACT tie under the definition
+    above is not always counted as one.  Measured over item 4.2's grid
+    (external review C5, 2026-09-04): 10 of 45 cells move when the comparison
+    is made exactly, the largest shift is 0.0141, and NO cell crosses
+    alpha = 0.05 — but the scale-only control logged ``p_two`` 9.999e-05 where
+    the exact value is 2/32 = 0.0625, because 590 of 10,000 genuine ties were
+    dropped.
     """
 
     mean: float
@@ -476,6 +494,23 @@ def sign_flip_permutation(
     ``pattern`` to share draws with other vectors (the family bar does); the
     default builds one over ``d``'s own keys, which — because a key's flips are
     a function of ``(seed, key)`` alone — yields the same draws.
+
+    ATTAINABLE FLOOR.  Only the ``m`` NON-ZERO entries carry sign information
+    (a zero is an unflipped constant), so the exact one-sided p cannot fall
+    below ``2**-m``: at m = 4 the best case is 0.0625 > alpha = 0.05 and such
+    a cell can NEVER clear the gate however large its effect.  14 of item
+    4.2's 45 graded cells sat at m <= 4 (five of them exactly at m = 4) —
+    all three ``receptions`` levels among
+    them, i.e. one round-2 axis was arithmetically unopenable (external review
+    C19, 2026-09-04).  Record ``m`` beside ``p`` so that is visible on the row
+    (``backtest/tune.py`` does).
+
+    Recorded, NOT fixed (item 4.2b owns it): the ``>=`` counts below compare a
+    naively-summed null mean against an ``fmean`` observed one, so draws that
+    are exact ties are not always counted as ties, and an all-favourable
+    vector can therefore report a p BELOW its own ``2**-m`` floor (measured:
+    ~10% of synthetic all-favourable m = 4 vectors return ``1/(b+1)``).  No p
+    any item-4.2 gate read was affected (C5, C19).
     """
     vec = _normalise(d, what="sign_flip_permutation")
     if not vec:
@@ -484,6 +519,9 @@ def sign_flip_permutation(
         pattern = flip_pattern(vec, b=b, seed=seed)
     observed = statistics.fmean(vec.values())
     nulls = pattern.flipped_means(vec)
+    # C5: `nulls` are naive-summed and `observed` is an fmean, so an exact tie
+    # can fall either side of these comparisons.  Recorded on `Permutation`;
+    # the fix (exact tie resolution) is item 4.2b's, not a silent change here.
     ge = sum(1 for m in nulls if m >= observed)
     abs_ge = sum(1 for m in nulls if abs(m) >= abs(observed))
     nb = pattern.b
@@ -550,6 +588,15 @@ def max_null_step_down(
     That preserves the between-setting correlation a Bonferroni count throws
     away.  Every cell passed is in the family — the caller decides the family
     (label-based, §5.3), this function never drops a member.
+
+    The NAME is historical (the frozen pre-registration uses it, so the symbol
+    stays); the PROCEDURE is SINGLE-STEP, as :class:`MaxNull` already says —
+    the caller tests only its winner against ``bar`` and nothing steps down.
+    Item 4.2's own family terminates at step 0 either way, so a true step-down
+    would have returned the identical outcome (external review C18,
+    2026-09-04).  It is a max-STATISTIC bar and it is exact under
+    EXCHANGEABILITY of the week-level signs — an assumption the paired
+    comparison supplies, not a free lunch.
     """
     if not vectors:
         raise ValueError("max_null_step_down: an empty family has no maximum")

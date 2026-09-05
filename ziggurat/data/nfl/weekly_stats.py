@@ -13,6 +13,19 @@ the day their team played, so it is stamped with the team gameday from
 (season, week, recent_team) can't be resolved to a gameday is dropped, never
 inserted with a NULL knowledge time — dropping is the leakage-safe default.
 
+What that stamp DOES NOT say (external review C17, 2026-09-04): it is the date
+the GAME happened, not the date the stored VALUE became available. nflverse
+states its own correction window as Monday to Wednesday, and 87.8% of the week-T
+lines a Tuesday-clock backtest reads were played 1-2 days earlier, i.e. INSIDE
+that window — so a historical read of this table is a GAME-DATE CUT OF FINALISED
+DATA, not a point-in-time capture. Revision in place is demonstrated, not
+hypothetical: the two stored vintages (retrieved 2026-07-25 and 2026-09-01)
+differ on 55 of 94,734 shared keys, 54 of them ``air_yards_share`` and three by
+at least the width of a shipped item-3.3 floor (all in 2024-25; 0 in 2021-23).
+``base.select_as_of`` resolves this correctly under both views by design (see
+``base.py`` on ``historical`` vs ``latest_truth``) — the caveat is about what a
+GATED value means, not about the gate.
+
 KICKING (item 4.1 §7.1, migration 013). Item 1.4's column list carried no
 kicking stat, so every stored kicker row was all-zero for every stat the house
 pays him for and re-scoring the table graded EVERY kicker at 0.000 with nothing
