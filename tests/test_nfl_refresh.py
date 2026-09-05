@@ -80,12 +80,30 @@ def test_only_espn_ranks_replaces_a_partition():
     assert replacing == {"espn_ranks"}
 
 
-def test_the_perishable_set_is_exactly_the_four_current_value_sources():
+def test_the_perishable_set_is_exactly_the_six_current_value_sources():
     """Guards the report's honesty: calling an nflverse source perishable would
     cry wolf about a re-pullable gap and train the operator to ignore the ones
-    where 'gone' is literally true."""
+    where 'gone' is literally true.
+
+    FOUR UNTIL 2026-09-04, SIX since (item 4.2b), and both newcomers earned it by
+    measurement rather than by analogy:
+
+    * `ff_opportunity` — ffverse re-uploads each season's asset into the one
+      `latest-data` release tag, and ep_weekly_2025.parquet was rewritten on
+      2026-09-01 and again on 2026-09-04, so what it said on a given Tuesday
+      exists nowhere afterwards;
+    * `fp_weekly_ecr` — DynastyProcess rewrites files/fp_latest_weekly.csv TWICE
+      DAILY in-season, and 81 of 159 ppr-rb ids changed integer rank inside one
+      5.7-hour window (2026-09-04).
+
+    Adding a name here is a claim that a missed day is a LOST OBSERVATION;
+    removing one is a claim it is merely stale. Note that `adp_rankings` KEEPS
+    the flag while its own note was corrected in the same change: its file is
+    rewritten Fridays only, so a missed DAY loses nothing — but nothing
+    re-populates that TABLE, which is what this flag reports on."""
     assert {s.name for s in refresh.SOURCES if s.perishable} == {
         "projections", "adp_rankings", "espn_ranks", "game_weather",
+        "ff_opportunity", "fp_weekly_ecr",
     }
 
 
@@ -113,6 +131,20 @@ def test_perishable_sources_run_before_the_archive_pulls():
     for spec in refresh.SOURCES:
         if spec.group == "daily" and spec.perishable:
             assert daily.index(spec.name) < fpecr_at, spec.name
+    # Named as well as derived (item 4.2b). The loop above is only as strong as
+    # the `perishable` flag on the spec, and the newest daily perishable source is
+    # the one whose placement was a decision rather than an inheritance: it needs
+    # `schedules` (it stamps knowable_as_of from the gameday) and nothing else, so
+    # it can sit anywhere after it — and it sits in FRONT of both archives because
+    # a run that stalls on a 38 MB parquet must already have captured a vintage
+    # that cannot be re-fetched.
+    assert daily.index("schedules") < daily.index("ff_opportunity") < fpecr_at
+    # `fp_weekly_ecr` (item 4.2b, Unit F) is named for the same reason and one
+    # more: it declares needs_schedules=False — the scrape_date is its knowledge
+    # time and a missing schedule costs only the WEEK LABEL — so the loop above
+    # constrains it against the archives but NOTHING would keep it behind
+    # `schedules`, whose gameday map is what its week label reads.
+    assert daily.index("schedules") < daily.index("fp_weekly_ecr") < fpecr_at
     # And nothing in the group depends on either archive.
     assert not any(getattr(s, "needs", None) for s in refresh.SOURCES if s.group == "daily")
 
@@ -2011,9 +2043,16 @@ def test_a_past_season_is_refused_for_every_backfill_excluded_source(db, name):
         # the two refusals can never drift apart.
         assert refresh.BACKFILL_EXCLUDED[name] in d.reason
     else:
-        # espn_ranks is refused earlier, by the phase gate, with the more specific
-        # answer. Recorded rather than asserted away: it must still not pull.
-        assert name == "espn_ranks" and d.action == refresh.STATUS_SKIPPED
+        # Two sources are refused EARLIER, by the phase gate, with the more
+        # specific answer — and for both it is structural rather than incidental:
+        # a source restricted to ONE phase can never be in that phase for a
+        # COMPLETED season, so decide()'s BACKFILL_EXCLUDED arm is unreachable for
+        # it and the backfill door is where its entry earns its place.
+        #   espn_ranks    — preseason only (after the draft the board is history)
+        #   fp_weekly_ecr — inseason only (no weekly board exists between seasons)
+        # Recorded rather than asserted away: both must still not pull.
+        assert name in {"espn_ranks", "fp_weekly_ecr"}
+        assert d.action == refresh.STATUS_SKIPPED
 
 
 def test_the_past_season_refusal_writes_nothing_and_never_calls_the_pull(db):
@@ -2041,14 +2080,28 @@ def test_the_past_season_refusal_writes_nothing_and_never_calls_the_pull(db):
     assert not refresh.run_failed(out)
 
 
+#: The day each BACKFILL_EXCLUDED source is judged on below. Default is a day
+#: inside week 1; ``espn_ranks`` is PRESEASON-only (after the draft its board is a
+#: historical artifact) and ``ff_opportunity`` is INSEASON/OFFSEASON-only (upstream
+#: publishes no file for a season until its first games are played), so the two
+#: are gated in opposite directions and no single date can judge both.
+_CURRENT_SEASON_DAY = {"espn_ranks": "2026-07-25"}
+
+
 def test_the_past_season_refusal_does_not_touch_the_current_season(db):
-    """The fence must be a season predicate, not a source ban — these four are
-    exactly the sources the daily cadence exists to pull."""
-    _schedule_rows(db, season=2026)
+    """The fence must be a season predicate, not a source ban — these are exactly
+    the sources the daily cadence exists to pull.
+
+    Judged per source on a day inside its OWN phase (see _CURRENT_SEASON_DAY):
+    the claim under test is about the SEASON gate, and letting a phase skip stand
+    in for it would leave the real question — does the excluded source still pull
+    for the current season — unasked for whichever source was inconvenient."""
+    _schedule_rows(db, season=2026)          # week 1 opens 2026-09-10
     for name in _excluded_registry_sources():
+        day = _CURRENT_SEASON_DAY.get(name, "2026-09-15")
         d = refresh.decide(db, refresh.SOURCES_BY_NAME[name], season=2026,
-                           today="2026-07-25", have_credentials=True)
-        assert d.action == "pull", (name, d.reason)
+                           today=day, have_credentials=True)
+        assert d.action == "pull", (name, day, d.reason)
 
 
 def test_a_non_excluded_source_still_runs_for_a_past_season(db):

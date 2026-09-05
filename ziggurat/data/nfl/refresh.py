@@ -97,6 +97,8 @@ from ziggurat.data.nfl import (
     depth_charts,
     depth_charts_weekly,
     espn_ranks,
+    ff_opportunity,
+    fp_weekly,
     fpecr,
     game_odds,
     injuries,
@@ -638,6 +640,69 @@ def _season_scope(ctx) -> str:
     return f"season {ctx.season}"
 
 
+# --------------------------------------------------------------- item 4.2b
+# The ffverse `ff_opportunity` expected-points panel (migration 015): a
+# PERISHABLE current-value source, captured forward-only. Its whole-file mirror
+# lives beside the market archives under the gitignored top-level `data/` tree
+# (Rule 5) but in its OWN directory: `data/backtest/` is what a backtest reads,
+# and this is a capture nothing reads yet.
+FFOPP_ARCHIVE_DIR = REPO_ROOT / "data" / "ffopp"
+
+
+def ffopp_mirror_path(season, retrieved_as_of) -> str:
+    """The DATED lossless mirror one capture writes: ``ep_weekly_<season>-<day>.parquet``.
+
+    Dated, never rolling, and never pruned by this module. Upstream REWRITES each
+    season's asset in place several times a week, so a bare `ep_weekly_2026.parquet`
+    would silently become a different file on the next download and the vintage the
+    database describes would no longer exist anywhere. 1.1 MB per capture buys back
+    every one of the 134 columns the lean table does not store — the only insurance
+    that works, because a perishable vintage cannot be re-fetched.
+    """
+    return str(
+        FFOPP_ARCHIVE_DIR
+        / f"ep_weekly_{int(season)}-{base.iso_date(retrieved_as_of)}.parquet"
+    )
+
+
+def _pull_ff_opportunity(ctx) -> int:
+    # `refresh=ctx.force` is the deliberate re-fetch. Without it a --force re-ingests
+    # the mirror already on disk, which for a source that is rewritten upstream
+    # several times a week is the one thing --force cannot have been asked for.
+    return ff_opportunity.pull_ff_opportunity(
+        ctx.conn, retrieved_as_of=ctx.retrieved_as_of, season=ctx.season,
+        path=ffopp_mirror_path(ctx.season, ctx.retrieved_as_of), refresh=ctx.force,
+    )
+
+
+def _scope_ff_opportunity(ctx) -> str:
+    mirror = Path(ffopp_mirror_path(ctx.season, ctx.retrieved_as_of))
+    how = "existing" if mirror.exists() and not ctx.force else "fresh (~1.1 MB download)"
+    return f"season {ctx.season} from {how} mirror {mirror.name}"
+
+
+# The same-week FantasyPros WEEKLY board (migration 016): the other half of item
+# 4.2b's market capture, and the answer to the item's own recon question. No
+# mirror path and no `--force` re-fetch knob: the file is ~387 KB, held in memory
+# and read once, and every column that MOVES reaches the table (see the module
+# docstring for the eight that do not and why no raw mirror is kept).
+def _pull_fp_weekly(ctx) -> int:
+    return fp_weekly.pull_fp_weekly(
+        ctx.conn, retrieved_as_of=ctx.retrieved_as_of, season=ctx.season
+    )
+
+
+def _scope_fp_weekly(ctx) -> str:
+    # The board's own scrape_date decides the season of every row (as it does for
+    # `adp_rankings`), so the scope line describes the WEEK LABEL instead — the
+    # one derived value a reader of `ingest run --dry-run` would want to check.
+    week, basis, _ = fp_weekly.infer_weekly_board_week(
+        base.iso_date(ctx.retrieved_as_of), fp_weekly.week_bounds(ctx.conn, ctx.season)
+    )
+    label = "no week label" if week is None else f"week {week}"
+    return f"today's weekly board, {label} via {basis}"
+
+
 # ---------------------------------------------------------------- item 4.1
 # The two weekly point-in-time MARKET ARCHIVES the Phase-4 backtest grades
 # against (`intel/research/market-archives.md`): what the room was SAYING
@@ -821,7 +886,25 @@ SOURCES: tuple[SourceSpec, ...] = (
         name="adp_rankings", group=GROUP_DAILY, pull=_pull_adp, scope=lambda ctx: "current scrape",
         perishable=True,
         notes="PERISHABLE: FantasyPros serves today's ECR scrape only (the historical "
-              "panel is a separate Phase-4 ingester). Hottest until the draft.",
+              "panel is a separate Phase-4 ingester). Hottest until the draft. "
+              "CORRECTED 2026-09-04 (item 4.2b recon, §0.4): the sentence this note "
+              "used to carry — 'FantasyPros serves today's scrape, so a missed DAY is a "
+              "lost observation' — over-stated the loss, and the correction matters "
+              "because it is the difference between an alarm worth reading and one "
+              "worth ignoring. The file read here (db_fpecr_latest.csv) is rewritten "
+              "FRIDAYS ONLY: the 12 most recent upstream commits are all 'Automated FP "
+              "scrape Fri', consecutive daily pulls are identical on 0 of 517 `ro` rows, "
+              "and 2026 holds 7 distinct scrape dates — all Fridays — across 41 pull "
+              "days. So a missed DAY loses nothing at all, and a missed WEEK loses a "
+              "scrape whose CONTENT is re-derivable from the db_fpecr archive (the "
+              "`fpecr` source, migration 011). The interval stays at 1d — a daily retry "
+              "is what makes sure the Friday is caught — and perishable stays TRUE, "
+              "deliberately: this flag drives `ingest status`'s unrecoverable report "
+              "about THIS TABLE, and nothing re-populates adp_rankings from the archive "
+              "(fpecr writes fpecr_panel, a different table on a 28-day cadence). The "
+              "FACT survives elsewhere; the row does not. Item 4.2b's `fp_weekly_ecr` "
+              "is the source where 'today only' is literally true — it is rewritten "
+              "TWICE A DAY.",
     ),
     SourceSpec(
         name="espn_ranks", group=GROUP_DAILY, pull=_pull_espn_ranks, scope=_season_scope,
@@ -873,6 +956,68 @@ SOURCES: tuple[SourceSpec, ...] = (
               "(season_resolver). NOT an injury/availability signal: a starter ruled Out "
               "is not demoted (measured — see IMPLEMENTATION_PLAN 3.2c). The 2021-2024 "
               "WEEKLY regime is a different table and a different, backfill-only spec.",
+    ),
+    SourceSpec(
+        name="ff_opportunity", group=GROUP_DAILY, pull=_pull_ff_opportunity,
+        scope=_scope_ff_opportunity, phases=frozenset({PHASE_INSEASON, PHASE_OFFSEASON}),
+        interval_days=1, needs_schedules=True, perishable=True,
+        notes="Item 4.2b (S10): ffverse expected-points per player-week — the only "
+              "in-season TD-regression input this project has, and CAPTURE ONLY in "
+              "Week 1 (nothing under ziggurat/core/ may import it; a test enforces "
+              "that). PERISHABLE, and it is the reason this source exists at all: the "
+              "release tag is `latest-data` and each season's asset is REWRITTEN IN "
+              "PLACE on a game-window cron (ep_weekly_2025.parquet was rewritten "
+              "2026-09-01 and again 2026-09-04), so what upstream said on a given "
+              "Tuesday is gone unless it was stored. retrieved_as_of is IN THE PRIMARY "
+              "KEY so a rewrite VERSIONS rather than replaces, every capture is also "
+              "kept whole as a dated lossless parquet under data/ffopp/ (25 of 159 "
+              "columns reach SQLite), and BACKFILL_EXCLUDED stays — decide() refuses "
+              "any past season, not overridable by --force, which is the forward-only "
+              "guarantee. knowable_as_of = the row's own GAMEDAY joined from schedules "
+              "on game_id (measured: 6,054/6,054 rows of the 2025 file resolve), never "
+              "the file's publish timestamp — that is one value for the whole season "
+              "and would make every 2026 row invisible at any earlier as_of. Fenced by "
+              "ff_opportunity.OpportunityCollapse (floor BEFORE the write, incl. the "
+              "emptied-values case a row count cannot see) and by ModelVersionChanged "
+              "(a ffverse model bump must not silently redefine every `_exp` column "
+              "mid-season). Bulk-capture stamping like fpecr: read it through "
+              "base.latest_truth(get_ff_opportunity). BEFORE the two archive pulls, "
+              "like every other perishable source. Expected Week-1 behaviour, "
+              "pre-registered: 09-09/09-10 404 -> upstream_absent (not an anchor, "
+              "retries daily), first real file ~Fri 09-11, complete week 1 at the "
+              "Mon 09-14 build. Rule 2: its *_fantasy_points* columns are ffverse's "
+              "own FULL-PPR scoring, never house points.",
+    ),
+    SourceSpec(
+        name="fp_weekly_ecr", group=GROUP_DAILY, pull=_pull_fp_weekly,
+        scope=_scope_fp_weekly, phases=frozenset({PHASE_INSEASON}),
+        interval_days=1, needs_schedules=False, perishable=True,
+        notes="Item 4.2b (Unit F): the SAME-WEEK FantasyPros weekly (`wp`) ECR board, "
+              "which is the affirmative answer to this item's own recon question. "
+              "DynastyProcess rewrites files/fp_latest_weekly.csv TWICE DAILY in-season "
+              "and serves the current value only, so a missed run is a LOST OBSERVATION "
+              "— PERISHABLE, retrieved_as_of in the PRIMARY KEY so a second capture "
+              "versions rather than replaces. It MOVES: 81 of 159 ppr-rb ids changed "
+              "integer rank in 5.7 hours (measured 2026-09-04), which is also why it is "
+              "NEVER merged into fpecr_panel — a live number in the archive's key space "
+              "would be resolved over it by select_as_of's per-key MAX and would answer "
+              "every backtest read with today's board. knowable_as_of = the file's own "
+              "scrape_date (what adp_rankings already does); the WEEK is derived from "
+              "`schedules` and is deliberately NOT fpecr.infer_nfl_week, which answers "
+              "week 0 for a pre-opener capture the live page ranks as week 1 (measured) "
+              "— week_basis records which authority labelled each row, and a board the "
+              "schedule cannot label is 'unknown' with a NULL week rather than a guess. "
+              "needs_schedules is FALSE on purpose: the scrape_date is the knowledge "
+              "time, so a missing schedule costs the WEEK LABEL, not the rows — the "
+              "opposite of the six sources that would drop 100%. The FantasyPros page "
+              "as an explicit week authority is behind ZIGGURAT_FP_WEEK_PAGE, DEFAULT "
+              "OFF pending operator decision D2(b). Fenced by "
+              "fp_weekly.WeeklyEcrCollapse (floor BEFORE the write, incl. a vanished "
+              "PAGE and the emptied-values case a row count cannot see). INSEASON only: "
+              "a weekly board is not published between seasons. BEFORE the two archive "
+              "pulls, like every other perishable source. Rule 2: r2p_pts and "
+              "start_sit_grade are FantasyPros' own projection and grade, never house "
+              "points.",
     ),
     # THE TWO ARCHIVE PULLS RUN LAST IN THE DAILY GROUP, BY DESIGN (item 4.1
     # audit, OPS-3). ``run_ingest`` walks the group in registry order, and the
@@ -2387,6 +2532,18 @@ BACKFILL_EXCLUDED: dict[str, str] = {
         "different seasons — five lies in the run log and zero historical rows. The "
         "historical ECR panel is a separate Phase-4 ingester (item 4.1)."
     ),
+    "fp_weekly_ecr": (
+        # Registered 2026-09-04 (item 4.2b, Unit F). The same argument as
+        # `adp_rankings` one entry up, and for the same mechanical reason: the
+        # pull takes no season at all.
+        "_pull_fp_weekly ignores `season` for everything except sanity-checking the "
+        "optional week-label page — the board's own scrape_date decides the season of "
+        "every row — so a five-season backfill would run five IDENTICAL scrapes of "
+        "TODAY's weekly board and log them under five different seasons. There is no "
+        "historical weekly board to fetch here either: the archive of past `wp` scrapes "
+        "is db_fpecr, which the separate `fpecr` ingester loads into fpecr_panel. This "
+        "table only ever accumulates FORWARD."
+    ),
     "espn_ranks": (
         # NOTE: this reason deliberately does NOT quote the SQL verbatim.
         # `tests/test_nfl_refresh.py::test_no_nfl_ingester_outside_espn_ranks_deletes_rows`
@@ -2407,7 +2564,12 @@ BACKFILL_EXCLUDED: dict[str, str] = {
         "construction."
     ),
     "ff_opportunity": (
-        "out of scope for 3.2c and never registered: ffverse expected-TD data is a MODEL "
+        # REGISTERED 2026-09-04 (item 4.2b) and this entry is what keeps the
+        # registration honest: `decide()` reads this list for any season before the
+        # current one, so the daily cadence can capture 2026 forward while a past
+        # season stays refused, not overridable by --force. Deleting this entry does
+        # not "enable the backfill" — it enables the exact defect below.
+        "registered by item 4.2b for the CURRENT season only: ffverse expected-TD data is a MODEL "
         "OUTPUT, and the ARCHIVE files this project looked at were written long after "
         "their season (ep_weekly_2021.parquet written 2023-01-05). Stamping a 2021 week-5 "
         "row knowable_as_of = 2021-10-10 would pass every leakage test while pricing a "
@@ -2696,6 +2858,13 @@ _PROTECTED_SQL: tuple[tuple[str, str, bool], ...] = (
     ("projections", "SELECT * FROM projections WHERE season = :season", True),
     ("schedules", "SELECT * FROM schedules WHERE season = :season", True),
     ("adp_rankings", "SELECT * FROM adp_rankings", False),
+    # Item 4.2b: the same argument as `adp_rankings` one line up, applied to the
+    # other PERISHABLE, season-agnostic market capture. A backfill never pulls it
+    # (BACKFILL_EXCLUDED), which is exactly why an unexpected write here would be
+    # a defect rather than a surprise — and a vintage this table loses cannot be
+    # re-fetched from anywhere. Whole table, not a season slice: like
+    # `adp_rankings`, "the backfill only touches old seasons" is not a defence.
+    ("fp_weekly_ecr", "SELECT * FROM fp_weekly_ecr", False),
     ("players", "SELECT * FROM players", False),
 )
 
