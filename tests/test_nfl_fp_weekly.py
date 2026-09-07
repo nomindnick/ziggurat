@@ -730,6 +730,18 @@ def test_the_orchestrator_lands_the_board_and_the_idp_filter_is_not_a_drop(db, m
     live run, on a 35% "drop" that was almost entirely this same filter. The
     filter must reach the log as `filtered`, and the run must be `ok`."""
     _stub_schedule(db)
+    # This test pins the DEFAULT authority (the schedule). `run_ingest` passes
+    # no `environ`, so the real `week_page_enabled` would load the repo `.env` —
+    # where the operator turned ZIGGURAT_FP_WEEK_PAGE on (D2b, 2026-09-05) — and
+    # the pull would then fetch the LIVE FantasyPros page from inside the suite
+    # and label the board from it (measured: the suite went red on 2026-09-07
+    # for exactly that). Pin the setting, and forbid the request outright.
+    monkeypatch.setattr(fp_weekly, "week_page_enabled", lambda environ=None: False)
+
+    def _never(**kw):                          # pragma: no cover - must not run
+        raise AssertionError("the FantasyPros page was fetched from inside the suite")
+
+    monkeypatch.setattr(fp_weekly, "fetch_week_page", _never)
     # Today's bytes, re-dated to today: the CSV goes through the SAME parse the
     # live pull uses, so the fetch/parse/ingest seam is exercised whole.
     today = fp_weekly.read_fp_weekly(FIXTURE)

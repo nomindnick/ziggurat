@@ -54,12 +54,12 @@ def _get(base, path):
         return json.loads(r.read())
 
 
-def _post(base, path, payload):
+def _post(base, path, payload, *, timeout=30):
     req = urllib.request.Request(
         base + path, data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"}, method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -242,9 +242,19 @@ def test_concurrent_picks_serialize_under_the_lock(cockpit):
     def hit(pid):
         barrier.wait()
         try:
-            results.append(("ok", _post(base, "/api/pick", {"player_id": pid})))
+            # The picks SERIALIZE behind the lock, so the last thread waits for
+            # the other eleven — and each pick may recompute a recommendation.
+            # Under a full-suite load that ran past the 30 s default once
+            # (2026-09-07: a socket timeout killed the thread silently, so the
+            # test read "a pick was lost" for what was "the box was busy"). The
+            # claim here is ordering, not latency: wait as long as it takes,
+            # and record any transport failure as a legible result.
+            results.append(("ok", _post(base, "/api/pick", {"player_id": pid},
+                                        timeout=300)))
         except urllib.error.HTTPError as exc:
             results.append(("err", exc.code))
+        except urllib.error.URLError as exc:  # timeout / connection failure
+            results.append(("err", repr(exc)))
 
     threads = [threading.Thread(target=hit, args=(p,)) for p in players]
     for t in threads:
@@ -253,7 +263,7 @@ def test_concurrent_picks_serialize_under_the_lock(cockpit):
         t.join(timeout=60)
 
     oks = [r for kind, r in results if kind == "ok"]
-    assert len(oks) == len(players)          # every distinct player committed
+    assert len(oks) == len(players), results  # every distinct player committed
     overalls = sorted(r["overall"] for r in oks)
     assert overalls == list(range(1, len(players) + 1))  # no slot torn or reused
     state = _get(base, "/api/state")
