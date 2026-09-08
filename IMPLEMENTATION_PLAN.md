@@ -4365,6 +4365,69 @@ landing, whichever comes first.
 **Update:**
 > _[To be completed]_
 
+### 4.6 [Build + Experiment] Week-specific game-environment adjustment (added 2026-09-07, operator request; opens at Checkpoint 3)
+**Why it exists:** on 2026-09-07 the operator asked whether the engine
+discounts a player's projection for the NFL defense he faces that week. It
+does not, for any offensive player. Every skill-position number on the
+lineup card is the item-1.5 Sleeper feed, which item 3.2 measured as a FLAT
+SEASON RATE (median week-to-week CV ~1%); the only opponent-aware number in
+the system is the D/ST streaming tilt (item 3.5). So the Week 1 lineup is
+the best lineup under a projection that knows nothing about Week 1.
+**Goal:** a per-week multiplier on each offensive player's flat rate, built
+from what the market says about his TEAM's game that week, shipped as a
+labelled hypothesis on the lineup, waiver and streaming cards — never as a
+new number inside `scoring.py` (Rule 2: this is a projection input, not a
+scoring rule).
+**Design, in order of expected value (the backtest decides what survives):**
+1. **Implied team total.** From a game's spread and total, each team's
+   implied points this week; multiplier = implied total ÷ the team's
+   baseline (season-to-date, or the market's preseason win-total-derived
+   baseline in Week 1). This is the standard form of the operator's
+   "strong O-line vs strong D-line" intuition: the market has already priced
+   the line matchup, injuries, weather and pace into that one number, with
+   far more information than any defence-vs-position table. `game_odds`
+   already holds closing spread/total for every 2021–2025 game (1,424 rows).
+2. **Defence quality** as a secondary term from `team_defense`
+   (points/yards allowed, already ingested 2021–2025, and the D/ST tilt's own
+   reference). Expected to add little on top of (1) and to be NOISE in weeks
+   1–4 (defences regress fast on small samples) — keep only if it grades.
+3. **Player props** (yardage / TD lines) are the market's per-player weekly
+   projection and the real prize; access is the open question (below).
+**Grading (item 4.1 harness, no new instrument):** realised house points
+(via `scoring.py`) of the seated lineup under the adjusted projection vs the
+flat rate, 2021–2023 TRAIN, per-week paired, block-resampled; 2024–25 stay
+locked. Practical floor stated in house points per week BEFORE the first
+grade (the 4.2c discipline). **Leakage hazard, stated up front:** `game_odds`
+is CLOSING lines (`knowable=gameday`); a Tuesday lineup decision cannot see
+them, so a backtest on closing lines is an UPPER BOUND on what a Tuesday
+read can deliver and must say so. A forward capture of Tuesday-available
+lines is what makes the forward measurement honest — which is the data-source
+half of this item.
+**Data sources (operator raised Kalshi, "the other betting market", and the
+sportsbooks):** Kalshi and Polymarket publish public APIs with NFL game
+markets — their value over what we hold is TIMING (a line on Tuesday, not at
+kickoff), not a different opinion; DraftKings/FanDuel publish no free API and
+scraping them is terms-of-service territory; the paid aggregator is already
+named as a deferred cross-check (item 4.1). Whether any free source lists
+player PROPS is unverified and is the first recon question. Two rules for
+"balancing" new sources: every source enters as a labelled hypothesis graded
+against the flat rate before it moves a lineup number, and two sources that
+encode the same information (two books' lines on one game) do not add — the
+marginal source has to carry information the first one does not.
+**Sequencing:** nothing on the cadence path changes during Week 1
+(09-09..14). Recon + backtest on the stored closing lines can run any time
+after Checkpoint 3 without touching production; the forward line capture
+is a new ingest source under the 3.1b registry (perishable — say so in
+`ingest status`). Operator to rank against 5.1/5.2 at Checkpoint 3.
+**Done when:** (a) a scorecard on TRAIN shows the multiplier's realised
+house-point lift over the flat rate with its interval and the closing-line
+upper-bound caveat printed; (b) a Tuesday-available line source is captured
+forward with `as_of` + leakage test; (c) if (a) clears the pre-stated floor,
+the lineup card prints the adjusted number beside the flat one with the
+game's implied total as the reason, and the Rule-6 sanity checks still hold.
+**Update:**
+> _[To be completed]_
+
 ### ✦ Checkpoint 4: Signal deployment decisions
 Deploy, narrow, or retire each signal arm per 4.2/4.4 results; fold tuned defaults into the live modules; record what the backtest priors now are (these become the learning loop's anchor in 5.2).
 **Checkpoint notes:**
