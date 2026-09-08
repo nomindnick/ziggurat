@@ -1240,6 +1240,8 @@ def brief_run(
     typer.echo(
         f"briefing [{result['status']}] -> {result['artifact']} "
         f"(ntfy: {result['ntfy']})"
+        + (f"\n  mirrored to: {result['mirror']}" if result.get("mirror") else
+           "\n  not mirrored (BRIEFING_MIRROR_DIR unset — the full text is only on this box)")
         + (f"\n  note: {result['error']}" if result.get("error") else "")
     )
 

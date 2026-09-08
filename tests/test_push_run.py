@@ -2,6 +2,7 @@
 discipline, reserve-then-push dedup, the alert tick, and the briefing run. No
 network (fake poster) and no LLM (fake/omitted router)."""
 
+from pathlib import Path
 import json
 
 from ziggurat.push import outbound, runs
@@ -296,3 +297,67 @@ def test_run_briefing_supplies_the_episode_history_provider(push_db, tmp_path, m
                           now="2026-09-10T06:00:00", week=2, config=_cfg(),
                           poster=lambda *a, **k: 200, push=False)
     assert callable(captured.get("history")), sorted(captured)
+
+
+# ------------------------------------------------------------------ briefing mirror (operator request 2026-09-08)
+
+
+def test_run_briefing_mirrors_the_full_file_when_a_mirror_dir_is_set(push_db, tmp_path, monkeypatch):
+    """The phone teaser carries no names; the FULL briefing is mirrored into the
+    operator's own private directory (an Obsidian vault that syncs to the phone)."""
+    monkeypatch.setattr(push_run, "BRIEFINGS_DIR", tmp_path / "briefings")
+    _seed_own_team(push_db)
+    _snap(push_db, "2026-09-10", 100, "Star Back", 1, "ACTIVE", sp=1)
+    push_db.commit()
+    vault = tmp_path / "vault" / "Ziggurat"      # does not exist yet — must be created
+    sent = []
+    r = push_run.run_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                              now="2026-09-10T06:00:00", week=2, config=_cfg(),
+                              poster=lambda u, b, h, t: (sent.append(b) or 200), mirror_dir=vault)
+    assert r["status"] == runs.STATUS_OK and r["error"] is None
+    assert len(sent) == 1 and b"full briefing in Obsidian" in sent[0]    # the teaser says where it went
+    assert r["mirror"] == str(vault / "2026-w02-briefing.md")
+    assert (vault / "2026-w02-briefing.md").read_bytes() == (tmp_path / "briefings" / "2026-w02-briefing.md").read_bytes()
+    # re-running the same week REPLACES the copy (one file per week in the vault)
+    push_run.run_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                          now="2026-09-10T06:05:00", week=2, config=_cfg(),
+                          poster=lambda *a, **k: 200, mirror_dir=vault)
+    assert [p.name for p in vault.iterdir()] == ["2026-w02-briefing.md"]
+
+
+def test_run_briefing_mirror_failure_is_partial_and_never_costs_the_push(push_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(push_run, "BRIEFINGS_DIR", tmp_path / "briefings")
+    _seed_own_team(push_db)
+    push_db.commit()
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a file where the vault directory should be")
+    sent = []
+    r = push_run.run_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                              now="2026-09-10T06:00:00", week=2, config=_cfg(),
+                              poster=lambda u, b, h, t: (sent.append(b) or 200),
+                              mirror_dir=blocker / "Ziggurat")
+    assert r["status"] == runs.STATUS_PARTIAL
+    assert "briefing mirror" in r["error"] and str(blocker) in r["error"]
+    assert r["mirror"] is None
+    assert (tmp_path / "briefings" / "2026-w02-briefing.md").exists()   # intel/ copy written first
+    assert len(sent) == 1 and r["ntfy"] == "200"                        # teaser still went out
+    assert b"on the box" in sent[0] and b"Obsidian" not in sent[0]       # and does not claim a mirror it lacks
+
+
+def test_run_briefing_default_mirror_comes_from_the_environment(push_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(push_run, "BRIEFINGS_DIR", tmp_path / "briefings")
+    _seed_own_team(push_db)
+    push_db.commit()
+    # unset -> no mirror, no error
+    assert push_run.briefing_mirror_dir(environ={}) is None
+    assert push_run.briefing_mirror_dir(environ={"BRIEFING_MIRROR_DIR": "  "}) is None
+    assert push_run.briefing_mirror_dir(environ={"BRIEFING_MIRROR_DIR": "~/v"}) == Path("~/v").expanduser()
+    monkeypatch.setattr(push_run, "briefing_mirror_dir", lambda: tmp_path / "from-env")
+    r = push_run.run_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                              now="2026-09-10T06:00:00", week=2, config=_cfg(),
+                              poster=lambda *a, **k: 200)
+    assert r["mirror"] == str(tmp_path / "from-env" / "2026-w02-briefing.md")
+    r = push_run.run_briefing(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                              now="2026-09-10T06:00:00", week=2, config=_cfg(),
+                              poster=lambda *a, **k: 200, mirror_dir=None)
+    assert r["mirror"] is None and r["status"] == runs.STATUS_OK

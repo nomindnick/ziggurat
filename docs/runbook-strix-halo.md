@@ -288,6 +288,9 @@ One-time setup on the desktop:
 #      NTFY_TOPIC=zig-<32 random chars>
 #      NTFY_SERVER=https://ntfy.sh        # optional; this is the default
 #      NTFY_TOKEN=tk_...                  # optional; only for a reserved/self-hosted topic
+#      BRIEFING_MIRROR_DIR=~/Documents/<vault>/Ziggurat   # optional (2026-09-08): mirror the
+#                                         # FULL Wednesday briefing into an Obsidian vault that
+#                                         # syncs to the phone; the teaser itself carries no names
 # 2. Install the ntfy app on your phone and SUBSCRIBE to that topic string.
 # 3. Install the timers (Wed 06:00 briefing + a 20-min alert tick, both Pacific):
 scripts/install-push.sh

@@ -16,6 +16,8 @@ operator the underlying facts (R1's degrade-gracefully requirement).
 
 import json
 import os
+import shutil
+from pathlib import Path
 
 from ziggurat.core import alerts as alerts_mod
 from ziggurat.core import briefing as briefing_mod
@@ -29,6 +31,17 @@ ALERTS_DIR = INTEL_DIR / "weekly" / "alerts"
 
 PHONE_CHANNEL = "phone"
 DEFAULT_ALERT_CAP = 4
+
+# Operator request 2026-09-08: the Wednesday briefing is written to intel/ on the
+# desktop, and the phone teaser (allowlist-safe: counts, no names) only says "go
+# read it there" — which the operator cannot do from work. So the FULL briefing
+# is mirrored into a directory the operator names in .env — in practice an
+# Obsidian vault that Obsidian Sync carries to the phone. This is NOT egress
+# through the ntfy choke point: the vault is the operator's own private,
+# end-to-end-encrypted store, so the file carries the full names by design and
+# the Rule-5 outbound scrub is deliberately not applied. Unset = no mirror.
+BRIEFING_MIRROR_ENV = "BRIEFING_MIRROR_DIR"
+_UNSET = object()
 
 # The highest-leverage string in the push layer: it is what turns a correct
 # briefing into the sentence the operator acts on. Item 4.2b, B3 added the
@@ -66,6 +79,41 @@ def _write_briefing_file(season, week, *, prose, full_md, as_of) -> str:
     return str(path)
 
 
+def briefing_mirror_dir(*, environ=None):
+    """The directory the full briefing is mirrored to, or None when unset.
+
+    Reads ``BRIEFING_MIRROR_DIR`` — loading the repo .env the same
+    non-overriding way ``load_ntfy_config`` does, so the systemd unit (which
+    exports nothing) sees the same value a shell does. ``~`` is expanded."""
+    if environ is None:
+        try:
+            from dotenv import load_dotenv
+
+            from ziggurat.paths import REPO_ROOT
+
+            load_dotenv(REPO_ROOT / ".env", override=False)
+        except ImportError:  # pragma: no cover - dotenv is a declared dependency
+            pass
+        environ = os.environ
+    raw = (environ.get(BRIEFING_MIRROR_ENV) or "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _mirror_briefing(path, *, mirror_dir) -> str | None:
+    """Copy the written briefing into ``mirror_dir`` (created if absent) and
+    return the copy's path. The copy is a whole-file replacement, never an
+    append, so re-running a week's briefing leaves exactly one file per week
+    there — the same name it has under intel/. Raises on failure; the caller
+    records that as a PARTIAL run rather than letting it take the push down."""
+    if mirror_dir is None:
+        return None
+    mirror_dir = Path(mirror_dir)
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+    dest = mirror_dir / Path(path).name
+    shutil.copyfile(path, dest)
+    return str(dest)
+
+
 def _append_alert_log(season, week, record) -> str:
     ALERTS_DIR.mkdir(parents=True, exist_ok=True)
     path = ALERTS_DIR / f"{season}-{_week_tag(week)}.jsonl"
@@ -93,16 +141,24 @@ def run_briefing(
     config=None,
     poster=outbound._urllib_poster,
     push=True,
+    mirror_dir=_UNSET,
 ) -> dict:
     """Compose the Wednesday briefing, write it to intel/weekly/, optionally
     summarize it via the router, and push an allowlist-safe teaser to the phone.
-    Returns a summary dict; records exactly one push_runs row."""
+    Returns a summary dict; records exactly one push_runs row.
+
+    ``mirror_dir`` defaults to ``BRIEFING_MIRROR_DIR`` from the environment /
+    .env (None = no mirror); pass it explicitly to override. A mirror failure is
+    a recorded PARTIAL with the error named, never a lost briefing or a lost
+    push — the intel/ file is written first and the teaser still goes out."""
     run_id = runs.start_run(conn, kind="brief", season=season,
                             scope=f"week {week}" if week is not None else "week ?",
                             started_at=now)
     runs.reap_orphans(conn, now=now)
-    llm_backend = ntfy_status = error = artifact = None
+    llm_backend = ntfy_status = error = artifact = mirror = None
     status = runs.STATUS_OK
+    if mirror_dir is _UNSET:
+        mirror_dir = briefing_mirror_dir()
     try:
         brief = briefing_mod.build_briefing(
             conn, as_of=as_of, season=season, own_team_id=own_team_id,
@@ -124,8 +180,16 @@ def run_briefing(
                 error = f"llm prose failed: {type(exc).__name__}: {exc}"
 
         artifact = _write_briefing_file(season, brief.week, prose=prose, full_md=full_md, as_of=as_of)
+        try:
+            mirror = _mirror_briefing(artifact, mirror_dir=mirror_dir)
+        except Exception as exc:  # the vault copy is a convenience; the push is not
+            status = runs.STATUS_PARTIAL
+            error = (error + "; " if error else "") + \
+                f"briefing mirror to {mirror_dir} failed: {type(exc).__name__}: {exc}"
 
         teaser = brief.headline_summary
+        if mirror:  # the teaser names where the full text actually is (still scrubbed below)
+            teaser = teaser.replace("full briefing on the box", "full briefing in Obsidian")
         res = outbound.publish(
             teaser, conn=conn, as_of=as_of, season=season, own_team_id=own_team_id,
             title="Ziggurat briefing", tags="clipboard",
@@ -140,7 +204,7 @@ def run_briefing(
     runs.finish_run(conn, run_id, status=status, finished_at=now, llm_backend=llm_backend,
                     llm_task="morning_briefing", ntfy_status=ntfy_status,
                     artifact_path=artifact, error=error)
-    return {"run_id": run_id, "status": status, "artifact": artifact,
+    return {"run_id": run_id, "status": status, "artifact": artifact, "mirror": mirror,
             "ntfy": ntfy_status, "error": error}
 
 

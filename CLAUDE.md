@@ -1233,6 +1233,9 @@ scripts/install-decisions.sh              # item 4.2b — Tuesday 18:30 PT freez
 # install-push.sh needs NTFY_TOPIC in .env (a high-entropy string = the topic password);
 # the outbound scrub is what keeps a public topic safe. Test first without pushing:
 #   ziggurat brief run --no-push --no-llm   ;   ziggurat alerts run --no-push
+# BRIEFING_MIRROR_DIR=<an Obsidian vault folder> in .env mirrors the FULL Wednesday
+# briefing there (operator request 2026-09-08; the phone teaser carries no names).
+# It is a private vault, not egress: the Rule-5 scrub is NOT applied to the mirror.
 loginctl enable-linger "$USER"            # or every timer dies at logout
 .venv/bin/ziggurat league status          # last run + UNRECOVERABLE missing days
 .venv/bin/ziggurat league settings        # item 3.8a — the league's own rulebook (once, and on any change)
@@ -1513,8 +1516,14 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    what the tool said and what you actually submitted.
 
 ### Wednesday — post-waiver scan
-1. The 06:00 PT briefing (timer) is on the phone; the full text is in
-   `intel/weekly/briefings/`. Read it. It composes at a **fixed
+1. The 06:00 PT briefing (timer) pushes a names-free TEASER to the phone; the
+   full text is in `intel/weekly/briefings/` AND, since 2026-09-08, mirrored
+   into the Obsidian vault named by `BRIEFING_MIRROR_DIR` in `.env` (Obsidian
+   Sync carries it to the operator's phone — the operator cannot reach the
+   desktop from work). **The session reads it and drives the decision; the
+   operator is a football novice and reads the mirror only to follow along.**
+   `ziggurat brief status` does not show the mirror; the run's own output line
+   and the vault do. It composes at a **fixed
    `claim_budget=3` with no flag of its own**, and since item 3.4b that 3 is a
    TOTAL over claims + grabs (it used to be 3 of each), so its action list can
    be shorter than the pre-3.4b one for two different reasons — the chain

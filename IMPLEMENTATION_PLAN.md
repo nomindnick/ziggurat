@@ -2745,6 +2745,25 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 > ledger surgery. Also that evening: ESPN's edge began 403'ing the news wire's
 > identifying User-Agent (fingerprint-consistency rule; browser UAs blocked
 > too) — fixed by sending urllib's default UA. Suite 1435 → 1437.
+>
+> **Amended 2026-09-08 (operator request): the full briefing is MIRRORED into
+> an Obsidian vault.** The phone teaser is allowlist-safe by design (counts,
+> no names) and told the operator to read the full text on the desktop — which
+> they cannot physically reach from work; they reach this box only through
+> Claude Code's remote session. `run_briefing` now copies the written
+> `intel/weekly/briefings/<season>-wNN-briefing.md` into `BRIEFING_MIRROR_DIR`
+> (from `.env`, `~` expanded; unset = no mirror), an Obsidian vault folder that
+> Obsidian Sync carries to the phone. Whole-file replacement (one file per
+> week in the vault); a mirror failure is a recorded PARTIAL naming the
+> directory, after the intel/ write and before the teaser push, so it can cost
+> neither. **Not egress**: the vault is the operator's private end-to-end
+> encrypted store, so the copy carries the full names and the Rule-5 outbound
+> scrub is deliberately not applied; `BRIEFING_MIRROR_DIR` is itself a local
+> path and stays in `.env`. Three tests pin it (copy is byte-identical and
+> replaced on re-run; failure → PARTIAL with the push still sent; the default
+> comes from the environment and `None` disables). Operator decision recorded
+> the same day: **the session reads the briefing and drives the decision** —
+> the operator is a football novice and the mirror is for following along.
 
 ### 3.7 [Build] CLAUDE.md operating cadence v1
 **Goal:** Encode the weekly rhythm: Tuesday legality + claims, Wednesday post-waiver scan, Thu–Sat monitoring, Sunday inactives + final lineup, Monday journal. Journal and decision-log templates in `intel/weekly/`.
