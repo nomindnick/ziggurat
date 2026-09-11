@@ -120,8 +120,28 @@ def test_a_release_without_date_modified_still_ingests(db, nfl_fixture):
         assert row["knowable_as_of"] == game_dates[(2023, 6, row["team"])]
 
 
+def test_the_2026_release_shape_still_ingests(db, nfl_fixture):
+    """VERIFIED 2026-09-11 against live nflverse: the first in-season 2026 file
+    (`injuries_2026.parquet`, 139 rows, week 1 only) drops ``date_modified``
+    AND ``report_secondary_injury``. The cadence pull failed loudly on it for a
+    day (Thu 09-10 07:34 PT onward) — correct behaviour for drift, but a
+    secondary-injury label carries no game status, so it is optional now and
+    stored NULL. Everything rule 6 reads (``report_status``) is untouched.
+    """
+    schedules.ingest_schedules(db, nfl_fixture("schedules"), retrieved_as_of="2023-08-01")
+    df = nfl_fixture("injuries").drop(columns=["date_modified", "report_secondary_injury"])
+    n = injuries.ingest_injuries(db, df, retrieved_as_of="2023-10-20")
+    assert n > 0
+
+    rows = injuries.get_injuries(db, as_of="2023-11-01", season=2023, week=6)
+    assert rows
+    assert {row["report_secondary_injury"] for row in rows} == {None}
+    assert any(row["report_status"] for row in rows)  # the game-status column survived intact
+
+
 def test_a_release_missing_a_genuinely_required_column_still_fails_loud(db, nfl_fixture):
-    """Only date_modified is optional. Real drift must still be a red build."""
+    """Only date_modified and report_secondary_injury are optional. Real drift
+    must still be a red build."""
     df = nfl_fixture("injuries").drop(columns=["report_status"])
     with pytest.raises(ValueError, match="report_status"):
         injuries.ingest_injuries(db, df, retrieved_as_of="2023-10-20")

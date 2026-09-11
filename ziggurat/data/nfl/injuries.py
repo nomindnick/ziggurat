@@ -64,7 +64,16 @@ _COLUMNS = (
 # this table — 2025 carries exactly ONE row each for James Conner (wk4) and
 # Najee Harris (wk1), both with a NULL `report_status`, which is still useless
 # as an IR/season-ender signal and is why item 3.3's live arm reads league state.
-_OPTIONAL_COLUMNS = ("date_modified",)
+#
+# 2026 (verified live 2026-09-11, the first in-season file): `injuries_2026.parquet`
+# appeared after Week 1's opener with the schema changed AGAIN — `date_modified`
+# still absent, and now `report_secondary_injury` gone too (`season_type` and
+# `game_type` in). The cadence pull failed loudly on it from Thu 09-10 07:34 PT
+# until this line landed. A secondary injury designation carries no game
+# status, so its absence costs nothing rule 6 reads; the column stays in the
+# table and is stored NULL when the file lacks it (``frame_to_rows`` reads a
+# missing source column as None). Anything else missing is still drift.
+_OPTIONAL_COLUMNS = ("date_modified", "report_secondary_injury")
 _REQUIRED_COLUMNS = tuple(c for c in _COLUMNS if c not in _OPTIONAL_COLUMNS)
 
 # The stored PRIMARY KEY — one row per player-week per pull. Passed to
