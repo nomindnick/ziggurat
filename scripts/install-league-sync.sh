@@ -79,4 +79,5 @@ next steps
 Cron alternative (if this box has no user systemd) — keep the timeout, cron has
 no equivalent of TimeoutStartSec and a hung pull would otherwise never end:
   15 5,11,17,23 * * * cd $REPO && timeout 600 .venv/bin/ziggurat league sync --season $SEASON >> data/league-sync.log 2>&1
+  15 9,12 * * 0 cd $REPO && timeout 600 .venv/bin/ziggurat league sync --season $SEASON >> data/league-sync.log 2>&1   # Sunday pre-lock runs
 EOF

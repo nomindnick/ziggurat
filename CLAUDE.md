@@ -1552,7 +1552,14 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 - Journal anything acted on; an empty day is fine.
 
 ### Sunday — inactives + final lineup
-1. Inactives surface ~90 minutes before each kickoff wave. Run
+1. Inactives surface ~90 minutes before each kickoff wave. **The league sync
+   must land AFTER the inactives and BEFORE the locks, or the lineup card is
+   priced on Saturday-evening data** (edge program 2026-09-13, P1: the 6-hourly
+   schedule had nothing between the ~08:30 PT report and the 10:00 PT locks,
+   and `INJURY_OUT` phone alerts ride the sync boundary). The sync timer now
+   fires Sundays at 09:15 and 12:15 PT as the backup; when you are at the
+   keyboard, run `.venv/bin/ziggurat league sync` yourself ~08:35–09:30 PT and
+   confirm `league status` shows today's snapshot. Then run
    `.venv/bin/ziggurat lineup --reasons --now "<current ET ISO datetime>"` —
    the real clock matters: the GTD contingency ladder only offers swaps whose
    window is still open (`window_closed` means that door shut).

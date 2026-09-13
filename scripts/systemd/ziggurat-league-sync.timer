@@ -27,6 +27,18 @@ Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
 
 [Timer]
 OnCalendar=*-*-* 05,11,17,23:15:00
+# SUNDAY PRE-LOCK RUNS (edge program 2026-09-13, P1; operator decision
+# 2026-09-13). The NFL posts inactives ~90 min before each kickoff wave: ~08:30 PT
+# for the 10:00 PT wave and ~11:35 PT for the 13:05/13:25 PT wave. Nothing in the
+# 6-hourly schedule falls between either report and its locks, so a Sunday
+# scratch was invisible to `ziggurat lineup` until after the game started — and
+# the phone's INJURY_OUT alerts ride the sync boundary, not the 20-min news tick
+# (measured: all six ever pushed landed 1-5 min after a sync). These two runs
+# close both gaps; the 20-min alert tick then pushes within ~6 min. Backup for
+# the operator's own Sunday check, not a replacement for it. Times are the box's
+# local clock (Pacific on the desktop that runs the cadence).
+OnCalendar=Sun *-*-* 09:15:00
+OnCalendar=Sun *-*-* 12:15:00
 # Persistent: if the machine was asleep/off at the scheduled time, run at the
 # next opportunity rather than skipping the day (a laptop WILL miss slots).
 Persistent=true
