@@ -14,19 +14,20 @@ and that test fails unless the fixture changed too — transcription drift canno
 pass silently.
 
     ┌─────────────────────────────────────────────────────────────────────┐
-    │ TODO(post-Week-1 validation, anchored by item 1.3): once real ESPN   │
-    │ box scores exist (Phase 3, item 3.8), reconcile this engine against   │
-    │ actual weekly D/ST and kicker point totals. Two definitional          │
-    │ subtleties to pin against ground truth then, because they are decided │
-    │ at the *ingestion* layer, not here (see score_dst):                   │
-    │   1. `points_allowed` / `yards_allowed` derivation — exactly which    │
-    │      opponent points/yards ESPN charges to a fantasy D/ST (e.g. does  │
-    │      a defensive TD the opponent scores against *our* offense count   │
-    │      as points we allowed? ESPN: no). This module only *brackets* the │
-    │      already-derived value.                                           │
-    │   2. Return-TD attribution — ESPN credits kick/punt-return TDs to the │
-    │      D/ST here (`def_tds`); confirm the box-score feed agrees and that │
-    │      individual returners are not also being credited (double count). │
+    │ VALIDATED 2026-09-14 against real ESPN box scores (item 3.8 wave B,   │
+    │ Week 1): every rostered player on all 10 league rosters, ESPN         │
+    │ appliedStatTotal vs this module over the nflverse rows — 143 of 143   │
+    │ played entries exact, 0 gaps, offense + 9 D/STs + 9 kickers (the      │
+    │ other 16 entries were the Monday-night game, re-run 09-15). So the    │
+    │ ingestion-layer derivations this module only brackets are confirmed:  │
+    │ `team_defense`'s points_allowed / yards_allowed / fumble_recoveries   │
+    │ agree with what ESPN charges a fantasy D/ST (9 of 9). Note:           │
+    │ gitignored intel/research/scoring-reconciliation-2026-wk01.md.        │
+    │ TODO(narrowed): return-TD attribution — ESPN credits kick/punt-return │
+    │ TDs to the D/ST (`def_tds`); confirm the box-score feed agrees and    │
+    │ that individual returners are not also being credited (double count).│
+    │ Week 1 produced NO return TD on any rostered player, so this one      │
+    │ clause is unconfirmed until one occurs.                               │
     └─────────────────────────────────────────────────────────────────────┘
 
 Conventions:

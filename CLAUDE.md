@@ -607,6 +607,17 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   unpinned flag-first rewrite — a mechanism is not pinned by a test that cannot
   distinguish it from the mechanism it replaced.
 
+- **3.8 wave B, deliverable 4 — `scoring.py` box-score reconciliation DONE
+  2026-09-14 (Week 1 Monday).** ESPN `appliedStatTotal` vs `scoring.py` over the
+  nflverse rows for every rostered player on all 10 rosters: **143 of 143 played
+  entries exact, 0 gaps** (offense, 9 D/STs through `team_defense`, 9 kickers
+  through the migration-013 buckets); 16 MNF entries re-run 09-15. The one
+  discrepancy the week's journal carried was a session hand-read of a CBS box,
+  not an engine gap. The module's boxed TODO is narrowed to return-TD
+  attribution (no Week-1 instance). Wave B deliverables 1–3 still open.
+  Details: `IMPLEMENTATION_PLAN.md` 3.8 + gitignored
+  `intel/research/scoring-reconciliation-2026-wk01.md`.
+
 - **3.5 lineup support & streaming — built, audited & fixed 2026-07-26.** Two new
   **permanent** core modules, pure composition over existing as-of accessors (no
   migration, `schema_version` stays 7): `core/streaming.py` (D/ST + K streaming ranker,
@@ -1137,8 +1148,10 @@ Update this section whenever a phase or checkpoint closes.
    module hard-codes a scoring value. As of item 1.3 the numbers are the real
    league settings (transcribed from spike 1.1, locked to the ESPN fixture) and
    live only in the frozen `ScoringRules`; offense, D/ST (both bracket systems),
-   and kicker are all implemented. Post-Week-1 box-score validation is the one
-   open confirmation (anchored TODO in the module + item 3.8).
+   and kicker are all implemented. **Validated against real ESPN box scores
+   2026-09-14** (Week 1, item 3.8 wave B: 143 of 143 played rostered players
+   across all 10 rosters exact, D/ST and K included); the module's TODO is
+   narrowed to return-TD attribution, which had no Week-1 instance.
 3. **No logic in the CLI layer** (`ziggurat/cli/`). Commands parse, call, print.
 4. **Every LLM call goes through the router** (`ziggurat/llm/`, config in
    `config/llm.toml`). No component imports a model SDK or shells out to a

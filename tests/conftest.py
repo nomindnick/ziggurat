@@ -503,3 +503,19 @@ def _no_synthetic_rows_in_the_operators_run_log():
         "decision_freezes — a test invoked a capture path without --path. Every "
         "capture test must pass a tmp database."
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_alert_log(monkeypatch, tmp_path):
+    """The suite must never write the operator's private alert log.
+
+    `push.run.run_alert_tick` appends every tick to `ALERTS_DIR/<season>-wNN.jsonl`
+    under the REAL `intel/` tree; before 2026-09-14 every pytest run appended
+    fixture rows ("Star Back", "Camp Hero") to `intel/weekly/alerts/2026-w02.jsonl`
+    (2,564 rows measured) ahead of the real Week-2 ticks. Same class as
+    `4ae29fc` (the suite must not read the operator's .env). Redirected for
+    every test, pinned by `test_push_run.test_alert_log_never_touches_operator_intel`.
+    """
+    from ziggurat.push import run as push_run
+
+    monkeypatch.setattr(push_run, "ALERTS_DIR", tmp_path / "alerts")

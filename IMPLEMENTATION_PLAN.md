@@ -2841,6 +2841,25 @@ gitignored `intel/research/lineup-streaming-3.5-design.md`.
 **Rule note:** any scoring correction lands in `core/scoring.py` **only** (Rule 2), and any derivation fix lands at the ingestion layer where the 1.3 TODO says it belongs — `score_dst` brackets an already-derived value and must not learn to derive one.
 
 **Update:**
+> **Wave B, deliverable 4 (`scoring.py` box-score reconciliation) — DONE
+> 2026-09-14, Week 1 Monday, one day ahead of the "from 09-15" scope note
+> because nflverse landed the Sunday rows overnight.** Every rostered player
+> on all 10 rosters, ESPN `appliedStatTotal` vs `scoring.py` over the nflverse
+> rows (`weekly_stats` 1,040 rows + `team_defense` 30 rows, both `--force`
+> pulled 04:15 PT): **143 of 143 played entries exact to the cent, 0 gaps** —
+> offense, **9 D/STs** (both bracket systems + events through `team_defense`)
+> and **9 kickers** (migration-013 buckets via `_FG_BUCKET_FOLD`, −1/miss,
+> PATs) — with 16 MNF entries pending tonight and one SF practice body with no
+> nflverse row. The only discrepancy the week journal had carried (Rams D/ST
+> 3.0 vs ESPN 1.0) was a session HAND-READ error against a CBS box (a fumble
+> recovery nflverse and ESPN both say did not happen), not an engine or
+> derivation gap. Module TODO #1 (PA/YA derivation at ingestion) is confirmed
+> on 9 D/STs; **TODO #2 (return-TD attribution) had NO instance in Week 1 and
+> is the one clause the module's box keeps.** Reconciliation note + the
+> re-runnable probe: gitignored `intel/research/scoring-reconciliation-2026-wk01.md`
+> (+ `validate_wk1.py` / `.out`). Re-run Tue 09-15 for the MNF rows. CLAUDE.md
+> Rule 2 amended. Deliverables 1–3 of wave B still open.
+>
 > **Wave A done 2026-09-02. Wave B remains open (needs a finalized week, from
 > 2026-09-15).** Migration `014_league_ground_truth.sql` → `schema_version` 14:
 > three nullable columns on `league_player_state` (`injured`, `droppable`,
@@ -3329,7 +3348,56 @@ crash runs in a NEW process, i.e. under a new hash seed.
 ### ✦ Checkpoint 3: Week 1 live shakedown
 Operate the full loop through NFL Week 1 for real. Journal every friction, wrong output, and manual workaround; validate `scoring.py` against actual ESPN box scores (the anchored TODO from 1.3, now scoped as **item 3.8**); fix and amend the plan.
 **Checkpoint notes:**
-> _[To be completed]_
+> **Week 1 notes — written at the Monday retro, 2026-09-14 (Week 1 closes
+> with MNF tonight; our matchup is final: LOST 104.0–105.96, pre-game card
+> 53%). Checkpoint stays OPEN until the operator reads these and rules on the
+> two decisions at the end.** Full grading in gitignored `intel/weekly/2026-wk01.md`.
+>
+> *Loop ran end-to-end for real:* Tue claims → Wed post-batch scan + briefing
+> (timer, ntfy 200, Obsidian mirror byte-identical) → Thu–Sat monitoring →
+> Sun inactives with three manual pre-lock syncs → Mon retro. No missing
+> league days all week. Timers all fired on schedule (league sync 4x/day +
+> the new Sun 09:15/12:15 backup; ingest daily/weekly/gameday; Tue/Thu vintage
+> pair — both phase-skipped correctly pre-Week-1, first real pair is 09-15/17;
+> decisions freeze Tue 18:30; alerts every 20 min; brief Wed 06:00).
+>
+> *Fixed IN the week (each recorded under its item):* 3.4b sequential claim
+> pricing (the first defect the cadence itself caught, 09-02); the `injuries`
+> 2026 schema (`c95513f`); Sunday pre-lock sync timer (`517d1c3`); the alert-log
+> test pollution (today: autouse `_isolate_alert_log` in `tests/conftest.py`,
+> pinned; 2,564 fixture rows deleted from the operator's Week-2 log before its
+> first real tick); `scoring.py` validated (3.8 wave B, above).
+>
+> *Process findings, graded in the journal:* (1) the lock check looked at ONE
+> game — two starters played Thursday and nobody knew until Thursday morning
+> (no cost; the card seats them, but it prints lock times only inside GTD
+> contingencies) → **"LOCKS FIRST" card line**; (2) five session statements of
+> fact made without the query behind them (a "pickup" that was a draft pick, a
+> "no transactions" over a window with three, a NEWS headline attributed to the
+> tool, a hand-scored D/ST, a mid-game "nearly done"), all caught by the
+> operator or by data, zero decision cost → standing session rule: quote the
+> table or the tool, or say "unverified"; (3) two consecutive days of a
+> judgment override on the tool's top waiver line with no number behind it
+> (Coker ← Mitchell +4.0; Coker scored 33.8 on the pool) → from Week 2 every
+> override is journaled as a labelled hypothesis with its trigger; (4) the
+> own-roster NEWS lane pushed ~8 items, one decision-relevant → operator
+> decision P7 (narrow) stands, build from 09-15.
+>
+> *Tool gaps queued (build from 09-15, none during Week 1):* `ziggurat league
+> live` read-only live score (stored `league_matchups` points are 0.0 until the
+> period closes; a scratch script read `totalPointsLive` + per-player applied
+> totals all Sunday); LOCKS FIRST line; projection-age banner that fires on one
+> orphan row of 3,229 (name the count + whether a SEATED player is stale); the
+> 09-13 edge program's two remaining Rule-6 defects (seater blind to finished
+> games; kicker 50+ projection buckets NULL); `brief status` orders dry-runs
+> above the real run.
+>
+> *Decisions for the operator at this checkpoint:* (a) the Phase-4 thesis
+> note (re-sequence 4.3/4.4 with 5.2 as one program; journal system opinions
+> from Week 2) — the week's evidence is two-sided and n=1 each way, which is
+> the case FOR the grading instrument, not for either opinion; (b) the order
+> of the queued gaps against 5.1/5.2 and 4.6 (which this plan says opens at
+> Checkpoint 3).
 
 ---
 
@@ -3450,6 +3518,40 @@ is not making errors, and that is the shipped cadence + sanity checks + 5.2,
 not Phase 4. Week 1 is 2026-09-09: 4.1 closes today, 4.2 runs this week, and
 nothing else in this phase lands before real games — which is fine, because
 the cadence runs Week 1, not Phase 4.
+
+**Thesis note (2026-09-13, operator, Week 1 Sunday — recorded so it is not
+lost; NOT yet a decision).** Mid-loss to a 53% matchup (final 104.0–105.96,
+seven starters under projection), the operator raised a thesis that is bigger
+than the plan's framing of "AI builds a statistical model and the model wins":
+**"AI can understand and interpret life, using but going beyond raw stats."**
+The reference is Nilay Patel's "software brain" critique — AI-over-databases
+flattens the world — and the operator's counter-position is that AI can be the
+bridge between databases and real life, weighting more than a database can.
+Two consequences they stated: (a) the **podcast / news interpretation layer
+(4.3/4.4), buried on 2026-09-01 as low-value and hard, is now "a more important
+project"**; (b) the "process-only" grading discipline should be loosened enough
+to **let the system form opinions over time** (they expect 5.2 to be where
+that lives). They acknowledged this may be partly a reaction to a bad first
+game day. The session's response, recorded with it: **item 4.1 already
+measured the ceiling of the database-only approach** — the stat generator
+AGREES with the market and never leads it, because the projections we price
+from already fold in the qualitative stream and every rival can buy the same
+feed; the raw stream read earlier and weighted better is the ONLY arm in this
+plan with a mechanism for an edge rather than a match. A small same-day
+instance: a Juwan Johnson "lotto ticket" column came through the 3.6 alert
+lane Friday, was filtered as fluff, and he outscored the seated TE 14.4 vs
+10.3 — one data point, which is exactly the kind of thing to record and grade
+rather than dismiss OR act on. **Proposed shape (session, pending the Monday
+retro): do not weaken process grading — extend what counts as process.** The
+system's opinions become labelled hypotheses in the week journal (reason and
+trigger stated PRE-game), graded against realised points over many weeks
+(4.2c's instrument), promoted through the 5.2 ladder; the interpretation
+layer is that loop's INPUT, not an afterthought. Concretely: (i) re-sequence
+4.3/4.4 ahead of 4.5/4.6 and design them with 5.2 as ONE program; (ii) begin
+journaling the system's opinions from Week 2 even before the grading
+instrument exists, so there is a record to grade when it does; (iii) nothing
+is rebuilt in Week 1 (standing rule). Decision to be taken at the Week 1
+Monday retro and written here as an amendment if adopted.
 
 ### 4.0 [Fix] Draft-week loose ends — two live-fire defects (added 2026-09-01)
 **Origin:** both surfaced during/around the 2026-08-31 live draft; full incident
@@ -4361,6 +4463,11 @@ and 5.2 — see the Phase 4 header. Not struck and not dated: the item stays
 as written, and its case is strongest if 4.2's holdout precision disappoints
 (the stat generator alone is not enough) — the 4.1 lead-time scorecard is
 exactly how a podcast arm would prove it sees role changes before usage does.
+**Under review (2026-09-13):** the operator now considers this arm central to
+the project's thesis — see the Phase 4 header's thesis note. Proposed: pull
+4.3/4.4 ahead of 4.5/4.6 and design them with 5.2 as one program (the
+interpretation layer as the learning loop's input). Decision pending the Week 1
+Monday retro.
 **Update:**
 > _[To be completed]_
 
@@ -4475,6 +4582,14 @@ place; 5.4 is unchanged.
 ### 5.2 [Build] Learning loop
 **Goal:** Monday retro workflow: grade the week's decisions on process (correct-but-unlucky = variance, not error); observations → hypotheses → rules promotion ladder in `intel/heuristics.md` with explicit criteria in CLAUDE.md; backtest priors as the anchor (strong, repeated evidence required to override); scheduled memory compaction (~every 4 weeks, journals → `intel/rest_of_season_priors.md`).
 **Done when:** two consecutive real retros run from CLAUDE.md alone, and at least one hypothesis exists that is deliberately *not* yet a rule.
+**Scope note (2026-09-13, from the Phase 4 thesis note):** the operator wants
+the system to FORM OPINIONS over time, not only grade the operator's. Proposed
+extension, pending the Week 1 retro: the system's own qualitative reads
+(news/podcast-derived, later 4.3) are journaled as labelled hypotheses with
+their trigger stated pre-game, graded on realised points across weeks, and
+promoted through this ladder — process grading is extended, not weakened.
+Begin journaling such opinions from Week 2 regardless, so the ladder has
+input before the instrument exists.
 **Update:**
 > _[To be completed]_
 

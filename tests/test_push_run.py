@@ -361,3 +361,12 @@ def test_run_briefing_default_mirror_comes_from_the_environment(push_db, tmp_pat
                               now="2026-09-10T06:00:00", week=2, config=_cfg(),
                               poster=lambda *a, **k: 200, mirror_dir=None)
     assert r["mirror"] is None and r["status"] == runs.STATUS_OK
+
+
+def test_alert_log_never_touches_operator_intel():
+    """Pin for conftest's autouse `_isolate_alert_log`: under pytest the alert
+    log path must sit outside the real `intel/` tree (2026-09-14: 2,564 fixture
+    rows had landed in the operator's `intel/weekly/alerts/2026-w02.jsonl`)."""
+    from ziggurat import paths
+
+    assert not str(push_run.ALERTS_DIR).startswith(str(paths.INTEL_DIR))
