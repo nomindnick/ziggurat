@@ -1312,8 +1312,9 @@ loginctl enable-linger "$USER"            # or every timer dies at logout
 .venv/bin/ziggurat league status          # last run + UNRECOVERABLE missing days
 .venv/bin/ziggurat league settings        # item 3.8a — the league's own rulebook (once, and on any change)
 .venv/bin/ziggurat league ir-check        # item 3.8a — ESPN's own `injured` flag vs our IR-eligible rule
+.venv/bin/ziggurat league live            # item 3.17 — LIVE in-game score (read-only; the stored sync reads 0.0 until the period closes)
 .venv/bin/ziggurat ingest status          # per-source last successful pull + staleness
-.venv/bin/ziggurat brief status           # item 3.6 — last briefing runs
+.venv/bin/ziggurat brief status           # item 3.6 — last briefing runs (REAL runs first, --no-push previews in their own block — item 3.17)
 .venv/bin/ziggurat alerts status          # item 3.6 — last alert ticks ('empty' is healthy)
 .venv/bin/ziggurat decisions status       # item 4.2b — last decision captures ('none' is NOT healthy)
 .venv/bin/ziggurat decisions verify       # item 4.2b — re-hash the last capture against its manifest
@@ -1726,8 +1727,13 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    `intel/heuristics.md` as an **observation** (promotion rules land with 5.2).
 4. Skim `.venv/bin/ziggurat brief status` and `.venv/bin/ziggurat alerts status`
    for the week's push-layer health; a missed briefing is a process finding.
-   (`brief status` orders dry-runs above the real run — check `journalctl` or
-   the mirror until item 3.17 fixes the ordering.)
+   Both reports lead with a **`last REAL [<kind>] run:`** line and list REAL
+   runs above a separately-labelled **DRY-RUN previews** block (item 3.17): a
+   `--no-push` preview writes the briefing file and records a healthy-looking
+   `ok`, so it used to sit above the real Wednesday 06:00 run and bury it. Read
+   the first line, not the row count. **`no REAL run recorded yet` means every
+   recorded run was a preview — nothing reached the phone**, which is a process
+   finding, not an empty week.
 5. **Playoff prep — the rule, stated once, to apply when the standings
    separate** (measured 2026-09-13, F2; 120,000-draw bracket sim on this
    league's captured format, `playoffReseed=false`): the **first-round bye

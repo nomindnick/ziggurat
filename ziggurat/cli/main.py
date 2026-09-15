@@ -71,6 +71,12 @@ from ziggurat.data.store import apply_schema, connect, migration_alerts, open_db
 from ziggurat.decisions import capture as decisions_capture
 from ziggurat.decisions import read as decisions_read
 from ziggurat.decisions import store as decisions_store
+from ziggurat.league.live import (
+    LiveMatchupUnavailable,
+    format_live_matchup,
+    now_et,
+    read_live_matchup,
+)
 from ziggurat.league.state import (
     OwnTeamUnresolved,
     format_free_agents,
@@ -960,6 +966,43 @@ def league_ir_check(
     report = ir_rule_check(conn, as_of=as_of or _today(), season=_season(season))
     conn.close()
     typer.echo(format_ir_rule_report(report))
+
+
+@league_app.command("live")
+def league_live(
+    team: Annotated[Optional[int], typer.Option(help="League team id (default: your own, resolved from SWID).")] = None,
+    week: Annotated[Optional[int], typer.Option(help="Matchup period (default: ESPN's current).")] = None,
+    scoring_period: Annotated[Optional[int], typer.Option("--scoring-period",
+        help="Pin the scoring period on the ESPN request (default: ESPN's current).")] = None,
+    as_of: Annotated[Optional[str], typer.Option(help="Knowledge-time cutoff for the STORED reads (default today).")] = None,
+    now: Annotated[Optional[str], typer.Option(help="Decision clock, ISO ET (default: the wall clock).")] = None,
+    season: Annotated[Optional[int], typer.Option(help="League season (default: current NFL season).")] = None,
+    bench: Annotated[bool, typer.Option("--bench", help="Also print bench/IR rows.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+    league_id: Annotated[Optional[int], typer.Option(help="ESPN league id (default $ESPN_LEAGUE_ID).")] = None,
+) -> None:
+    """Live in-game score for your matchup — the number the stored sync cannot see.
+
+    ESPN serves `totalPoints` as 0.0 until the scoring period closes, so
+    `league_matchups` reads 0-0 all Sunday; this reads `totalPointsLive` plus
+    per-starter applied totals from the live views instead. READ-ONLY: it writes
+    nothing and stores nothing. All logic is in ziggurat/league/live.py (rule 3).
+    """
+    creds = load_espn_credentials(league_id=league_id)
+    conn = open_db(path)
+    try:
+        matchup = read_live_matchup(
+            conn, season=_season(season), league_id=creds["league_id"],
+            espn_s2=creds["espn_s2"], swid=creds["swid"],
+            as_of=as_of or _today(), now=now_et(now),
+            team_id=team, week=week, scoring_period=scoring_period,
+        )
+    except LiveMatchupUnavailable as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_live_matchup(matchup, bench=bench))
 
 
 @league_app.command("holdings")
