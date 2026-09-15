@@ -509,7 +509,14 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   not arithmetic — 2026's Week 1 opens on a Wednesday. **The waiver batch runs
   00:01–01:13 PACIFIC** (n=29 from ESPN's own `waiverProcessStatus`), not the
   "3–4 AM" Eastern figure this file carried; the cadence now states the ~23:59 PT
-  Tuesday submission deadline that follows from it.
+  Tuesday submission deadline that follows from it. **Corrected 2026-09-15 (edge
+  program §6A.1):** twelve further in-season observations of
+  `league_settings.waiver_last_execution` (2026-09-02..09-13) all fall in
+  **00:01:56–00:25:47 PT**, which tightens the window — and an execution is
+  recorded on **every** day **including Tuesday 2026-09-08**, against a
+  `waiverProcessDays` that omits Tuesday. Whether ESPN runs a batch nightly or
+  merely touches the field cannot be separated from what we hold; the ~23:59 PT
+  deadline follows either way.
   **What did NOT get settled, and says so:** the IR-SLOT MECHANISM. `injured`
   and `injury_status` are two encodings of ONE fact agreeing — that is a
   tautology, not evidence about what ESPN's IR slot accepts, and **0 of 10
@@ -782,6 +789,16 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   160-pick draft. The fix buys nothing on tonight's board; it is kept because a
   total order costs nothing and the replay promise runs in a fresh process.
   Details: `IMPLEMENTATION_PLAN.md` 3.11.
+  **AMENDED 2026-09-15 (edge probe E07 / §6A.3 + F5): the in-season half of the
+  50+ repair is still open, and the denominator in circulation was wrong.** The
+  correct statement is **544 of 544 forecast kicker-weeks (33 kickers)** carry
+  NULL in both `fg_made_50_59` and `fg_made_60` while `fg_missed` is populated —
+  the "2,754 of 2,754" figure counts 2,210 further rows carrying no forecast at
+  all. "Silently scores zero" is also wrong about the ingest run log
+  (`base.note_incomplete` already discloses it there); it is the operator-facing
+  PAGES that do not. It closes as a **Rule-6 correctness fix worth ~0 points**,
+  with that stated on the card — scope, sizing and the ordering behind item 4.6a
+  step 1 are in `IMPLEMENTATION_PLAN.md` 3.11.
 
   **Two disclosures the ship summary led without, both from the variant's own
   module docstring:** the week-by-week term does NOT fix the 3-QB/3-TE
@@ -1125,10 +1142,52 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   `ZIGGURAT_FP_WEEK_PAGE=1` set (D2b); the live journal template carries the
   Submitted-claims block; `ep_weekly_2021..2025` mirrored under `data/ffopp/`;
   first real capture taken, verified and `partial` for the expected reason.
-  Operator steps now in the cadence: Tuesday step 5's `league sync` right after
+  Operator steps now in the cadence: Tuesday step 6's `league sync` right after
   submitting, and the Mon 09-14 belt-and-braces forced stats pull. Wave 2 (the
   tie-bug fix + frozen re-run, the vintage diff, the coverage note, `decisions
   record/classify/latency`, migration 019) has no date; 4.2c opens 09-15.
+
+- **Edge / literature / qualitative program — measured 2026-09-13..14, folded
+  into the plan 2026-09-15.** Three sweeps, no production code touched: a
+  68-agent measurement of 23 ideas (`intel/research/edge-program-2026-09-13/`,
+  Claude + a commissioned GPT-6 package), ~107 academic sources
+  (`intel/research/literature-2026-09-13/`), and practitioners/guides/film/beat
+  plus a steelman critic (`intel/research/qualitative-2026-09-14/`). **Read
+  `intel/research/edge-program-2026-09-13/HANDOFF.md` first when resuming
+  Phase 4/5.** The assessment, agreed with the operator: **the system is at the
+  forecasting ceiling** — it matches the consensus market and three independent
+  rounds plus the literature say nothing obtainable leads it. The remaining edge
+  is in three places the market cannot reach: the **house scoring rules** (priced
+  exactly — the only validated structural edge), the **room's inattention** (4 of
+  9 rivals have made no transaction since the draft; hygiene is an avoided-loss
+  edge that grows from Week 5), and **execution** (never a zero, legality, the
+  chain, streaming). **The one place a better rule earned points is the D/ST
+  slot** (+2.02 house pts/wk over holding a drafted incumbent, 95% CI [−0.32,
+  +4.42], n=41 paired weeks — and the arm we would build first, the free
+  FantasyPros weekly board, was never measured against holding at all) → item
+  3.14. **Everything else that promised points measured zero** — the stop list is
+  now a standing section in the Phase 4 header so nobody re-derives it. **Three
+  shipped tools tell the operator something false or impossible** (the seater
+  benches players whose game already finished → 3.13; the kicker board scores
+  every projected 50+ FG as zero while charging −1/miss → 3.11's amendment; the
+  Sunday pre-lock sync gap → 3.12, closed 09-13) — Rule-6 fixes worth ~0 points
+  that protect against a ten-point hole. **The exchange rate is now recorded and
+  costs nothing to use: +1.0 house pt/wk = +2.21 pp P(title) / +3.96 pp
+  P(top-3)** on this roster (120,000-draw bracket sim on the captured format,
+  MC SE ≤ 0.14 pp) — so item 3.4b's live chain (+0.25 pts/wk) is worth +0.55 pp
+  title / +0.99 pp top-3. **The biggest result is negative: measured permission
+  not to build** — eighteen proposals priced by their own authors at 63–103 build
+  days; the program recommends about four. Plan items written 2026-09-15: 3.12
+  (done), **3.13 / 3.14 / 3.15 / 3.16 / 3.17 / 3.18 / 3.19**, **4.6a**, **4.7**,
+  plus amendments to 3.6, 3.8 wave B, 3.11, 4.2b Wave 2, 4.2c, 4.6, 5.1, 5.2 and
+  5.3. **Standing lessons this program paid for: an oracle that can see the
+  graded player's own outcome inside its own predictor will always justify the
+  feature, an oracle scored at two arbitrary strengths is not a ceiling (sweep
+  it), and an oracle that can see the player's own SUBSTITUTES will always
+  condemn one** — and the probe-hygiene twin: `weekly_stats` holds **two
+  retrieval vintages of every 2021–23 row**, so any `SELECT *` without an as-of
+  gate silently double-counts (two probes in this run did exactly that; the
+  inference survived, every reported `n` did not).
 
 Update this section whenever a phase or checkpoint closes.
 
@@ -1350,10 +1409,39 @@ use-it-or-lose-it within the week and **Tuesday claims are free — queue
 liberally**; what clears waivers is first-come-first-served, so **Wednesday
 morning is when speed matters**.
 
+**The weekly reset was OBSERVED for the first time on 2026-09-15** — until then
+it was a setting nobody had seen fire, because no in-season scoring-period
+boundary had elapsed. `league_teams.waiver_rank` for our team read **10 on every
+snapshot 2026-09-08..09-14 and 2 on 09-15**; the full 09-15 order by rank is
+teams 3, 10, 9, 8, 7, 4, 2, 5, 6, 1 — inverse standings after Week 1. The
+setting and the behaviour now agree on real data.
+
+**"Tuesday claims are free" is exact ACROSS weeks and imprecise WITHIN one
+batch.** The reset makes unspent priority worthless next Tuesday, so there is
+never a reason to save it — that half is exact. But ESPN's own documentation
+says a **successful** claim moves you to the BOTTOM of the priority list, and
+that is what this league does: on 2026-09-02 three claims were won from
+priority 2 and the team finished the batch at **10 of 10**. Within one
+overnight batch, therefore, **only your FIRST-listed claim is really at your
+priority** — everything below it is being processed from a worse position than
+the page implies. Two consequences for the Tuesday workflow: queue liberally
+(the cost of a losing claim is still zero), but **order your ESPN claim list so
+the most contested, most valuable target is FIRST**, and read item 3.4b's
+`chain_gain` as an upper bound whose slack grows with contested rows (the chain
+prices claim k assuming 1..k−1 WON; under contention winning early makes the
+later ones less likely). Nothing measured changes today — 4 claims league-wide
+all season, none contested — so this is a sentence to state precisely, not a
+mechanism to rebuild; reopen it on the first lost contested claim.
+
 **The batch runs just after MIDNIGHT PACIFIC, not "3–4 AM" — measured, item
 3.8a.** ESPN's own `waiverProcessStatus` map holds every batch it has ever run:
-29 of them (28 in 2025 + 2026-09-02) span **00:01–01:13 PT**. The 3–4 AM figure
-that was in circulation here was the EASTERN clock. Two consequences: a claim
+29 of them (28 in 2025 + 2026-09-02) span **00:01–01:13 PT**, and twelve further
+in-season observations (2026-09-02..09-13) tighten that to **00:01:56–00:25:47
+PT**. The 3–4 AM figure that was in circulation here was the EASTERN clock. An
+execution is recorded **every day, including Tuesday** (09-08), against a
+`waiverProcessDays` that omits Tuesday — whether that is a batch or a touched
+field is unresolved from what we hold, and the deadline below follows either
+way. Two consequences: a claim
 must be **queued before ~23:59 PT** to make that night's batch, and Tuesday's
 23:15 sync is the last run before it while Wednesday's 05:15 run is the first
 after — so TUESDAY's stored snapshot is the pre-batch state and WEDNESDAY's is
@@ -1506,7 +1594,26 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    list. **The operator submits in the app before ~23:59 PT TUESDAY** — the
    batch runs 00:01–01:13 PT (measured, item 3.8a), so "before the overnight
    batch" means tonight, not before breakfast.
-5. Journal each claim: add, drop, the tool's stated reasons verbatim, and what
+   **Order the claim list in the app so the most contested, most valuable
+   target is FIRST.** A won claim drops you to the bottom of the priority list
+   inside the same batch (ESPN's own documentation; observed 2026-09-02, 2nd →
+   10th after winning three), so only the first line is really at your printed
+   priority. The chain's number order decides what you queue; among what you
+   queue, contention decides the order you list it in. If those two orders
+   disagree, say so out loud and journal which one you used.
+5. **Look one week ahead before you finish** (guides' near-unanimous in-season
+   rule; nothing in the stack asks this yet — it is a habit until item 3.14/5.2
+   turn it into a column). Two questions, answered from the schedule and the
+   roster you will have after tonight's batch: who is on BYE next week, and
+   which starters face a defence the streaming tilt already dislikes? A claim
+   that solves next week's hole is worth more than its printed one-week number,
+   and a claim that solves nothing you can foresee is a rental. Ask **"am I
+   renting a week or buying a role?"** of every add, and write the answer in
+   the journal — position-specific patience priors to lean on, as labelled
+   hypotheses rather than rules: a top-12 finish through weeks 1–3 persists
+   QB 63% / TE 63% / RB 50% / WR 45%, a QB outside the top 24 after week 3 is
+   dead (3%), a WR outside the top 36 is not (62%).
+6. Journal each claim: add, drop, the tool's stated reasons verbatim, and what
    would make it wrong. A no-claim Tuesday is journaled as the decision not to
    claim. Wednesday's "which claims won" compares TUESDAY's stored snapshot —
    final once Tuesday's 23:15 run lands, and durable because no later run shares
@@ -1557,6 +1664,17 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 - Injury reports: Wed–Fri practice participation is trajectory; **Friday's
   designation is ground truth.** Re-run `.venv/bin/ziggurat lineup --reasons`
   after Friday's reports.
+- **Read the practice report Wed/Thu/Fri for BOTH the roster and the claim
+  chain** (~30 min/week, session-driven; NFL.com/injuries is free and
+  fetchable). It is the only signal in the whole 2026-09-14 qualitative sweep
+  that exists before Sunday, is free, has a published base rate, and is **not
+  in the decision path** — `practice_status` is ingested and read by nothing
+  (item 3.19 is the pilot that changes that). Base rates to quote as labelled
+  hypotheses, never as certainties (Footballguys, n>2,000, 2017–23): a
+  **Questionable player plays 71%** of the time, a **Doubtful player 5.9%**,
+  with documented team-to-team variance. What it buys is an avoided hole, not
+  an edge — and a coach's role quote is logged as a tracked hypothesis with a
+  pre-committed 4-week check, not acted on.
 - Before the week's FIRST kickoff (usually Thursday night — but check the
   schedule; the 2026 opener is a Wednesday), settle any starter playing in it.
   Slot-lock discipline is in the tool: earliest kickoffs in dedicated slots,
@@ -1587,10 +1705,43 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 1. `.venv/bin/ziggurat league sync` — capture the completed week.
 2. Retro every logged decision (template's Monday section): process first,
    outcome second, verdict one of good call / variance / lucky / error.
+   **Three fields per decision, not prose** (added 2026-09-15 from the
+   qualitative sweep's critic lens, after Week 1 produced two of each):
+   (a) **override-with-trigger** — if the session or the operator went against
+   a tool's top line, state the claim, the trigger that would prove it wrong,
+   and the number it would need to be right; an override with no trigger is
+   the finding, whatever the outcome. (b) **unverified-claim checkbox** — tick
+   every statement of fact made this week that was not quoted from a table or
+   the tool's own text (Week 1: five, zero decision cost, high trust cost; the
+   operator is a novice and cannot smell them). (c) **PROJECTED or REALISED**
+   — label every number the retro compares; the D/ST arms are realised points,
+   the claim chain and the trade ceiling are projection-priced, and they are
+   not commensurable.
+   **From Week 2, the SYSTEM's own opinions are journaled the same way** — a
+   labelled hypothesis with its reason and trigger stated PRE-game, graded here
+   like any operator decision (the first is H-wk02-1, the second-D/ST-slot
+   hypothesis, in the Week 2 journal). This is the 5.2 scope note in practice,
+   and it runs whether or not the grading instrument exists yet.
 3. Anything observed that smells like a repeatable lesson gets written to
    `intel/heuristics.md` as an **observation** (promotion rules land with 5.2).
 4. Skim `.venv/bin/ziggurat brief status` and `.venv/bin/ziggurat alerts status`
    for the week's push-layer health; a missed briefing is a process finding.
+   (`brief status` orders dry-runs above the real run — check `journalctl` or
+   the mirror until item 3.17 fixes the ordering.)
+5. **Playoff prep — the rule, stated once, to apply when the standings
+   separate** (measured 2026-09-13, F2; 120,000-draw bracket sim on this
+   league's captured format, `playoffReseed=false`): the **first-round bye
+   roughly doubles both objectives** (26.0% vs 12.6% title, 76.0% vs 37.9%
+   top-3 — and the 2.0× is an arithmetic identity under no re-seeding, p² vs
+   p³, not a simulation finding), while **seeds 3 through 6 are worth EXACTLY
+   ZERO to chase** — seeds 3 and 6 play each other and the winner faces seed 2,
+   so their paths are structurally identical. **Never spend anything to move
+   from the 6 seed to the 3 seed.** Real playoff games here are near coin flips
+   (p ≈ 0.506). The currency for every other decision: **+1.0 house pt/wk =
+   +2.21 pp P(title) / +3.96 pp P(top-3)** on this roster. And the bye cut is
+   decided by the points-for tiebreak in 44.8% of simulated seasons (the
+   operator is personally in that tie in 13.1%), so points-for is not a
+   consolation statistic.
 
 ### Every ~4 weeks — memory compaction
 Distill the accumulated journals into `intel/rest_of_season_priors.md`
