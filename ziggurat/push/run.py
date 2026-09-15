@@ -242,7 +242,13 @@ def run_alert_tick(
     preview cannot poison the real cadence's dedup), never on an infra failure (so a
     transient ntfy outage retries next tick). A CONTENT block (the Rule-5 scrub or
     the size cap raising) is recorded as a reserved-not-pushed row so a genuinely
-    unpublishable event does not retry forever."""
+    unpublishable event does not retry forever.
+
+    A NEWS item the item-3.16 gate holds back never reaches this ledger at all — it
+    is not phone-worthy, so it is neither pushed nor reserved, and it stays eligible
+    to push should the gate ever be widened at the 2026-10-15 review. It is counted
+    in the returned ``withheld_news`` and written to the on-box log with its
+    ``news_type``/``phone_gate``, which is the review's evidence."""
     run_id = runs.start_run(conn, kind="alert", season=season, scope="events", started_at=now)
     runs.reap_orphans(conn, now=now)
     status = runs.STATUS_OK
@@ -250,6 +256,7 @@ def run_alert_tick(
     pushed = 0
     ntfy_status = None
     new_count = 0
+    withheld_news = 0
     try:
         if pull_news:
             try:
@@ -264,8 +271,10 @@ def run_alert_tick(
         )
 
         # phone lane = phone_worthy ONLY (the push must name an action — operator
-        # decision 2026-08-05; context events still land in the briefing + log
-        # below), then dedup vs ledger (phone channel), then rank + cap. `new`
+        # decision 2026-08-05; and since item 3.16 an own-roster NEWS item must also
+        # clear the news_type gate, which INJURY_OUT is untouched by. Context and
+        # withheld events still land in the briefing + log below), then dedup vs
+        # ledger (phone channel), then rank + cap. `new`
         # (NOT the raw candidate count) drives everything: injury_transitions
         # re-emits every historical crossing each tick, so a steady deduped tick
         # is honestly EMPTY.
@@ -325,13 +334,19 @@ def run_alert_tick(
             if _deliver(None, summary, title="Ziggurat alerts", tags="rotating_light"):
                 pushed += 1
 
-        # on-box record (append-only), even when nothing pushed.
+        # on-box record (append-only), even when nothing pushed. `news_type` and
+        # `phone_gate` ride every row because this log IS the data the item-3.16
+        # one-month review (2026-10-15) reads: without them the review can only
+        # count what the gate let through, never what it cost.
+        withheld_news = sum(1 for e in board.events if e.phone_gate)
         _append_alert_log(season, board.week, {
             "tick": now, "as_of": str(as_of), "candidates": len(board.events),
             "new": new_count, "pushed_new": len(to_push), "overflow": len(overflow),
+            "withheld_news": withheld_news,
             "events": [{"kind": e.kind, "player": e.player, "headline": e.headline,
                         "dedup_key": e.dedup_key, "severity": e.severity,
-                        "phone_worthy": e.phone_worthy} for e in board.events],
+                        "phone_worthy": e.phone_worthy, "news_type": e.news_type,
+                        "phone_gate": e.phone_gate} for e in board.events],
             "notes": list(board.notes),
         })
 
@@ -342,4 +357,5 @@ def run_alert_tick(
         error = f"{type(exc).__name__}: {exc}"
     runs.finish_run(conn, run_id, status=status, finished_at=now, events_found=new_count,
                     events_pushed=pushed, ntfy_status=ntfy_status, error=error)
-    return {"run_id": run_id, "status": status, "found": new_count, "pushed": pushed, "error": error}
+    return {"run_id": run_id, "status": status, "found": new_count, "pushed": pushed,
+            "withheld_news": withheld_news, "error": error}

@@ -363,6 +363,104 @@ def test_run_briefing_default_mirror_comes_from_the_environment(push_db, tmp_pat
     assert r["mirror"] is None and r["status"] == runs.STATUS_OK
 
 
+# --------------------------------------------- item 3.16: the NEWS content gate
+#
+# Player names are synthetic — never a league member (Rule 5).
+
+
+def _own_roster_news(conn, *, news_id, news_type, byline=None, espn_id=500):
+    """Seed a player on the OPERATOR's roster (team 1) and one wire article on him."""
+    from ziggurat.data.nfl import news
+
+    conn.execute(
+        "INSERT OR IGNORE INTO players (gsis_id, espn_id, name, position, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, 'My Guy', 'WR', '2026-09-01', '2026-09-01')",
+        (f"00-000{espn_id}", str(espn_id)),
+    )
+    _snap(conn, "2026-09-10", espn_id, "My Guy", 1, "ACTIVE")  # on team 1 = own roster
+    conn.commit()
+    news.pull_news(conn, retrieved_as_of="2026-09-10", fetch=lambda limit: {"articles": [{
+        "id": news_id, "type": news_type, "headline": "My Guy news",
+        "description": "A sentence.", "published": "2026-09-10T12:00:00Z",
+        "byline": byline, "links": {"web": {"href": "x"}},
+        "categories": [{"type": "athlete", "athleteId": espn_id, "description": "My Guy"}],
+    }]})
+
+
+def test_alert_tick_pushes_an_own_roster_headlinenews_item(push_db):
+    _seed_own_team(push_db)
+    _own_roster_news(push_db, news_id=930, news_type="HeadlineNews", byline="Beat Reporter")
+    sent = []
+    r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                now="2026-09-10T13:00:00", week=2, pull_news=False,
+                                config=_cfg(), poster=lambda u, b, h, t: (sent.append(b) or 200))
+    assert r["pushed"] == 1 and r["withheld_news"] == 0 and sent
+    assert push_db.execute(
+        "SELECT pushed_at FROM alert_ledger WHERE dedup_key = 'news:espn:930'"
+    ).fetchone()["pushed_at"] is not None
+
+
+def test_alert_tick_withholds_a_media_item_without_consuming_it(push_db, tmp_path, monkeypatch):
+    """The item-3.16 gate must route, not consume. A withheld item writes NO ledger
+    row — so widening the gate at the 2026-10-15 review republishes it rather than
+    finding it already marked seen (the item-3.6 publish-then-record lesson: the
+    ledger records a side effect, never an intention)."""
+    monkeypatch.setattr(push_run, "ALERTS_DIR", tmp_path / "alerts")
+    _seed_own_team(push_db)
+    _own_roster_news(push_db, news_id=931, news_type="Media")
+    sent = []
+    r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                now="2026-09-10T13:00:00", week=2, pull_news=False,
+                                config=_cfg(), poster=lambda u, b, h, t: (sent.append(b) or 200))
+    assert sent == [] and r["pushed"] == 0 and r["withheld_news"] == 1
+    assert r["status"] == runs.STATUS_EMPTY  # a withheld-only tick is healthy-empty
+    assert push_db.execute(
+        "SELECT 1 FROM alert_ledger WHERE dedup_key = 'news:espn:931'").fetchone() is None
+
+    # the on-box log IS the one-month review's evidence: the row, its type and its reason.
+    rec = json.loads((tmp_path / "alerts" / "2026-w02.jsonl").read_text().splitlines()[0])
+    assert rec["withheld_news"] == 1
+    row = next(e for e in rec["events"] if e["dedup_key"] == "news:espn:931")
+    assert row["news_type"] == "Media" and "held back from the phone" in row["phone_gate"]
+    assert any("item-3.16" in n for n in rec["notes"])
+
+
+def test_dry_run_still_never_reserves_the_ledger_under_the_gate(push_db):
+    """Re-pin of the headline 3.6 audit fix, now that a second rule decides what is
+    pushable: `--no-push` must stay side-effect-free on the dedup ledger."""
+    _seed_own_team(push_db)
+    _own_roster_news(push_db, news_id=932, news_type="HeadlineNews", byline="Beat Reporter")
+    push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                            now="2026-09-10T13:00:00", week=2, pull_news=False, push=False,
+                            config=_cfg(), poster=lambda *a: 200)
+    assert push_db.execute("SELECT COUNT(*) FROM alert_ledger").fetchone()[0] == 0
+    sent = []
+    rr = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                 now="2026-09-10T13:20:00", week=2, pull_news=False, push=True,
+                                 config=_cfg(), poster=lambda u, b, h, t: (sent.append(b) or 200))
+    assert rr["pushed"] == 1 and sent
+
+
+def test_alert_status_page_describes_the_lane_and_dates_the_review(push_db):
+    """`ziggurat alerts status` is where the lane's rules are described, so it is
+    where the item-3.16 hypothesis and its review date have to be printed — built
+    from the ONE constant the gate itself reads (the 3.8A lesson)."""
+    from ziggurat.core import alerts as alerts_mod
+
+    page = runs.format_status(push_db, kind="alert", today="2026-10-01")
+    assert "no push runs recorded yet." in page      # printed even with no runs
+    assert alerts_mod.format_phone_lane_policy(today="2026-10-01") in page
+    assert "INJURY_OUT" in page and "UNGATED" in page and "review 2026-10-15" in page
+
+    runs.start_run(push_db, kind="alert", season=2026, scope="events",
+                   started_at="2026-09-10T06:00:00")
+    assert "review 2026-10-15" in runs.format_status(push_db, kind="alert", today="2026-10-01")
+    # the BRIEFING page is a different lane and must not carry the alert lane's rules
+    runs.start_run(push_db, kind="brief", season=2026, scope="w2",
+                   started_at="2026-09-10T06:00:00")
+    assert "review 2026-10-15" not in runs.format_status(push_db, kind="brief")
+
+
 def test_alert_log_never_touches_operator_intel():
     """Pin for conftest's autouse `_isolate_alert_log`: under pytest the alert
     log path must sit outside the real `intel/` tree (2026-09-14: 2,564 fixture

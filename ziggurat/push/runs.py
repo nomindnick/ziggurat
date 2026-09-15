@@ -117,7 +117,24 @@ def reap_orphans(conn, *, now, older_than_seconds=ORPHAN_AFTER_SECONDS) -> int:
     return reaped
 
 
-def format_status(conn, *, kind=None) -> str:
+def _phone_lane_policy(*, today=None) -> str:
+    """The alert lane's own rules, from the ONE module that owns them.
+
+    Imported in-body so this operational/no-as-of module keeps no standing
+    dependency on `core`, and so the page and the gate can never disagree about
+    what reaches the phone (the 3.8A lesson: two renderers of one rule diverged and
+    the operator had no way to tell which was lying). A failure to import must
+    never take down the run log the operator came here to read.
+    """
+    try:
+        from ziggurat.core import alerts as alerts_mod
+
+        return alerts_mod.format_phone_lane_policy(today=today)
+    except Exception as exc:  # pragma: no cover - defensive; the page is not the point
+        return f"phone-lane policy unavailable: {type(exc).__name__}: {exc}"
+
+
+def format_status(conn, *, kind=None, today=None) -> str:
     clause = "" if kind is None else " WHERE kind = :kind"
     params = {} if kind is None else {"kind": kind}
     rows = conn.execute(
@@ -126,8 +143,11 @@ def format_status(conn, *, kind=None) -> str:
         f"ORDER BY run_id DESC LIMIT 15",
         params,
     ).fetchall()
+    # The alert page states the lane's rules whether or not any tick has run — a box
+    # with no runs is exactly where "what would even reach my phone?" gets asked.
+    policy = [""] + _phone_lane_policy(today=today).splitlines() if kind == "alert" else []
     if not rows:
-        return "no push runs recorded yet."
+        return "\n".join(["no push runs recorded yet."] + policy)
     out = ["last push runs (newest first):"]
     for r in rows:
         line = f"  [{r['kind']}] {r['started_at']} -> {r['status']}"
@@ -140,7 +160,7 @@ def format_status(conn, *, kind=None) -> str:
         if r["error"]:
             line += f"  ERROR={r['error'][:120]}"
         out.append(line)
-    return "\n".join(out)
+    return "\n".join(out + policy)
 
 
 # ------------------------------------------------------------------ alert_ledger

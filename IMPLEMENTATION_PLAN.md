@@ -4028,7 +4028,130 @@ pts/wk"* — a statement about re-ranking a frozen board, not about information.
 pinned by test as ungated, the one-month review date is journaled, and a week's
 ledger shows the push count in the expected range.
 **Update:**
-> _[To be completed]_
+> **Built & tested 2026-09-15.** The gate is one function in `core/alerts.py`
+> (`news_phone_gate`) wired at ONE seam — `_news_events` sets
+> `phone_worthy = is_own and gate_reason is None` — plus the disclosures that make
+> it falsifiable. No migration, no new table, nothing in `push/` decides anything:
+> the orchestration still pushes exactly `phone_worthy`, so the ledger semantics
+> (publish-then-record, item 3.6's headline lesson) are byte-untouched and a
+> `--no-push` run still reserves nothing (re-pinned, and re-measured live below).
+>
+> **It is an ALLOWLIST** — `NEWS_PHONE_TYPES = {"HeadlineNews"}` — not a
+> `Media`/`Story` denylist. An unrecognised or renamed ESPN type is CONTEXT until
+> it opts in, the same safe-by-default discipline `phone_worthy` already applies to
+> a new event KIND. The cost of that default is a lane that could go quiet if ESPN
+> renames the type, which is exactly why no withholding is silent (below).
+> **The gate reads TYPE ALONE.** The byline is recorded in every withheld row's
+> reason and never conditioned on, because the one-month review's question is *"did
+> we ever withhold a BYLINED `Media` row?"* — a gate that also tested the byline
+> would make its own review circular. Pinned:
+> `test_news_phone_gate_reads_only_the_type`.
+>
+> **Nothing is dropped, only routed, and the routing is visible on three surfaces.**
+> A withheld event stays on the board with a `phone_gate` reason (`AlertEvent` gains
+> `news_type` + `phone_gate`); `format_alert_line` renders that reason, so the
+> Wednesday briefing and the on-box log show the item AND the fact that it was
+> routed; `AlertBoard.notes` carries the count, the type breakdown and the dated
+> label on a tick that withheld something — and **only** on such a tick (a banner on
+> every 20-minute tick is how the one that matters gets ignored;
+> `test_no_gate_note_when_nothing_was_withheld`). The alert log row now carries
+> `news_type`/`phone_gate` per event plus a `withheld_news` count, because that log
+> **is** the data the 2026-10-15 review will read: without it the review could count
+> only what the gate let through, never what it cost.
+>
+> **`INJURY_OUT` is UNGATED, and the pin proves it rather than assuming it.**
+> `test_injury_out_is_never_touched_by_the_news_gate` monkeypatches
+> `NEWS_PHONE_TYPES` to the EMPTY set — gating every article there is — and asserts
+> the injury arm still fires. A test that only checked the shipped allowlist could
+> not distinguish an ungated arm from one that merely happens to be allowed (the
+> 3.8A lesson: a mechanism is not pinned by a test that cannot tell it from the
+> mechanism it replaced). Mutation-verified both ways: widening the allowlist to
+> `{HeadlineNews, Media, Story}` fails 5 tests; unwiring `gate_reason` from
+> `phone_worthy` fails 4; deleting the status page's policy footer fails 1.
+>
+> **The label and the review date are printed where the lane's rules are
+> described.** `format_phone_lane_policy()` is the one text, and
+> `push/runs.format_status(kind="alert")` — i.e. `ziggurat alerts status` —
+> renders it verbatim through an in-body import, so the page and the gate cannot
+> drift (3.8A again: two renderers of one rule disagreed and the operator could not
+> tell which was lying). It prints on a box with **no runs at all**, which is
+> exactly where "what would even reach my phone?" gets asked. The page carries a
+> DISPLAY clock (never a data gate) and flips `review 2026-10-15 (in N day(s))` to
+> `REVIEW DUE ... (OVERDUE by N day(s))` on the day — a review date nobody is
+> reminded of is a review date that does not exist, which is the failure mode a
+> journal line alone has. **E18's WATCH gate is NOT built**, per the item: the
+> 0.018–0.053 house pts/wk flip margin ships as
+> `WAIVER_FLIP_MARGIN_DISCLOSURE`, printed on that same page, wired to nothing, and
+> saying so in the same breath as the number — together with the restatement of
+> E18's false oracle-ceiling claim.
+>
+> **Measured on the live `alert_ledger` (read-only replay of the SHIPPED
+> `news_phone_gate` over every pushed NEWS row, joined to `player_news`):**
+>
+> | window | phone pushes | NEWS → kept | INJURY_OUT | total after |
+> |---|---|---|---|---|
+> | 2026-09-01..09-13 (the item's 13-day Week-1 window) | 39 = 37 NEWS + 2 INJ | **37 → 9** (76% cut) | 2 → 2 | **39 → 11** |
+> | 2026-09-01..09-15 | 47 = 45 + 2 | 45 → 10 (78%) | 2 → 2 | 47 → 12 |
+> | whole ledger (2026-07-25..09-15) | 102 = 96 + 6 | 96 → 22 (77%) | 6 → 6 | 102 → 28 |
+>
+> **The item predicted 35 → 9; the re-measurement is 37 → 9.** The KEPT count is
+> the item's number exactly; the denominator moved because the edge program read
+> that window partway through its final day, and **both rows that landed after that
+> read were `Media`** — i.e. the two-row gap is entirely on the dropped side. The
+> type split in that window is 9 `HeadlineNews` (9/9 bylined, median body 174
+> chars) / 16 `Media` (**0/16** bylined, median 59) / 12 `Story` (12/12 bylined,
+> median 110); the separation the item claimed is clean in the data as it stands
+> today. **The review's counter-evidence is already non-zero and is recorded here
+> rather than discovered in a month: 12 of the 28 withheld rows in that window carry
+> a byline** (all 12 `Story`, 0 `Media`) — those are the "Story/Media items with
+> watch value" the item said it would drop, and they are what the 2026-10-15 review
+> has to price.
+>
+> **Live composition re-checked** (`ziggurat alerts run --no-push --no-news
+> --team 10` against a scratch COPY of the live DB, never the live file): 145
+> candidate events, `new=0` (everything already deduped — the healthy steady
+> state), **`withheld_news=15` (7 `Media` + 8 `Story`)**, the note rendered in full,
+> all **3** `INJURY_OUT` rows still `phone_worthy` and the **1** own-roster
+> `HeadlineNews` still `phone_worthy` (the remaining 126 NEWS rows are not-owned and
+> were already withheld by the 2026-08-05 action-only rule, correctly carrying NO
+> `phone_gate` — the right rule gets the blame), and the ledger **unchanged at 102
+> rows**: a `--no-push` run still reserves nothing.
+>
+> **The "nothing is lost" claim is verified on the rendered surface, not asserted.**
+> Composing a real `format_briefing` over a board holding one withheld bylineless
+> `Media` row: the headline appears in the markdown, the routing reason appears
+> under it, and the gate note appears in `## Notes` — with **zero** edits to
+> `core/briefing.py`, because it already renders every board event and every board
+> note.
+>
+> **Deliberately NOT done:** no CLI change (the policy renders through
+> `push/runs.format_status`, so Rule 3 holds and the fence stayed shut); no
+> `WATCH`-gate wiring; no byline condition; no change to `core/briefing.py` (it
+> already renders every board event and every board note, so withheld items reach
+> the Wednesday briefing with no edit); no journal write (`intel/` is the operator's
+> tree — the review date is instead self-announcing on the status page, which is
+> strictly stronger than a journal line).
+>
+> **Suite: 3,113 passed, 16 skipped, 2 failed — neither failure is this item's, and
+> both are named rather than rounded away.** `+13` tests (3,118 → 3,131 collected):
+> 9 in `test_alerts.py` (21 in the file), 4 in `test_push_run.py` (22). (1)
+> `test_nfl_fp_weekly::test_a_pull_with_the_authority_on_labels_from_the_page` is
+> **pre-existing and reproduced at HEAD with this item's changes stashed** — its
+> `fetch_week_page` stub is not intercepting, so it reads the LIVE FantasyPros page,
+> which now says week 2 against the fixture's week 1 (the `last_updated_ts` in the
+> failure text changes between runs, which is the tell). It is a real defect in a
+> module this item does not touch; recorded here, not fixed here. (2)
+> `test_draft_webapp::test_concurrent_picks_serialize_under_the_lock` is a timing
+> flake: it passed in this item's first full run, passes in isolation (1.76 s), and
+> failed only in a run sharing the box with two other agents' full suites at 100%
+> CPU. Six `ruff` findings on the touched files are all pre-existing (verified the
+> same way, by stashing); this item adds none.
+> **Standing lesson this item paid for: a filter that narrows a lane the operator
+> chose owes a review date that announces itself, and the evidence its own review
+> will need — collected from the day it ships, not from the day someone remembers
+> to look.** The alert log carries `news_type`/`phone_gate` for exactly that reason,
+> and the first counter-example (12 bylined `Story` rows withheld) is written down
+> above before anyone can claim the gate was obviously right.
 
 ### 3.17 [Fix] Week-1 cadence tool gaps — four small operator-facing defects (added 2026-09-15, from the Week-1 Monday retro)
 **Why it exists.** Four gaps the first live week produced, none of them worth

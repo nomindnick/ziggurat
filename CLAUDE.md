@@ -699,7 +699,15 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   layer vs the 4x/day sync); free-agent/context news is computed for the
   briefing + alert log but never pushed — the operator is running an
   experiment, not following football, and pre-draft "rosterable" matched the
-  entire NFL (46 news pushes in one evening, measured). New permanent `ziggurat/push/` package is the **egress choke point**:
+  entire NFL (46 news pushes in one evening, measured).
+  **AMENDED 2026-09-15 by item 3.16: own-roster is no longer sufficient for the
+  NEWS arm** — it must also carry ESPN `news_type` in the allowlist
+  `{HeadlineNews}` (`alerts.news_phone_gate`, a LABELLED HYPOTHESIS with a
+  self-announcing **review date of 2026-10-15**, printed on `ziggurat alerts
+  status`), which cuts the Week-1 window from 37 own-roster NEWS pushes to **9**
+  while every withheld row still reaches the briefing and the alert log with its
+  reason attached; **`INJURY_OUT` is UNGATED by it and always pushes**, pinned by
+  a test that empties the allowlist and asserts the injury arm still fires. New permanent `ziggurat/push/` package is the **egress choke point**:
   the Rule-5 **outbound scrub** (a data-driven denylist of this league's other-team
   names, checked before any send — the guarantee that makes a public-by-obscurity
   topic safe), the run-log/dedup helpers, and the orchestration. `marginal.handcuff_links()`
