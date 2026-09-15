@@ -114,9 +114,13 @@ def collect_drops():
       something to say about an ``ok`` run (an absent week that will be
       retried, a ``--force`` verification result). ``nfl_ingest_runs`` has no
       note column; ``refresh.run_ingest`` appends these to the run's reason.
+    * ``refused`` / ``refusals`` — :func:`note_refused`'s row count and one
+      sentence per fence that fired. A FOURTH loss channel, deliberately OFF
+      the drop ceiling; see that function for why.
     """
     tally = {"dropped": 0, "total": 0, "filtered": 0, "incomplete": 0,
-             "collapsed": 0, "duplicated": 0, "reasons": {}, "notes": []}
+             "collapsed": 0, "duplicated": 0, "refused": 0, "refusals": [],
+             "reasons": {}, "notes": []}
     token = _drop_tally.set(tally)
     try:
         yield tally
@@ -170,6 +174,41 @@ def note_drops(
             "%s: %s %d/%d rows (%s)",
             source, "filtered" if by_design else "dropped", dropped, total, why,
         )
+
+
+def note_refused(source: str, refused: int, total: int, *, why: str) -> None:
+    """Record rows a COLLAPSE FENCE inside the ingester declined to store.
+
+    A FOURTH channel, and the three that already exist are all wrong for it:
+
+    * NOT ``note_drops(by_design=False)`` — that feeds ``run_ingest``'s 20% drop
+      ceiling, whose sentence is "an unresolvable key (new team abbr? missing
+      crosswalk?) ... rather than a few odd rows". A fence refusal is the
+      OPPOSITE diagnosis: the ingester understood the rows perfectly and decided
+      they would make the stored picture worse. Measured warrant (item 3.14a,
+      2026-09-15): the ``fp_weekly_ecr`` per-page fence would have refused 291 of
+      356 rows on a healthy live board, i.e. 82% — the ceiling would have called
+      a working fence a failed pull.
+    * NOT ``note_drops(by_design=True)`` — ``by_design`` means *the league's rules
+      make this filter correct* (the IDP pages nobody here can start), and those
+      rows are never coming back. A refusal is a JUDGEMENT about one capture that
+      a healthier capture reverses; calling it by-design would let a fence firing
+      on every page report ``ok``.
+    * NOT ``note_incomplete`` — those rows ARE in the table.
+
+    The run outcome it produces is ``partial``: something landed, something was
+    refused, and the run log says which. A refusal that leaves NOTHING to write
+    is ``failed`` (item 3.1b — "wrote 0 rows" is never ``ok``).
+
+    ``refused`` may legitimately be 0 with a ``why`` — a whole PAGE that vanished
+    from a capture has no rows to refuse and is still the fence firing, which is
+    why ``run_ingest`` reads the SENTENCES rather than the count.
+    """
+    tally = _drop_tally.get()
+    if tally is not None:
+        tally["refused"] += int(refused)
+        tally.setdefault("refusals", []).append(str(why))
+    logger.warning("%s: REFUSED %d/%d rows (%s)", source, refused, total, why)
 
 
 def note_incomplete(source: str, count: int, total: int, *, why: str) -> None:

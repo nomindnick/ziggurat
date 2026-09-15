@@ -587,6 +587,59 @@ def test_the_accessor_refuses_an_unknown_view(db):
 
 
 # --------------------------------------------------------------- the floor
+#
+# THE UNIT OF REFUSAL IS THE PAGE, AND THE BASELINE IS THE SAME WEEK (item
+# 3.14a). Every test below states which of those two it pins, because the live
+# defect on 2026-09-15 was BOTH at once: a whole-board floor compared a week-2
+# board against a week-1 capture and refused a complete `dst` page — the page
+# item 3.14 had made `ziggurat stream`'s primary D/ST ranker that same morning.
+#
+# `WK2_A`/`WK2_B` are two days inside the stubbed week-2 window, so a capture on
+# each is two captures of ONE week — the only comparison the fence makes.
+WK2_A, WK2_B = "2026-09-15", "2026-09-16"
+#: Inside week 1 of the same stubbed calendar (09-09..09-14).
+WK1_DAY = "2026-09-14"
+
+#: The live shapes measured on 2026-09-15, 07:30 PT — the defect's own numbers.
+#: `dst` is COMPLETE (32 of 32 NFL teams) and `k` is whole while the skill pages
+#: sit at roughly half the mature board.
+LIVE_WK2_TUESDAY = {"dst": 32, "k": 33, "qb": 33,
+                    "ppr-rb": 88, "ppr-te": 54, "ppr-wr": 116}
+#: The capture stored the previous day (week 1, the mature board).
+LIVE_WK1_MONDAY = {"dst": 32, "k": 36, "qb": 82,
+                   "ppr-rb": 146, "ppr-te": 147, "ppr-wr": 240}
+#: What each live page does against a SAME-WEEK baseline of `LIVE_WK1_MONDAY`.
+LIVE_SURVIVORS = {"dst", "k"}                 # 32/32 and 33/36 clear 70%
+LIVE_REFUSED = {"qb", "ppr-rb", "ppr-te", "ppr-wr"}
+
+
+def _shaped(board, counts, scrape):
+    """A board carrying exactly ``counts[page]`` rows per page, dated ``scrape``.
+
+    Rows are cloned from the fixture's own per-page blocks, so every dtype
+    upstream actually serves (an int64 id, all-NaN float columns where TEXT is
+    declared) is still exercised; only the id and the scrape day are rewritten.
+    """
+    frames, next_id = [], 500000
+    for page, n in counts.items():
+        src = board[board["page"] == page]
+        assert not src.empty, page
+        reps = -(-n // len(src))
+        block = pd.concat([src] * reps, ignore_index=True).head(n).copy()
+        block["fantasypros_id"] = list(range(next_id, next_id + n))
+        next_id += n
+        frames.append(block)
+    out = pd.concat(frames, ignore_index=True)
+    out["scrape_date"] = scrape
+    return out
+
+
+def _pages_at(db, day):
+    """``{page: rows}`` stored under one ``retrieved_as_of``."""
+    return {str(r[0]): int(r[1]) for r in db.execute(
+        "SELECT page, COUNT(*) FROM fp_weekly_ecr WHERE retrieved_as_of = ? GROUP BY page",
+        (day,),
+    )}
 
 
 def test_a_capture_with_no_consensus_at_all_is_refused_on_the_first_pull(db, board):
@@ -594,63 +647,195 @@ def test_a_capture_with_no_consensus_at_all_is_refused_on_the_first_pull(db, boa
     present, `ecr` empty. This is the `players.CrosswalkCollapse` shape — the one
     a row COUNT cannot see — and it was measured live on `players` in item 3.1b:
     every id column emptied, every row still there, every crosswalk to zero, the
-    run logged `ok`."""
+    run logged `ok`.
+
+    Per page now, so the arm fires page by page; here every page is empty, so no
+    page survives and the WHOLE capture fails rather than writing a healthy zero
+    (item 3.1b — "wrote 0 rows" is never ok)."""
     _stub_schedule(db)
     emptied = board.copy()
     emptied["ecr"] = None
-    with pytest.raises(fp_weekly.WeeklyEcrCollapse, match="NOT ONE"):
+    with pytest.raises(fp_weekly.WeeklyEcrCollapse, match="NOT ONE") as exc:
         _ingest(db, emptied)
+    assert "NO PAGE survived" in str(exc.value)
     assert db.execute("SELECT COUNT(*) FROM fp_weekly_ecr").fetchone()[0] == 0
 
 
-def test_a_truncated_capture_is_refused_before_the_write(db, board):
-    """THE TOTAL ARM. Nothing is deleted here — `select_as_of` resolves the newest
-    retrieved version per key, so a thin scrape shadows a good one merely by
-    arriving later. Refused BEFORE the write, and the assertion that matters is
-    that the stored board is untouched."""
+def test_one_empty_page_is_refused_while_its_siblings_land(db, board):
+    """THE ABSOLUTE ARM, PER PAGE. A page whose consensus is gone is refused on
+    its own; the pages that still carry one are written, because they are
+    published independently and there is no reason for them to fail together."""
     _stub_schedule(db)
-    _ingest(db, board, day="2026-09-15")
-    thin = board.head(6)                       # 6 of 36 league rows = 17%
-    with pytest.raises(fp_weekly.WeeklyEcrCollapse, match="truncated or half-published"):
-        _ingest(db, _restamp(thin, "2026-09-16"), day="2026-09-16")
+    gutted = board.copy()
+    gutted.loc[gutted["page"] == "ppr-wr", "ecr"] = None
+
+    written, tally = _ingest(db, gutted, day=WK2_A)
+    assert written == 30                             # 36 - the 6 ppr-wr rows
+    assert set(_pages_at(db, WK2_A)) == fp_weekly.LEAGUE_PAGES - {"ppr-wr"}
+    assert tally["refused"] == 6 and len(tally["refusals"]) == 1
+    assert "'ppr-wr'" in tally["refusals"][0] and "NOT ONE" in tally["refusals"][0]
+
+
+def test_a_truncated_same_week_re_scrape_is_refused_before_the_write(db, board):
+    """THE COUNT ARM, and the case the fence exists for: a re-scrape of a week
+    ALREADY STORED that came back truncated. Nothing is deleted — `select_as_of`
+    resolves the newest retrieved version per key, so a thin capture of the same
+    page and week shadows a good one merely by arriving later.
+
+    Every page is cut to 1 of 6 (17%), so no page survives and the whole capture
+    raises; the stored board must be untouched."""
+    _stub_schedule(db)
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
+    thin = pd.concat([g.head(1) for _, g in board.groupby("page", sort=False)],
+                     ignore_index=True)
+    with pytest.raises(fp_weekly.WeeklyEcrCollapse, match="truncated re-scrape") as exc:
+        _ingest(db, _restamp(thin, WK2_B), day=WK2_B)
+    assert "NO PAGE survived" in str(exc.value)
 
     assert db.execute("SELECT COUNT(*) FROM fp_weekly_ecr").fetchone()[0] == 36
     assert {r[0] for r in db.execute(
-        "SELECT DISTINCT retrieved_as_of FROM fp_weekly_ecr")} == {"2026-09-15"}
+        "SELECT DISTINCT retrieved_as_of FROM fp_weekly_ecr")} == {WK2_A}
 
 
-def test_a_page_that_vanished_is_refused_even_when_the_total_holds(db, board):
-    """THE PER-PAGE ARM, and the reason it exists separately: a scrape that
-    published only some of its pages is invisible in the TOTAL as soon as the
-    surviving pages grew. Here the `dst` page disappears and the `qb` page
-    doubles, so the row count is FINE and the board is broken."""
+def test_one_truncated_page_is_refused_while_the_rest_of_the_week_lands(db, board):
+    """THE COUNT ARM, PER PAGE. Only `ppr-wr` is truncated; the other five pages
+    are written, and the stored `ppr-wr` rows keep their own capture day."""
     _stub_schedule(db)
-    _ingest(db, board, day="2026-09-15")
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
+    thin = pd.concat(
+        [g.head(1) if page == "ppr-wr" else g for page, g in board.groupby("page", sort=False)],
+        ignore_index=True,
+    )
+    written, tally = _ingest(db, _restamp(thin, WK2_B), day=WK2_B)
+
+    assert written == 30
+    assert set(_pages_at(db, WK2_B)) == fp_weekly.LEAGUE_PAGES - {"ppr-wr"}
+    assert _pages_at(db, WK2_A)["ppr-wr"] == 6
+    assert tally["refused"] == 1
+    assert "'ppr-wr'" in tally["refusals"][0]
+
+
+def test_a_page_that_vanished_is_reported_even_when_the_total_holds(db, board):
+    """THE VANISHED-PAGE ARM, and the reason it exists separately: a scrape that
+    published only some of its pages is invisible in the TOTAL as soon as the
+    surviving pages grew. Here `dst` disappears and `qb` doubles, so the row
+    count is FINE and the board is broken.
+
+    Per page, this is no longer a refusal of anything — there are no `dst` rows
+    to refuse and the stored ones cannot be shadowed by rows that do not exist —
+    so the surviving pages are WRITTEN and the absence is REPORTED, which is what
+    makes the run `partial` and names `dst`."""
+    _stub_schedule(db)
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
 
     without_dst = board[board["page"] != "dst"].copy()
     padded = board[board["page"] == "qb"].copy()
     padded["fantasypros_id"] = padded["fantasypros_id"] + 900000
     partial = pd.concat([without_dst, padded], ignore_index=True)
-    partial = _restamp(partial, "2026-09-16")
+    partial = _restamp(partial, WK2_B)
     assert len(partial[partial["page"].isin(fp_weekly.LEAGUE_PAGES)]) >= 36
 
-    with pytest.raises(fp_weekly.WeeklyEcrCollapse, match="page 'dst'"):
-        _ingest(db, partial, day="2026-09-16")
-    assert db.execute("SELECT COUNT(*) FROM fp_weekly_ecr").fetchone()[0] == 36
+    written, tally = _ingest(db, partial, day=WK2_B)
+    assert written == 36                         # 5 pages, qb doubled
+    assert "dst" not in _pages_at(db, WK2_B)
+    assert _pages_at(db, WK2_A)["dst"] == 6      # the stored page is untouched
+    assert tally["refused"] == 0                 # nothing to refuse...
+    assert len(tally["refusals"]) == 1           # ...and still a fence firing
+    assert "'dst'" in tally["refusals"][0] and "ABSENT" in tally["refusals"][0]
+
+    # AND IT IS A TRANSITION, NOT A LATCH (the item-3.8A lesson). The next
+    # capture's baseline is the one WITHOUT `dst`, so the same headline does not
+    # re-print every day for the rest of the week — which is how the report that
+    # matters gets skimmed.
+    again = _restamp(partial, "2026-09-17")      # still week 2
+    _, tally2 = _ingest(db, again, day="2026-09-17")
+    assert tally2["refusals"] == []
 
 
-def test_an_emptied_capture_is_refused_although_the_row_count_is_perfect(db, board):
-    """THE VALUED-SHARE ARM. Every key present, every consensus gone. The total
-    and per-page arms both pass; only a share check sees it."""
+def test_an_emptied_page_is_refused_although_its_row_count_is_perfect(db, board):
+    """THE VALUED-SHARE ARM. Every key present, most of the consensus gone. The
+    count arm passes (6 of 6 rows) and only a share check sees it."""
     _stub_schedule(db)
-    _ingest(db, board, day="2026-09-15")
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
 
-    gutted = _restamp(board.copy(), "2026-09-16")
-    gutted.loc[gutted.index[3:], "ecr"] = None   # 3 of 36 keep a value
-    with pytest.raises(fp_weekly.WeeklyEcrCollapse, match="which is exactly why"):
-        _ingest(db, gutted, day="2026-09-16")
+    gutted = _restamp(board.copy(), WK2_B)
+    qb = gutted.index[gutted["page"] == "qb"]
+    gutted.loc[qb[1:], "ecr"] = None             # 1 of 6 qb rows keeps a value
+    written, tally = _ingest(db, gutted, day=WK2_B)
+
+    assert written == 30
+    assert "qb" not in _pages_at(db, WK2_B)
+    assert tally["refused"] == 6
+    assert "which is exactly why" in tally["refusals"][0]
     assert db.execute(
-        "SELECT COUNT(*) FROM fp_weekly_ecr WHERE ecr IS NOT NULL").fetchone()[0] == 36
+        "SELECT COUNT(*) FROM fp_weekly_ecr WHERE page = 'qb' AND ecr IS NOT NULL"
+    ).fetchone()[0] == 6
+
+
+def test_a_complete_page_is_never_refused_because_a_sibling_is_thin(db, board):
+    """THE HEADLINE PIN, on the live 2026-09-15 shape, SAME WEEK so the floor
+    actually bites: `dst` is 32 of 32 NFL teams and lands, while `ppr-wr` at
+    116 against 240 is refused. The pre-3.14a whole-board floor refused all six
+    pages here — including the one `ziggurat stream` ranks D/ST with."""
+    _stub_schedule(db)
+    _ingest(db, _shaped(board, LIVE_WK1_MONDAY, WK2_A), day=WK2_A)
+
+    written, tally = _ingest(db, _shaped(board, LIVE_WK2_TUESDAY, WK2_B), day=WK2_B)
+
+    assert set(_pages_at(db, WK2_B)) == LIVE_SURVIVORS
+    assert _pages_at(db, WK2_B) == {"dst": 32, "k": 33}
+    assert written == 65
+    assert tally["refused"] == sum(LIVE_WK2_TUESDAY[p] for p in LIVE_REFUSED) == 291
+    assert {p for p in LIVE_REFUSED if f"'{p}'" in "; ".join(tally["refusals"])} == LIVE_REFUSED
+    assert not [p for p in LIVE_SURVIVORS if f"'{p}'" in "; ".join(tally["refusals"])]
+    # And the refused pages' stored rows are exactly as they were.
+    assert _pages_at(db, WK2_A) == LIVE_WK1_MONDAY
+
+
+def test_a_thin_board_for_a_NEW_week_is_never_refused(db, board):
+    """THE CROSS-WEEK DECISION, pinned as behaviour rather than left in prose.
+
+    This is the live 2026-09-15 pull exactly: a week-2 board against the week-1
+    capture stored the day before. The key `select_as_of` resolves on is
+    `(fantasypros_id, page, scrape_date)` and `nfl_week` is a function of
+    `scrape_date`, so the two captures occupy DISJOINT key spaces — a week-2 row
+    cannot shadow a week-1 row. Refusing here protects nothing and loses a
+    perishable capture that exists nowhere else once upstream rewrites the file.
+    Every page lands, including the four that a same-week baseline would refuse
+    (see the test above, which uses the identical numbers)."""
+    _stub_schedule(db)
+    _ingest(db, _shaped(board, LIVE_WK1_MONDAY, WK1_DAY), day=WK1_DAY)
+    assert {r[0] for r in db.execute(
+        "SELECT DISTINCT nfl_week FROM fp_weekly_ecr")} == {1}
+
+    written, tally = _ingest(db, _shaped(board, LIVE_WK2_TUESDAY, WK2_A), day=WK2_A)
+
+    assert written == sum(LIVE_WK2_TUESDAY.values()) == 356
+    assert _pages_at(db, WK2_A) == LIVE_WK2_TUESDAY
+    assert tally["refused"] == 0 and tally["refusals"] == []
+    assert _pages_at(db, WK1_DAY) == LIVE_WK1_MONDAY
+    assert {r[0] for r in db.execute(
+        "SELECT DISTINCT nfl_week FROM fp_weekly_ecr")} == {1, 2}
+
+
+def test_the_baseline_is_one_upstream_FILE_not_a_day_of_forced_pulls(db, board):
+    """Two forced pulls on ONE day can land two different `scrape_date`s under a
+    single `retrieved_as_of` — the PK carries both, so neither replaces the other
+    — and a Tuesday morning pull plus an afternoon one to catch upstream's
+    fill-in is exactly the habit item 3.14a's own finding invites.
+
+    Summing them would make the baseline 72 rows instead of 36 and refuse the
+    next day's perfectly healthy 36-row board (36 < floor 50). The baseline is
+    the newest `scrape_date` within the newest capture day: ONE file."""
+    _stub_schedule(db)
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
+    _ingest(db, _restamp(board, WK2_B), day=WK2_A)      # same DAY, second file
+    assert len(_pages_at(db, WK2_A)) == 6
+    assert sum(_pages_at(db, WK2_A).values()) == 72
+
+    written, tally = _ingest(db, _restamp(board, "2026-09-17"), day="2026-09-17")
+    assert written == 36
+    assert tally["refusals"] == []
 
 
 def test_a_healthy_bye_week_board_passes_the_floor(db, board):
@@ -658,16 +843,21 @@ def test_a_healthy_bye_week_board_passes_the_floor(db, board):
     ranks the players who PLAY, and 2026 runs up to six teams on bye, so a
     healthy board legitimately shrinks ~19% week to week. A floor tight enough to
     catch that would fire on an ordinary Sunday — and a guard that cries wolf is
-    how the report that matters gets ignored."""
+    how the report that matters gets ignored.
+
+    Both captures sit in ONE week, so the floor is genuinely exercised: under a
+    cross-week pair there would be no baseline and the test would pass for a
+    reason that has nothing to do with the number."""
     _stub_schedule(db)
-    _ingest(db, board, day="2026-09-15")
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
 
     bye = pd.concat(
         [g.head(5) for _, g in board.groupby("page", sort=False)],   # 5 of 6 = 83%
         ignore_index=True,
     )
-    written, _ = _ingest(db, _restamp(bye, "2026-09-16"), day="2026-09-16")
+    written, tally = _ingest(db, _restamp(bye, WK2_B), day=WK2_B)
     assert written == 30
+    assert tally["refusals"] == []
 
 
 def test_the_floor_is_scoped_per_season_so_a_new_season_is_not_a_collapse(db, board):
@@ -789,6 +979,84 @@ def test_the_orchestrator_lands_the_board_and_the_idp_filter_is_not_a_drop(db, m
     assert "week label from 'schedules'" in (logged["error"] or "")
     assert db.execute(
         "SELECT DISTINCT nfl_week FROM fp_weekly_ecr").fetchone()[0] == 2
+
+
+def _run_board(db, monkeypatch, frame, *, day):
+    """One `run_ingest` of `frame` through the REAL orchestrator, offline."""
+    monkeypatch.setattr(fp_weekly, "week_page_enabled", lambda environ=None: False)
+
+    def _never(**kw):                          # pragma: no cover - must not run
+        raise AssertionError("the FantasyPros page was fetched from inside the suite")
+
+    monkeypatch.setattr(fp_weekly, "fetch_week_page", _never)
+    monkeypatch.setattr(fp_weekly, "fetch_fp_weekly",
+                        lambda **kw: frame.to_csv(index=False).encode("utf-8"))
+    return refresh.run_ingest(
+        db, sources=(refresh.SOURCES_BY_NAME["fp_weekly_ecr"],), season=2026,
+        retrieved_as_of=day, today=day, force=True,
+    )
+
+
+def test_a_refused_page_makes_the_run_partial_and_never_trips_the_drop_ceiling(
+    db, board, monkeypatch
+):
+    """THE STATUS PIN (item 3.14a), on the live 2026-09-15 shape under a SAME-WEEK
+    baseline: 291 of 356 rows refused = 82%, which is four times `run_ingest`'s
+    20% drop ceiling.
+
+    A fence refusal must NOT reach that ceiling. The ceiling's own sentence
+    diagnoses "an unresolvable key (new team abbr? missing crosswalk?)" — the
+    opposite of a fence that understood the rows perfectly and judged them — and
+    a working fence reported as `failed` is how the word stops meaning anything.
+    The verdict is `partial`, `dropped` stays 0, and the reason NAMES the pages so
+    the operator can tell which half of the board landed."""
+    _stub_schedule(db)
+    _ingest(db, _shaped(board, LIVE_WK1_MONDAY, WK2_A), day=WK2_A)
+
+    summaries = _run_board(db, monkeypatch, _shaped(board, LIVE_WK2_TUESDAY, WK2_B),
+                           day=WK2_B)
+    assert [s["status"] for s in summaries] == [refresh.STATUS_PARTIAL]
+    assert summaries[0]["rows"] == 65 and summaries[0]["dropped"] == 0
+    assert not refresh.run_failed(summaries)
+
+    logged = db.execute(
+        "SELECT status, rows_written, rows_dropped, error FROM nfl_ingest_runs "
+        "WHERE source = 'fp_weekly_ecr' ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+    assert logged["status"] == refresh.STATUS_PARTIAL
+    assert logged["rows_written"] == 65 and logged["rows_dropped"] == 0
+    assert "REFUSED 4 page(s)" in logged["error"]
+    for page in LIVE_REFUSED:
+        assert f"'{page}'" in logged["error"]
+
+    # The run SUMMARY LINE names them too — that is what a systemd unit logs.
+    line = refresh.format_run(summaries)
+    assert "REFUSED" in line and "ppr-wr" in line
+    # ...and so does `ingest status`, which is where the operator looks the next
+    # morning. `partial` is not a PROBLEM status, so without its own label the
+    # refusal would sit inside a report that calls the source fine.
+    report = refresh.format_status(db, season=2026, today=WK2_B)
+    assert "REFUSED" in report and "fp_weekly_ecr" in report
+
+
+def test_a_capture_whose_every_page_is_refused_is_failed_not_a_silent_zero(
+    db, board, monkeypatch
+):
+    """"Wrote 0 rows" is never `ok` (item 3.1b), and it is not `empty` either —
+    `empty` means upstream returned nothing, which is a completely different
+    investigation. A fence that refused everything is a FAILED run naming each
+    page, and it must not anchor the interval gate."""
+    _stub_schedule(db)
+    _ingest(db, _restamp(board, WK2_A), day=WK2_A)
+    thin = pd.concat([g.head(1) for _, g in board.groupby("page", sort=False)],
+                     ignore_index=True)
+
+    summaries = _run_board(db, monkeypatch, _restamp(thin, WK2_B), day=WK2_B)
+    assert [s["status"] for s in summaries] == [refresh.STATUS_FAILED]
+    assert refresh.run_failed(summaries)
+    assert "NO PAGE survived" in summaries[0]["reason"]
+    assert db.execute("SELECT COUNT(*) FROM fp_weekly_ecr").fetchone()[0] == 36
+    assert refresh.STATUS_FAILED not in refresh._ANCHOR_STATUSES
 
 
 def test_the_preseason_is_skipped_because_no_weekly_board_exists_yet(db):

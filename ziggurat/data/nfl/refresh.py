@@ -183,8 +183,9 @@ _ANCHOR_STATUSES = (STATUS_OK, STATUS_PARTIAL)
 #: (measured 3.1b audit: 67 written / 19,354 dropped reported `fresh`).
 #:
 #: What counts toward it is DROPPED + COLLAPSED (item 3.2c, F-G) — see
-#: ``run_ingest``. ``filtered`` (by-design) and ``duplicated`` (byte-identical
-#: same-key rows) deliberately do not.
+#: ``run_ingest``. ``filtered`` (by-design), ``duplicated`` (byte-identical
+#: same-key rows) and ``refused`` (item 3.14a: a collapse fence inside the
+#: ingester declined to store them) deliberately do not.
 _MAX_DROP_FRACTION = 0.2
 
 # Season phases, derived from the schedules table (never from the wall clock and
@@ -1013,7 +1014,10 @@ SOURCES: tuple[SourceSpec, ...] = (
               "as an explicit week authority is behind ZIGGURAT_FP_WEEK_PAGE, DEFAULT "
               "OFF pending operator decision D2(b). Fenced by "
               "fp_weekly.WeeklyEcrCollapse (floor BEFORE the write, incl. a vanished "
-              "PAGE and the emptied-values case a row count cannot see). INSEASON only: "
+              "PAGE and the emptied-values case a row count cannot see) — PER PAGE and "
+              "PER WEEK since item 3.14a, so a complete page still lands when a sibling "
+              "is thin and a refusal makes the run `partial` with the pages named, never "
+              "`ok` and never a whole-board `failed`. INSEASON only: "
               "a weekly board is not published between seasons. BEFORE the two archive "
               "pulls, like every other perishable source. Rule 2: r2p_pts and "
               "start_sit_grade are FantasyPros' own projection and grade, never house "
@@ -1911,6 +1915,20 @@ def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
         # twice over different populations it exceeds the rows that ever existed.
         detail = _loss_detail(dropped, collapsed, tally.get("reasons"))
         notes = list(tally.get("notes") or ())
+        # THE FOURTH CHANNEL (item 3.14a): rows a COLLAPSE FENCE inside the
+        # ingester declined to store. Deliberately outside `lost`, so it never
+        # reaches `_MAX_DROP_FRACTION` — the ceiling's own sentence diagnoses "an
+        # unresolvable key ... rather than a few odd rows", which is the opposite
+        # of a fence that understood the rows and judged them. Measured: the
+        # fp_weekly_ecr per-page fence can legitimately refuse 82% of a healthy
+        # board, and calling that `failed` would teach the operator to ignore the
+        # word. The verdict it carries instead is `partial` — with the pages named,
+        # via the ingester's own note_run lines (`_with_notes` below), because a
+        # status without the WHICH is not actionable. Read as SENTENCES, not as a
+        # count: a page that vanished entirely refuses 0 rows and is still a fence
+        # firing. See base.note_refused.
+        refusals = list(tally.get("refusals") or ())
+        refused = int(tally.get("refused") or 0)
         reason = None
         if written == 0 and lost > 0:
             # The silent-zero signature: the pull succeeded, the ingester threw
@@ -1920,6 +1938,13 @@ def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
                       "dropped for the reason(s) named, or unstampable (is schedules "
                       "ingested for this season?), or collided with another row in the "
                       "same batch")
+        elif written == 0 and refusals:
+            # "wrote 0 rows" is never ok (item 3.1b), and a fence that refused the
+            # WHOLE capture is not "upstream had nothing" either — so this branch
+            # sits ahead of quiet_ok/empty rather than falling through to them.
+            status = STATUS_FAILED
+            reason = (f"wrote 0 rows: the ingester's own collapse fence REFUSED every "
+                      f"row it had ({refused} rows, {len(refusals)} fence(s) fired)")
         elif written == 0 and spec.quiet_ok:
             # "Upstream published nothing new" is this source's NORMAL outcome on
             # ~2% of days and cannot be predicted without the download, which
@@ -1943,9 +1968,15 @@ def run_ingest(conn, *, sources, season: int, retrieved_as_of, today,
                       f"({lost / seen:.0%} — over the {_MAX_DROP_FRACTION:.0%} ceiling); "
                       "an unresolvable key (new team abbr? missing crosswalk?) or a wrong "
                       "primary key, rather than a few odd rows")
-        elif lost:
+        elif lost or refusals:
             status = STATUS_PARTIAL
-            reason = f"wrote {written} rows, lost {lost}/{seen} ({detail})"
+            parts = [f"wrote {written} rows"]
+            if lost:
+                parts.append(f"lost {lost}/{seen} ({detail})")
+            if refusals:
+                parts.append(f"REFUSED {refused} row(s) at {len(refusals)} collapse "
+                             "fence(s) — named in the note below")
+            reason = ", ".join(parts)
         else:
             status = STATUS_OK
         reason = _with_notes(reason, notes)
@@ -2324,7 +2355,14 @@ def format_status(conn, *, season: int, today) -> str:
         note = r["error"].split("note: ", 1)[1].replace("\n", " ")
         if len(note) > 220:
             note = note[:217] + "..."
-        label = "DIVERGENCE   " if note.startswith("DIVERGENCE") else "NOTE         "
+        # REFUSED leads its own label for the same reason DIVERGENCE does: the
+        # run is `partial`, which this report otherwise treats as fine, and the
+        # only place the operator can learn WHICH pages did not land is here
+        # (item 3.14a). The truncation above is why the ingester emits the
+        # refusal note FIRST — a long week-label note must not push it past 220.
+        label = ("DIVERGENCE   " if note.startswith("DIVERGENCE")
+                 else "REFUSED      " if note.startswith("REFUSED")
+                 else "NOTE         ")
         lines.append(f"  {label}: {r['source']} ({r['last_status']}, attempted "
                      f"{r['last_attempt']}) — {note}")
     blocked = [r for r in rows if r["verdict"] == VERDICT_BLOCKED]
