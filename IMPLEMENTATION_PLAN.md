@@ -2928,7 +2928,7 @@ measured, *nothing in the package reads `home_points`* (`get_matchups`' only
 caller is `lineup_support.resolve_opponent`, which uses the row for the opponent's
 team id), so there is no reader to fence and a derived-finality flag would be an
 inference where ESPN serves an observation (`winner != 'UNDECIDED'`). **If
-anything here ever does need a migration it takes 020+** — 019 is reserved by
+anything here ever does need a migration it takes 021+** (corrected 2026-09-15: 019 went to item 3.18, 020 is now 4.2b Wave 2's) — the next number is reserved by
 4.2b Wave 2.
 
 **8. Capture ESPN's per-player realised total** —
@@ -5854,10 +5854,15 @@ what `decisions latency` IS and answers one tracked suggestion with a null.
   `decision_freezes` — `next_executable_at` and `deadline_kind` ∈ {`waiver_batch`,
   `kickoff_lock`, `fcfs`} — plus a **read-time** join to
   `league_transactions.proposed_at`, printing *plan produced → submitted →
-  deadline* with the slack. **It MUST reuse migration 019**, which Wave 2 already
-  reserves against this table: two independently-planned migrations on one table
+  deadline* with the slack. ~~**It MUST reuse migration 019**~~ **Corrected
+  2026-09-15 (same day): 019 is TAKEN — item 3.18 shipped
+  `019_gsis_placeholder_rekey.sql` this morning and it is applied on the live DB
+  (schema 19). Wave 2's two `decision_freezes` columns take `020`, and the
+  reservation moves with them: 3.8 wave B's amendment takes 021+.** The original
+  reasoning stands — Wave 2 already
+  reserves one migration against this table: two independently-planned migrations on one table
   is exactly what the never-edit-an-applied-migration rule forbids, and P4's own
-  amendment (item 3.8 wave B) is therefore explicitly told to take 020+.
+  amendment (item 3.8 wave B) is therefore explicitly told to take the number after Wave 2's.
   Acceptance: it reproduces the measured 2026-09-01 numbers — submitted 13:38 PT,
   **10.3 h of slack**, batch executed 00:06:12 PT.
 - **Tracked suggestion S14 (acquisition latency) is ANSWERED, and the answer is a
@@ -6505,7 +6510,22 @@ the answer written here); step 3 records a dated decision — capture, or not, a
 which of the two captures — with the cost named; and items 3.11 (kicker) and 4.6
 (branch 3) are unblocked or explicitly re-deferred against that answer.
 **Update:**
-> _[To be completed]_
+> **Step 1 DONE Tue 2026-09-15, ~09:40 PT** (read-only re-run of
+> `V_E03_espn_retention.py` for periods 0/1/2, saved beside it as
+> `V_E03_espn_retention_tue0915.{py,txt}`; league `scoringPeriodId` read **2**
+> at the 09:05 sync). Two answers. **(a) Retention: the week-1 PROJECTED row
+> survives the period rollover** — 611 projected week-1 entries alongside 665
+> actuals (561 players carry both), identical to the 602 measured 09-13 in
+> shape — so **there is no perishability urgency**; what is unrecoverable is
+> only the pre-kickoff vintage. **(b) `scoringPeriodId = 0` on a Tuesday
+> resolves to the week that just FINISHED (week 1), not the week being
+> decided**, while an explicit `2` serves 611 projected week-2 entries and no
+> actuals. That is the clause this step was written to test: **even the
+> item-3.11 kicker route needs the explicit-period change** (the shipped
+> `pull_espn_projections` would capture last week's kickers on the one day the
+> waiver decision is made) and stops being half a day. Measured once, at one
+> clock — whether ESPN flips "current" later on Tuesday is not known; a
+> second read on Wed 09-16 would say. Steps 2 and 3 remain open.
 
 ### 4.7 [Experiment] Projection calibration & the units every number is quoted in (added 2026-09-15, from literature hints 2 and the qualitative critic)
 **Why it exists.** Nobody has asked whether the units are right. Regressing
