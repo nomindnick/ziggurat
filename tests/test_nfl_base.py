@@ -619,10 +619,18 @@ def test_two_real_gsis_on_one_pfr_id_still_resolve_deterministically(db):
 
 
 def test_the_pfr_collision_is_still_logged(caplog, db):
+    # Item 3.18 collapsed the per-row line into ONE summary; the collision must
+    # still be visible at WARNING, and the kept id still named on it.
     _players(db, [("ALT577722", "SomePfr"), ("00-0041453", "SomePfr")])
     with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
         base.gsis_by_pfr(db)
-    assert any("maps to multiple gsis" in r.getMessage() for r in caplog.records)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "1 pfr_id" in msg
+    assert "SomePfr" in msg
+    assert "keeping 00-0041453" in msg
+    assert "'00-' preference" in msg
 
 
 def test_an_uncollided_pfr_id_is_unaffected(db):
@@ -630,3 +638,192 @@ def test_an_uncollided_pfr_id_is_unaffected(db):
     got = base.gsis_by_pfr(db)
     assert got["Alone"] == "00-0041453"
     assert got["Other"] == "ALT577722"     # a pseudo-id with no rival is kept
+
+
+# ===========================================================================
+# item 3.18 — the espn_id -> gsis collision: measured, logged once, NOT re-ruled
+# ===========================================================================
+
+def _players_espn(conn, rows):
+    """(gsis_id, espn_id) pairs — the shape ``gsis_by_espn`` resolves."""
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, retrieved_as_of, knowable_as_of) "
+        "VALUES (?, ?, '2026-09-15', '2026-09-15')", rows,
+    )
+    conn.commit()
+    return conn
+
+
+# The measured live collision shape (2026-09-15): a 2026 rookie whose nflverse
+# PLACEHOLDER id sits beside his real `00-` id under ONE espn id. Real values
+# read off the live crosswalk — espn 4685365 carries both.
+LIVE_COLLISION_PLACEHOLDER = "HAR575189"
+LIVE_COLLISION_REAL = "00-0041328"
+LIVE_COLLISION_ESPN = "4685365"
+
+
+def test_the_measured_espn_collision_shape_resolves_to_exactly_one_gsis(db):
+    """The fixture IS the live shape: a placeholder beside a real `00-` id.
+
+    One espn id, two gsis rows, one entry out — never two, never a crash.
+    """
+    _players_espn(db, [(LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_ESPN),
+                       (LIVE_COLLISION_REAL, LIVE_COLLISION_ESPN)])
+    got = base.gsis_by_espn(db)
+    assert list(got) == [LIVE_COLLISION_ESPN]
+    assert got[LIVE_COLLISION_ESPN] in (LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_REAL)
+
+
+def test_a_placeholder_gsis_never_outranks_a_real_one_under_the_preference():
+    """`_gsis_preference` is the deterministic `00-` rule the pfr path applies.
+
+    Pinned on the measured live pair and on the 3.2c pair, in both argument
+    orders, so the rule stays available (and correct) for the paired repair item
+    3.18 names — even though `gsis_by_espn` deliberately does not use it today.
+    """
+    ph, real = LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_REAL
+    assert min(ph, real, key=base._gsis_preference) == real
+    assert min(real, ph, key=base._gsis_preference) == real
+    assert min("ALT577722", "00-0041453", key=base._gsis_preference) == "00-0041453"
+    # ... and it is a TOTAL order, so two placeholders still resolve stably.
+    assert min("ZZZ000001", "AAA000002", key=base._gsis_preference) == "AAA000002"
+    assert min("AAA000002", "ZZZ000001", key=base._gsis_preference) == "AAA000002"
+
+
+def test_the_espn_path_deliberately_has_no_preference_rule_while_pfr_does(db):
+    """CHARACTERIZATION pin for the item-3.18 measurement, not an endorsement.
+
+    Measured on the live crosswalk 2026-09-15: preferring `00-` on the espn path
+    ALONE would repair 96 `weekly_stats` and 125 `snap_counts` joins and BREAK
+    112 `projections` joins — because `projections._sleeper_to_gsis` stamped the
+    same placeholder into the stored rows. Five of the six colliding players on a
+    league roster, and both colliding players in the top-30-per-position priced
+    pool, would go from priced to unpriceable. So the rule was NOT changed.
+
+    The two maps therefore behave differently on the identical collision, and
+    that difference is what this pins: `gsis_by_pfr` gives the same answer
+    whichever row is scanned first (it has a total order); `gsis_by_espn` does
+    not (it has none). If someone adds the preference here, this fails and sends
+    them to the docstring and the 3.18 Update block — which is the point.
+    """
+    from ziggurat.data.store import apply_schema
+
+    ph, real, espn = (LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_REAL,
+                      LIVE_COLLISION_ESPN)
+    pfr = "HarrZx00"
+
+    def seed(conn, order):
+        # ONE row per gsis carrying BOTH source ids, so the identical collision
+        # is offered to both builders off the same two rows.
+        conn.executemany(
+            "INSERT INTO players (gsis_id, pfr_id, espn_id, retrieved_as_of, "
+            "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+            [(g, pfr, espn) for g in order],
+        )
+        conn.commit()
+
+    seed(db, (ph, real))
+    flipped = connect(":memory:")
+    apply_schema(flipped)
+    seed(flipped, (real, ph))
+    try:
+        # pfr: a preference IS applied — same answer both ways, and it is `00-`.
+        assert base.gsis_by_pfr(db)[pfr] == real
+        assert base.gsis_by_pfr(flipped)[pfr] == real
+
+        # espn: NO preference — the answer follows the row order, which is
+        # exactly the property the measurement says must not be "fixed" alone.
+        assert base.gsis_by_espn(db)[espn] != base.gsis_by_espn(flipped)[espn]
+    finally:
+        flipped.close()
+
+
+def _many_espn_collisions(conn, n=12):
+    rows = []
+    for i in range(n):
+        espn = str(4700000 + i)
+        rows += [("PLC%06d" % i, espn), ("00-004%04d" % i, espn)]
+    return _players_espn(conn, rows)
+
+
+def test_many_espn_collisions_log_ONE_summary_line_naming_the_count(caplog, db):
+    """Item 3.18's shipped deliverable: 266 lines on the live crosswalk -> 1.
+
+    A warning printed once per colliding id is a warning the operator learns to
+    scroll past — which is how the one that matters gets missed.
+    """
+    _many_espn_collisions(db)
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        got = base.gsis_by_espn(db)
+
+    assert len(got) == 12
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    msg = warnings[0].getMessage()
+    assert "12 espn_id" in msg           # the count of colliding KEYS
+    assert "12 collision(s)" in msg      # and of collision EVENTS
+    assert "4700000" in msg              # one worked example...
+    assert "4700007" not in msg          # ...never all twelve
+
+
+def test_the_per_collision_detail_is_kept_at_debug(caplog, db):
+    """Collapsing the volume must not destroy the evidence."""
+    _many_espn_collisions(db)
+    with caplog.at_level(logging.DEBUG, logger="ziggurat.data.nfl"):
+        base.gsis_by_espn(db)
+
+    detail = [r for r in caplog.records if r.levelno == logging.DEBUG
+              and "maps to multiple values" in r.getMessage()]
+    assert len(detail) == 12
+    assert any("PLC000003" in r.getMessage() for r in detail)
+
+
+def test_an_uncollided_espn_id_logs_nothing_at_all(caplog, db):
+    """Silence is the healthy state — the summary must not fire on a clean map."""
+    _players_espn(db, [("00-0041328", "4685365"), ("00-0041453", "4685366")])
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        got = base.gsis_by_espn(db)
+    assert got == {"4685365": "00-0041328", "4685366": "00-0041453"}
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_the_reverse_map_cannot_collide_and_measured_zero(caplog, db):
+    """`espn_by_gsis` measured ZERO collisions on the live crosswalk (0 of 8,192
+    gsis ids), and this shows WHY it is zero rather than lucky.
+
+    `players` is keyed `(gsis_id, retrieved_as_of)` and every builder reads only
+    `MAX(retrieved_as_of)` per gsis, so ONE gsis can offer at most ONE row — its
+    espn id cannot fork. The collision the item is about is structurally
+    one-directional: many gsis ids per espn id, never the reverse. Two rows for
+    one gsis on two different pull days resolve to the NEWER one, silently.
+    """
+    _players_espn(db, [("00-0041328", "4685365")])
+    db.execute(
+        "INSERT INTO players (gsis_id, espn_id, retrieved_as_of, knowable_as_of) "
+        "VALUES ('00-0041328', '4685999', '2026-09-16', '2026-09-16')")
+    db.commit()
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        got = base.espn_by_gsis(db)
+    assert got == {"00-0041328": "4685999"}      # the newer pull, not a collision
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    with pytest.raises(Exception):               # same day = the PK refuses it
+        db.execute(
+            "INSERT INTO players (gsis_id, espn_id, retrieved_as_of, knowable_as_of) "
+            "VALUES ('00-0041328', '4686000', '2026-09-16', '2026-09-16')")
+
+
+def test_the_fantasypros_crosswalk_also_summarises(caplog, db):
+    """The fourth builder shares the one mechanism — no stragglers."""
+    db.executemany(
+        "INSERT INTO players (gsis_id, fantasypros_id, retrieved_as_of, knowable_as_of) "
+        "VALUES (?, ?, '2026-09-15', '2026-09-15')",
+        [("00-0041328", "17240"), ("HAR575189", "17240")],
+    )
+    db.commit()
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        got = base.ids_by_fantasypros(db)
+    assert list(got) == ["17240"]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "1 fantasypros_id" in warnings[0].getMessage()

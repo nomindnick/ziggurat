@@ -3489,6 +3489,138 @@ module import time while `tests/test_draft_boundary.py` rglobs only `ziggurat/`
 and structurally cannot see it; and the same suite's `_PERMANENT_PACKAGES`
 allowlist omitting `push`, which CLAUDE.md's repo map lists as permanent.
 
+### 3.18 [Fix] The espn_id → gsis crosswalk keeps the wrong id for 2026 rookies (added 2026-09-15, from the Week-2 preflight)
+**Why it exists.** **Every** CLI run prints ~140 lines of
+`crosswalk: espn_id N maps to multiple gsis (HAR575189, 00-0041328); keeping
+first`. They are all **2026 rookies** whose nflverse placeholder id sits beside a
+real `00-` id. The `pfr` path already applies a deterministic `00-` preference
+(`base._gsis_preference`); **the espn path does not — it keeps whichever row comes
+first.**
+**Two things are wrong and they are different sizes.** The noise is cosmetic and
+trains the operator to ignore a log line. The **suspected** consequence is not:
+a rookie's `weekly_stats` / `projections` rows are keyed by the **real** gsis id,
+so if the espn→gsis crosswalk resolves to the placeholder, that rookie's stats and
+projections may not join to his ESPN id at all — which would make him invisible to
+`marginal`, `waivers` and `candidates` in exactly the weeks a rookie breaks out.
+**This is a suspicion, not a measurement.** Do not fix it before measuring it.
+**Goal:** measure the join loss first, then apply the same deterministic `00-`
+preference on the espn path if the measurement supports it, and quiet the log
+either way.
+**Design.** (1) **Measure**: for every espn_id with a multi-gsis collision, check
+whether the kept id has `weekly_stats` / `projections` rows and whether the
+discarded one does; report the count of rookies whose rows are on the discarded
+id, and whether any appeared on a priced board. (2) Only then: extend
+`base._gsis_preference` (or its equivalent) to the espn path, with a leakage test
+and a fixture pinning the collision shape. (3) Collapse the per-row warning to one
+summary line naming the count.
+**Done when:** the join-loss number is written down (a zero is a result and closes
+the item's second half); the log is one line, not ~140; and if the preference is
+applied, a test pins that a placeholder id never wins over a `00-` id.
+**Update:**
+> **Done 2026-09-15. The suspicion is HALF confirmed and the proposed fix is
+> REFUSED on the measurement: preferring `00-` on the espn path alone does not
+> remove the join loss, it MOVES it — onto the pricing table, on a waiver
+> Tuesday.** The log collapse shipped; the resolution rule is byte-unchanged.
+>
+> **The measurement** (live DB read-only at `as_of` 2026-09-15, season 2026;
+> the current resolution reproduced exactly, then compared against what
+> `_gsis_preference` would have chosen).
+>
+> * **266 espn ids collide** (8,192 candidate `players` rows → 7,926 resolved
+>   entries). Scan order keeps the **placeholder in 264 of 266** — i.e. the
+>   preference would change the answer for essentially every one.
+> * **262 of the 266 are the shape the item names**: one real `00-` id beside
+>   one nflverse placeholder, a 2026 rookie (`4685365` → `HAR575189` /
+>   `00-0041328`, the fixture the tests now pin). **The other 4 are a different
+>   bug**: TWO DIFFERENT retired players sharing one espn id upstream
+>   (`2582138`, `2574010`, `2516049`, `16094`). No preference can be right
+>   there — both ids are `00-` — and all four are inert (0 rows in every fact
+>   table). Recorded, not fixed.
+> * **Join loss under the id that is KEPT today**, counted over those 266:
+>
+>   | table | rows on the KEPT id | rows on the DISCARDED id | rows ONLY on the discarded id |
+>   |---|---|---|---|
+>   | `weekly_stats` (2026 wk1 REG) | **0** | 96 | **96** |
+>   | `snap_counts` (2026) | **0** | 125 | **125** |
+>   | `projections` (`sleeper_rotowire` 2026) | **112** | 9 | 9 |
+>
+>   Restricted to fantasy positions (132 of the 266): 40 `weekly_stats` and 51
+>   `snap_counts` losses, 9 `projections` losses.
+> * **Decision impact.** 88 colliding espn ids are in the league universe at
+>   2026-09-15; **6 are on a roster** — all 2026 rookies: Jeremiyah Love (RB),
+>   Carnell Tate (WR), Makai Lemon (WR), Jadarian Price (RB), KC Concepcion
+>   (WR), De'Zhaun Stribling (WR). **All six have zero Week-1 `weekly_stats`
+>   under the id the crosswalk keeps.** In the **top-30-per-position priced
+>   pool** (`valuation.weekly_lines`, 3,229 keys): **2 rows** — Love (235.9) and
+>   Price (172.1), both RB, both priced **under the placeholder**.
+> * **Reverse direction: ZERO.** `espn_by_gsis` has **0 collisions** on the live
+>   crosswalk (0 of 8,192 gsis ids), and it is zero *structurally* — `players`
+>   is keyed `(gsis_id, retrieved_as_of)` and every builder reads only
+>   `MAX(retrieved_as_of)` per gsis, so one gsis cannot fork its espn id. That
+>   half of the item is closed by a zero, as the done-when allows.
+>
+> **Why the preference was NOT applied.** `projections._sleeper_to_gsis` resolves
+> the SAME collision the same accidental way (`setdefault`, no preference, and —
+> unlike the espn path — no log line at all), so it stamped the placeholder into
+> **112 of the 266** stored projection rows; 115 of the 1,985 distinct gsis ids in
+> the 2026 `sleeper_rotowire` projections are placeholders. `league_player_state`
+> then stores the crosswalk's answer as a derived column, so today the roster key,
+> the projection key and the priced-board key all agree on the PLACEHOLDER while
+> `weekly_stats` and `snap_counts` use the real id. Flipping this one map would
+> repair 96 + 125 usage joins and **break 112 pricing joins** — measured
+> concretely: 5 of the 6 rostered rookies, and **both** top-30 priced rows (Love,
+> Price), would go from priced to **unpriceable** on the Tuesday the waiver chain
+> runs. The id spaces disagree; a preference on one of them cannot reconcile them,
+> and the item's own instruction is to measure before fixing.
+>
+> **The real repair, named and sequenced** (not done here — `projections.py` is
+> outside this item's scope fence): give `_sleeper_to_gsis` the same
+> `_gsis_preference`, re-pull 2026 projections onto the real ids, and only THEN
+> flip `gsis_by_espn` — one change, or the pricing path breaks between them.
+> `league_player_state.gsis_id` is explicitly derived and backfillable (item 3.1),
+> so no perishable history is at risk either way. Until that lands, a colliding row
+> already travels with its alternates (`id_alternates`, item 4.2b) rather than
+> being silently re-pointed. One hazard recorded rather than fixed: this map has
+> **no total order**, so which id wins is SQLite scan order — stable across five
+> fresh reads today, but a `players` re-pull could flip a stored `gsis_id` with
+> nothing recording that it moved. That is the 3.2c argument for the pfr path, and
+> it lands with the paired repair, not before it.
+>
+> **What shipped.** (1) `base._CollisionTally` — ONE summary WARNING per crosswalk
+> build naming the colliding-key count, the collision count, one worked example
+> and the resolution rule; per-collision detail moved to DEBUG, so nothing is
+> lost. Applied to all four builders in the file, because collapsing only the
+> espn one would have left the pfr one's **239** lines: measured per build on the
+> live crosswalk, `gsis_by_espn` **266 → 1** and `gsis_by_pfr` **239 → 1** (505
+> lines on a run that builds both → 2). The "~140" in this item's own text was
+> from an earlier, smaller snapshot. (2) The measurement above written into
+> `gsis_by_espn`'s docstring, where the next person to reach for the one-line fix
+> will read it. (3) Tests: the live collision shape as a fixture; `_gsis_preference`
+> pinned as a total order in both argument orders (a placeholder never outranks a
+> `00-` id); a CHARACTERIZATION pin that `gsis_by_pfr` answers identically in both
+> row orders while `gsis_by_espn` does not — so adding the preference here fails
+> loudly and sends the author to this block; one-summary-line and count assertions;
+> the DEBUG detail still present; silence on a clean map; the structural
+> impossibility of a reverse collision; and `ids_by_fantasypros` on the same
+> mechanism.
+>
+> **One downstream consequence, disclosed rather than discovered later.**
+> `backtest/replay.py` captures the generator's log lines into `WeekRecord.log_lines`,
+> which is part of the **frozen** JSONL and therefore of its sha256 manifest — its
+> own docstring says "the generator emits ~70 distinct crosswalk warnings per
+> week", and it now emits ONE. Existing freezes are untouched and still load (the
+> loader does not re-derive the field); a FRESH decide of the same week produces a
+> freeze that differs from an older one in that field alone, with the decisions,
+> the pool and every count identical. The DEBUG detail cannot leak into a freeze:
+> nothing in `backtest/` or `ziggurat/cli/` calls `basicConfig`/`setLevel`, so the
+> effective level is the root default and `logger.debug` is a no-op there.
+>
+> **Standing lesson this item paid for: when two tables that must join disagree
+> about an id, fixing the map that reads them is not a fix — it chooses which
+> join to break.** The item was written expecting a one-line change; the
+> measurement it insisted on first is the only reason the change did not ship and
+> quietly unprice two rostered rookies.
+
 ## Phase 4: Backtest & Signal Program (rolling; scoped by Checkpoint 1)
 
 **Goal:** Measure the signals before trusting them. Runs in parallel with Phases 2–3 wherever hours allow — nothing here blocks draft day or Week 1, but signal deployments in-season are gated on results here. Standing methodology for every experiment: strict `as_of` cuts, train on 2021–23 / validate on 2024–25, grade decisions not outcomes.
