@@ -3839,7 +3839,104 @@ a mutant that ignores `locked` must not pass.**
 `seated_by_tool=True` for a locked already-played starter; the three not-seated
 sentences are distinct and pinned; suite green.
 **Update:**
-> _[To be completed]_
+> **Done 2026-09-15.** The fence landed where the item said it had to: `game_locks()`
+> is now read BEFORE `_price_roster` rather than after the search, and a kickoff that
+> has passed the `now` DECISION clock (never `as_of` — they stay separate, and a test
+> pins that the same data read at a clock BEFORE the kickoff still benches the man and
+> still promotes the bench body) sets `_Seat.locked`. A locked player is `available=
+> False` in BOTH directions, and a locked player whose ROSTER ROW puts him in an ESPN
+> starting slot additionally carries `_Seat.pin_slot` — the slot ESPN actually froze,
+> taken from `lineup_slot`, not from anything the optimiser would prefer.
+> **Pinning is applied AROUND `fill_lineup`, not inside it** (`build_pins` →
+> `_reduced_structure` → merge back into the full label space): `core/lineup.py` is the
+> shared seater for marginal/waiver/lineup and knows nothing about a league's lock
+> rules, so teaching it about them would have put an ESPN mechanic inside the one
+> module three other consumers price through.
+> **Four seams, not one, because a locked man can be unseated four ways**:
+> `_greedy_fill` (pins), `_steepest_ascent` (`pinned_keys` — the slot is never offered
+> as a swap target; the bench side needs no separate fence because `available` already
+> excludes locked), `order_slots_by_lock` (a pinned man never enters the FLEX relabel
+> group — the label has to agree with the app the operator is reading), and
+> `assert_no_illegal_starters` (`locked=` exemption: a designation that lands AFTER a
+> man played is a status change, not an illegal start, and without the exemption the
+> Rule-6 hard gate turns into the outage). `_opponent_lineup` applies the identical
+> pinning — measured on the synthetic reproduction at **−7.0 house points** on the
+> opponent's total, which is the number the whole posture decision is read off.
+> **The taxonomy is four sentences, and LOCKED gets its own BLOCK rather than a line
+> in "REMOVED"** — because it is not a removal: LOCKED ("his game kicked off …, so
+> ESPN froze that slot and there is NOTHING you can do about it"), HARD-OUT ("his game
+> has NOT started, so this one you can still fix — swap him out"), BYE, UNPRICEABLE
+> ("the feed carries no forecast … It is NOT a statement that he is out"). Locked
+> BENCH players get ONE counted line plus a `[LOCKED — cannot be moved in]` tag on the
+> bench row: naming seven of them individually on a Sunday evening would bury the
+> starters, and dropping them off the page silently is how a 24-point name vanishes
+> with no way for a novice to ask where it went.
+> **The honest tradeoff ships as a constant, `LOCKED_CARRY_LABEL`, printed
+> unconditionally** (not behind `--reasons`): a locked player is carried at his
+> PROJECTION, and on the one live instance the projection (16.9) was FURTHER from the
+> truth (5.6 realised) than deleting him (0.0) would have been. A locked man with no
+> forecast is carried at 0.0 and the sentence says that is an ABSENCE OF DATA, not a
+> measured zero — which is the third live variant this item names.
+> **Verification.** (a) **Fail-before, on the pre-3.13 module loaded from `git HEAD`
+> by path**, driven through the new test's own world: `seated: [… 'Bench Wideout' …]`,
+> `sanity_blocks: ('Wednesday Wideout (WR, CHI): ESPN lists him INJURY_RESERVE —
+> removed from the lineup, cannot start week 3.',)` — the live defect reproduced
+> exactly, and every done-when clause fails. (b) **Eight mutants, all caught**: drop
+> `and not locked` + never pin (= pre-3.13 seating, 8 tests fail), pins computed but
+> not passed to the seater (6), `pinned_keys` ignored in the search (4), the
+> `assert_no_illegal_starters` exemption removed (10), the opponent not pinned (1),
+> the staleness banner blind to seated rows (1), `locks_first` dropped (5), a locked
+> bench player treated as movable (1). `test_steepest_ascent_refuses_a_swap_it_would_
+> otherwise_take` shows the search fence BITING rather than merely not firing: the
+> same two calls on the same numbers, unpinned and pinned, return different slotmaps.
+> (c) **The done-when probe**, re-run read-only against the live DB
+> (`probes/E01_locked_player_benched.py`, adapted only for the DB path and to pass the
+> lock inputs `build_lineup` now passes — the original called `_price_roster` with a
+> signature that has no clock at all): the Week-1 INJURY_RESERVE WR with the finished
+> Wednesday game now reads **`locked=True pin_slot=WR seated_by_tool=True`** against
+> the pre-3.13 call's `seated_by_tool=False`, and that roster's lineup total moves
+> 119.4 → 126.2.
+> **One fixture change was needed and is the more faithful shape**: `marginal_world`
+> defaults every roster row to `lineup_slot='BE'`, which the live league never has for
+> a starter, so `_gtd_specs()` now carries the ESPN slots (exactly the greedy lineup —
+> no pre-3.13 assertion moves). Without it a locked GTD starter could not be
+> recognised at all and the closed-window test was asserting against a shape that
+> cannot occur.
+> **Two things deliberately NOT done.** The accuracy half is untouched: there is no
+> live-score source, the projection is what we have, and the card says so rather than
+> pretending. And `core/lineup.py` is not modified — item 3.15's question about the
+> close band is a separate decision and the plan says any change there lands AFTER
+> this fence.
+> Live on the real card (`ziggurat lineup --now 2026-09-20T17:00`): seven starters
+> tagged `LOCKED` in the STATUS column, the LOCKED block naming each with his kickoff
+> and carried projection, the six locked bench bodies counted on one line, and
+> `LOCKED_CARRY_LABEL` closing it.
+> **One defect this item introduced, caught on the live card rather than in review,
+> and it is this item's own trap wearing a new hat.** LOCKED takes a man out of the
+> UNPRICEABLE block — so a locked BENCH body with no forecast printed a bare
+> `Josh Jacobs (RB) 0.0 pts` with the "absence of data, not a zero" sentence gone. The
+> first fix put that sentence in `BenchRec.reasons`, and the BENCH section renders no
+> reasons **at any verbosity**, so the disclosure existed only in the dataclass. Fixed
+> twice over: the bench line itself now carries `(0.0 = NO FORECAST at this as-of, not
+> a measured zero)` unconditionally, and `--reasons` now prints bench reasons the way
+> it already printed starter reasons. Pinned by a test that asserts the string reaches
+> BOTH rendered forms, not just the object. **Standing lesson: a disclosure that lives
+> only in the data model is not a disclosure — check the rendered page, at the
+> verbosity the operator actually uses.**
+> **Suite: one PRE-EXISTING failure found and NOT fixed here, recorded because it is
+> a real defect and nobody has written it down yet.**
+> `test_nfl_fp_weekly.py::test_a_pull_with_the_authority_on_labels_from_the_page`
+> monkeypatches `fp_weekly.fetch_week_page`, but `resolve_page_week(*, season,
+> fetcher=fetch_week_page)` binds that default at DEFINITION time — so the patch
+> cannot reach it and the test **fetches the live FantasyPros page**. It passed all
+> week because the live page said week 1; it started failing when the page rolled to
+> week 2 (`last_updated_ts='1789474132'`, i.e. 2026-09-14). Two things are wrong and
+> they are different sizes: an offline test makes a network call, and the assertion it
+> makes is about whatever FantasyPros published this morning. `ziggurat/data/nfl/` and
+> `tests/test_nfl_fp_weekly.py` are byte-identical to `41a0f6e` here and `fp_weekly`
+> imports nothing this item touched. Fixing it is a decision about the PRODUCTION
+> default (late-bind it, or make the test pass `fetcher=`), which belongs to whoever
+> owns that source — flagged, not guessed at.
 
 ### 3.14 [Build] The D/ST slot gets one owner — a weekly board, and both horizons on the page (added 2026-09-15, from edge probes E08 + E14)
 **Why it exists.** Two measurements on the same slot point opposite ways and both
@@ -4276,6 +4373,53 @@ carries an explicit workaround note for (4)).
 > fetch_week_page)`) or a `fetcher=None` late-bind closes it. Worth doing soon on
 > its own merits: an offline suite that silently reaches upstream is the failure
 > mode item 3.1b's frozen fixtures were supposed to have retired.
+>
+> **Deliverables 2 and 3 (the LINEUP half of 3) done 2026-09-15, in a separate change
+> from the 1-and-4 entry above (merged the same day); 3's `ziggurat stream` half was
+> built in parallel by a third change (item 3.14's).**
+>
+> **(2) LOCKS FIRST.** `LineupRecommendation.locks_first` is built by `_locks_first`
+> and rendered as line 2 of the card, above the freshness banner and the posture line
+> — unconditionally, which is the whole point: the pre-3.17 card computed every
+> kickoff and printed a lock time ONLY inside a GTD contingency, i.e. only if somebody
+> happened to be Questionable. Week 1's Thursday pair was caught ~11 h out by reading
+> order, not by process, and a test pins that the line prints on a roster with
+> `contingencies == ()`. It names EVERY starter sharing the earliest UPCOMING kickoff
+> (naming one of two is how the second gets missed), his slot, the ET ISO kickoff, and
+> the distance from the decision clock in hours under 48 and days beyond. Three
+> degrade paths, each tested and each saying something different rather than falling
+> silent: **all starters already locked** → "this lineup is locked and this card is a
+> record, not a decision"; **no kickoff known for anybody** → "check lock times in the
+> ESPN app yourself"; **some already locked / some slots unknown** → counted
+> sub-lines. Live: `LOCKS FIRST: David Montgomery (RB2), Tee Higgins (WR1) — kickoff
+> 2026-09-20T13:00:00-04:00 ET, 5 days from the decision clock (2026-09-15T00:00:00
+> -04:00).`
+>
+> **(3) The projection-age banner, lineup half.** It fired on **one orphan row of
+> 3,229** and read as a blanket "do not trust this card", because it took `min` over
+> every pull date in the whole feed. Two things were wrong with that and only one of
+> them is the one the item names: the unit was the FEED rather than the ROW, and a key
+> that had been REFRESHED still counted as stale through its old date. New
+> `_stale_projection_rows` resolves per key, NEWEST pull first (pinned by its own
+> unit test on a refreshed key), and the banner now prints the COUNT and then branches
+> on whether a SEATED starter is priced off one of those rows — the seated set is
+> carried through the new `_Seat.proj_key`, so the join is the same key the player was
+> priced from rather than a name match. Live, today: `WARNING: 1 of 3229 projection
+> rows are more than 7 days old (oldest pull 2026-09-04, 11 days), but NO seated
+> starter is priced off one — every player on this card comes from a fresher pull. A
+> stale bench row is not a reason to distrust the lineup; ``ziggurat ingest run``
+> clears it.` The escalating branch ("1 SEATED starter is priced off one … before
+> trusting this card") has its own test, and a mutant that blinds the check to the
+> seated set is caught by it.
+>
+> **Not done here, and why.** (1) `ziggurat league live` is a new command with a
+> network seam, not a lineup-card fix — separate change. (4) `brief status` ordering
+> lives in the push layer. The `core/streaming.py` half of (3) was out of scope for
+> this change by construction (a second agent owned that file in the same session);
+> **so the cadence's Monday-step-4 workaround note for (4) stays until (4) ships** —
+> the done-when's "the cadence text that points at any of them is updated in the same
+> change" is satisfied for (2) and (3), neither of which the cadence carries a
+> workaround for.
 
 ### 3.18 [Fix] The espn_id → gsis crosswalk keeps the wrong id for 2026 rookies (added 2026-09-15, from the Week-2 preflight)
 **Why it exists.** **Every** CLI run prints ~140 lines of
