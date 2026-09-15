@@ -117,6 +117,23 @@ def reap_orphans(conn, *, now, older_than_seconds=ORPHAN_AFTER_SECONDS) -> int:
     return reaped
 
 
+def _phone_lane_policy(*, today=None) -> str:
+    """The alert lane's own rules, from the ONE module that owns them.
+
+    Imported in-body so this operational/no-as-of module keeps no standing
+    dependency on `core`, and so the page and the gate can never disagree about
+    what reaches the phone (the 3.8A lesson: two renderers of one rule diverged and
+    the operator had no way to tell which was lying). A failure to import must
+    never take down the run log the operator came here to read.
+    """
+    try:
+        from ziggurat.core import alerts as alerts_mod
+
+        return alerts_mod.format_phone_lane_policy(today=today)
+    except Exception as exc:  # pragma: no cover - defensive; the page is not the point
+        return f"phone-lane policy unavailable: {type(exc).__name__}: {exc}"
+
+
 #: ``outbound.publish(dry_run=True)`` stamps this into ``push_runs.ntfy_status``.
 #: It is the ONLY durable mark that separates a ``--no-push`` preview from a run
 #: that actually reached the phone — pinned against outbound by test.
@@ -150,7 +167,7 @@ def _run_line(row) -> str:
     return line
 
 
-def format_status(conn, *, kind=None) -> str:
+def format_status(conn, *, kind=None, today=None) -> str:
     """Last push runs, with REAL runs and ``--no-push`` previews SEPARATED.
 
     Item 3.17 (Week-1 retro): the listing used to be one newest-first stream
@@ -169,8 +186,11 @@ def format_status(conn, *, kind=None) -> str:
         f"ORDER BY run_id DESC LIMIT 60",
         params,
     ).fetchall()
+    # The alert page states the lane's rules whether or not any tick has run — a box
+    # with no runs is exactly where "what would even reach my phone?" gets asked.
+    policy = [""] + _phone_lane_policy(today=today).splitlines() if kind == "alert" else []
     if not rows:
-        return "no push runs recorded yet."
+        return "\n".join(["no push runs recorded yet."] + policy)
 
     real = [r for r in rows if not is_dry_run(r)]
     dry = [r for r in rows if is_dry_run(r)]
@@ -201,7 +221,7 @@ def format_status(conn, *, kind=None) -> str:
         out.extend(_run_line(r) for r in dry[:_DRY_ROWS])
         if len(dry) > _DRY_ROWS:
             out.append(f"  ... {len(dry) - _DRY_ROWS} older preview(s) not listed")
-    return "\n".join(out)
+    return "\n".join(out + policy)
 
 
 # ------------------------------------------------------------------ alert_ledger
