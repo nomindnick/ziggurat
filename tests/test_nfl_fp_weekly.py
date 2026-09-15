@@ -216,6 +216,22 @@ def test_a_missing_upstream_column_fails_loudly(db, board):
         _ingest(db, board.drop(columns=["ecr"]))
 
 
+def test_a_missing_r2p_pts_column_is_optional_and_stored_null(db, board):
+    """2026-09-15: upstream dropped ``r2p_pts`` from ``fp_latest_weekly.csv`` on the
+    first in-season Tuesday and the whole perishable week-2 board failed loudly
+    (timer 07:22 PT). Nothing may read that column (RULE 2), so its absence is
+    not drift: the capture lands and the column is NULL. Every OTHER column is
+    still required (the test above)."""
+    _stub_schedule(db)
+    written, _ = _ingest(db, board.drop(columns=["r2p_pts"]))
+    assert written == 36
+    nulls = db.execute(
+        "SELECT COUNT(*) FROM fp_weekly_ecr WHERE r2p_pts IS NULL").fetchone()[0]
+    assert nulls == 36
+    # And a board that still carries it stores it — the column was not dropped.
+    assert "r2p_pts" in fp_weekly._COLMAP
+
+
 def test_the_same_player_on_two_pages_is_two_rows_not_one(db, board):
     """`page` is IN THE PRIMARY KEY, which is the migration-011 lesson applied
     here: a dual-eligibility player is published on two positional pages of one

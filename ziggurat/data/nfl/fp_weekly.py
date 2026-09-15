@@ -127,8 +127,18 @@ _REQUIRED = (
     "page", "scrape_date", "fantasypros_id", "player_name", "pos", "team",
     "rank", "ecr", "sd", "best", "worst", "player_owned_avg", "player_opponent",
     "player_opponent_id", "player_ecr_delta", "note", "tag", "recommendation",
-    "pos_rank", "start_sit_grade", "r2p_pts",
+    "pos_rank", "start_sit_grade",
 )
+
+#: Source columns that MAY be absent and are then stored NULL. ``r2p_pts``
+#: (FantasyPros' own projected points) vanished from ``fp_latest_weekly.csv`` on
+#: 2026-09-15 — the first in-season Tuesday and the day item 3.14 made this
+#: capture the primary D/ST ranker — and the whole perishable week-2 board
+#: failed loudly on it (timer 07:22 PT: "source schema missing required columns
+#: ['r2p_pts']"). Nothing in this repo may read that column (RULE 2 above), so
+#: its absence costs no consumer anything; it stays in the table as NULL.
+#: Anything else missing is still drift and still fails loudly.
+_OPTIONAL = ("r2p_pts",)
 
 #: db_column -> source_column for the straight-through fields. Derived columns
 #: (season/nfl_week/week_basis/gsis_id/espn_id) are added per row afterwards.
@@ -625,7 +635,9 @@ def ingest_fp_weekly(conn, df, *, retrieved_as_of: str, page_week=None) -> int:
     """
     base.require_columns(df, _REQUIRED, source="fp_weekly_ecr")
 
-    frame = df[list(dict.fromkeys(_COLMAP.values()))]
+    # ``reindex`` (not ``df[...]``) so an OPTIONAL column the file lacks arrives
+    # as NaN and is stored NULL instead of raising KeyError on selection.
+    frame = df.reindex(columns=list(dict.fromkeys(_COLMAP.values())))
     rows = base.frame_to_rows(
         frame,
         _COLMAP,
