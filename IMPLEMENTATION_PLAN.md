@@ -4098,13 +4098,16 @@ explorer and verifier. Answer it before claiming anything proprietary here.
 > numbers in FantasyPros' scoring (Rule 2). A rank is scoring-system-free; a
 > points column is not.
 >
-> **One unrelated pre-existing defect fixed in passing, because it turned the
+> **One unrelated pre-existing defect surfaced in passing, because it turned the
 > suite red this morning:** `test_a_pull_with_the_authority_on_labels_from_the_page`
-> made a LIVE request to FantasyPros on every suite run —
-> `resolve_page_week` binds `fetch_week_page` as a DEFAULT ARGUMENT, so
-> monkeypatching the module attribute never reached it. It passed silently while
-> the real page said week 1 and failed the morning it flipped to week 2. Now
-> routed through the real resolver with the stub fetcher, offline.
+> made a LIVE request to FantasyPros on every suite run — `resolve_page_week`
+> bound `fetch_week_page` as a DEFAULT ARGUMENT, so monkeypatching the module
+> attribute never reached it. It passed silently while the real page said week 1
+> and failed the morning it flipped to week 2. This branch first fixed it in the
+> TEST; main had already fixed it at the ROOT (`f6df326`, `pull_fp_weekly` now
+> passes the fetcher explicitly), so that commit is cherry-picked here and the
+> weaker test-side workaround is reverted — two fixes for one defect is one too
+> many, and the test-side one left the production late-binding in place.
 >
 > **Still open after this item:** step 3 (the `game_odds` fence, which inherits
 > item 4.6's retired done-when (b)); the genuinely proprietary question — does the

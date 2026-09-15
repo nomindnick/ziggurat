@@ -447,20 +447,16 @@ def test_a_pull_with_the_authority_on_labels_from_the_page(db, board, monkeypatc
     _stub_schedule(db)
     monkeypatch.setattr(fp_weekly, "fetch_fp_weekly",
                         lambda **kw: FIXTURE.read_bytes())
-    page = ('x = 1; var ecrData = {"year": 2026, "week": 1, '
-            '"last_updated_ts": "1757000000"}; more();')
-    monkeypatch.setattr(fp_weekly, "fetch_week_page", lambda **kw: page)
-    # `resolve_page_week` binds `fetch_week_page` as a DEFAULT ARGUMENT at def
-    # time, so patching the module attribute alone never reached it and this test
-    # made a LIVE request to FantasyPros on every suite run — silently passing
-    # while the real page happened to say week 1 and failing the morning it
-    # flipped to week 2 (2026-09-15). Route through the real resolver with the
-    # stub fetcher so the year guard and `parse_page_week` are still exercised.
-    real_resolve = fp_weekly.resolve_page_week
+    # `resolve_page_week` USED to bind `fetch_week_page` as a default argument at
+    # def time, so this monkeypatch never reached it and the test made a LIVE
+    # request to FantasyPros on every suite run — silently passing while the real
+    # page happened to say week 1, and failing the morning it flipped to week 2
+    # (2026-09-15). `pull_fp_weekly` now passes the fetcher explicitly, so the
+    # patch below is what is actually read.
     monkeypatch.setattr(
-        fp_weekly, "resolve_page_week",
-        lambda *, season, fetcher=None: real_resolve(
-            season=season, fetcher=fetcher or (lambda **kw: fp_weekly.fetch_week_page())),
+        fp_weekly, "fetch_week_page",
+        lambda **kw: 'x = 1; var ecrData = {"year": 2026, "week": 1, '
+                     '"last_updated_ts": "1757000000"}; more();',
     )
     with base.collect_drops():
         fp_weekly.pull_fp_weekly(
