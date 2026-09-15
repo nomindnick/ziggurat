@@ -1920,3 +1920,124 @@ def test_a_board_records_whether_league_limits_were_read_at_all(db, marginal_wor
                                  pool=pool, weeks=WEEKS, pool_limit=None)
     assert board.league_limits is None, "no league_settings row in this fixture"
     assert board.position_caps["TE"] == marginal.POSITION_CAPS["TE"]
+
+
+# ==================== item 3.14 step 2 — BOTH horizons on a streamed row ======
+#
+# A streamed `gain` is a ONE-WEEK number priced on `model_now`. `season_long_delta`
+# is the same (drop, add) re-valued on `model_full` at the board's reporting depth,
+# and `break_even_reacquisition` turns the pair into the sentence the page prints.
+# Disclosure only — nothing here orders anything.
+
+
+def test_season_long_delta_reproduces_the_standalone_gain_on_a_SEASON_LONG_row(db, world):
+    """The identity that makes this a checkable number rather than a second
+    opinion: on a season-long row the disclosure estimator IS the shipped one —
+    same model, same depth — so it must land on the same value."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    seasonal = [s for s in board.swaps if s.horizon_weeks != 1]
+    assert seasonal, "the fixture must produce at least one season-long swap"
+    for s in seasonal[:5]:
+        assert board.season_long_delta(s) == pytest.approx(s.gain, abs=1e-9)
+
+
+def test_a_streamed_row_priced_on_model_now_inside_the_disclosure_FAILS(db, world):
+    """DONE-WHEN (c). The two horizons must DISAGREE, and the module must refuse
+    the wrong one. Three things are pinned at once:
+
+      1. `value_after` — the chain's estimator — still RAISES on a streamed row
+         (that refusal is load-bearing and item 3.4b paid for it);
+      2. `season_long_delta` answers anyway, on `model_full`, and is NOT the
+         one-week gain — a disclosure that reproduced `gain` would be printing the
+         same number twice under two labels;
+      3. the one-week number is reproducible from `model_now`, so the difference
+         is a horizon difference and not noise.
+    """
+    roster, pool = world
+    board = _board(db, roster, pool)
+    streamed = [s for s in board.swaps
+                if s.horizon_weeks == 1 and s.drop_position in marginal.STREAMED_POSITIONS]
+    assert streamed, "the fixture must produce at least one streamed swap"
+    row = streamed[0]
+
+    with pytest.raises(ValueError, match="season-long only"):
+        board.value_after([row])
+
+    delta = board.season_long_delta(row)
+    assert delta != pytest.approx(row.gain, abs=1e-6)
+
+    # (3) the one-week number IS `model_now`'s, so the gap above is the horizon.
+    matrix = board._swaps
+    entries, model_full, model_now, depth = matrix._ctx
+    drop_key, add_key = matrix.keys_of(row)
+    d = max(int(depth), 1)
+    base = sorted(matrix.base_keys())
+    swapped = sorted((set(base) - {drop_key}) | {add_key})
+    now_delta = model_now.value_at_depth(swapped, d) - model_now.value_at_depth(base, d)
+    assert now_delta == pytest.approx(row.gain, abs=1e-6)
+    full_delta = model_full.value_at_depth(swapped, d) - model_full.value_at_depth(base, d)
+    assert delta == pytest.approx(full_delta, abs=1e-9)
+
+
+def test_season_long_delta_costs_one_base_valuation_however_many_rows_ask(db, world):
+    """The cost fence the caller can assert on. The base roster's season-long
+    value is shared, so N shown rows cost N+1 valuations, not 2N — and a repeat
+    ask for the same pair costs nothing."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    rows = list(board.swaps)[:3]
+    assert len(rows) >= 2
+    before = board.value_after_evaluations
+    for s in rows:
+        board.season_long_delta(s)
+    first_pass = board.value_after_evaluations - before
+    assert first_pass == len(rows) + 1
+    for s in rows:
+        board.season_long_delta(s)
+    assert board.value_after_evaluations - before == first_pass   # memo, free
+
+
+def test_season_long_delta_refuses_a_row_from_another_board(db, world):
+    """Same contract as `value_after`: a row that did not come out of THIS matrix
+    has unknown model keys, and guessing them would price a different move."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    alien = marginal.SwapRow(
+        add="Nobody At All", drop="Nobody Else", gain=1.0, add_position="WR",
+        drop_position="WR", add_status="FREEAGENT", add_startable_this_week=True,
+        horizon_weeks=15, reasons=())
+    with pytest.raises(KeyError):
+        board.season_long_delta(alien)
+
+
+def test_break_even_reacquisition_is_one_minus_gain_over_cost():
+    """THE published example, reproduced: the item's own measurement is a '+1.57
+    this week' stream costing 26.55 house points over weeks 1-17, i.e. a 94.09%
+    break-even reacquisition probability."""
+    assert marginal.break_even_reacquisition(1.57, -26.55) == pytest.approx(0.9409, abs=5e-5)
+
+
+def test_break_even_is_None_when_there_is_nothing_to_break_even_on():
+    """A season-long GAIN is not warned about (measured: one such swap is a
+    season-long gain of 4.27), and an uncomputed delta is UNKNOWN — neither may
+    produce a percentage, because a printed percentage reads as a measurement."""
+    assert marginal.break_even_reacquisition(1.57, None) is None
+    assert marginal.break_even_reacquisition(1.57, 4.27) is None
+    assert marginal.break_even_reacquisition(1.57, 0.0) is None
+
+
+def test_break_even_goes_non_positive_when_one_week_covers_the_whole_cost():
+    """`1 - G/C <= 0` is not a broken percentage: it means the one-week gain
+    already pays for the season-long cost, so the move stands even if you never
+    get an equal replacement back. The renderer must branch on it."""
+    assert marginal.break_even_reacquisition(30.0, -26.55) < 0.0
+    assert marginal.break_even_reacquisition(26.55, -26.55) == pytest.approx(0.0)
+
+
+def test_swap_row_season_long_delta_defaults_to_None_not_zero(db, world):
+    """NOT COMPUTED must never render as 'this costs you nothing'. The matrix
+    leaves the field None; only a page that decided to SHOW a row fills it in."""
+    roster, pool = world
+    board = _board(db, roster, pool)
+    assert all(s.season_long_delta is None for s in board.swaps)

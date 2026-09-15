@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from ziggurat.core import candidates as C
-from ziggurat.core import waiver
+from ziggurat.core import marginal, streaming, waiver
 from ziggurat.core.marginal import SwapRow
 from ziggurat.core.valuation import DEFAULT_ROSTER
 from ziggurat.core.waiver import (
@@ -2129,3 +2129,312 @@ def test_a_changed_league_roster_shape_is_disclosed_rather_than_priced_through()
     assert note and "17 active + 2 IR" in note and "16 active + 1 IR" in note
     # nothing to say when the settings row was never captured
     assert waiver._roster_shape_mismatch(None, DEFAULT_ROSTER) is None
+
+
+# ============== item 3.14 — both horizons, the card, and the rotation slot ====
+
+
+def _league_settings(db, *, dst_limit=3):
+    db.execute(
+        "INSERT INTO league_settings (season, acquisition_type, lineup_slot_counts, "
+        "position_limits, retrieved_as_of, knowable_as_of) VALUES (?,?,?,?,?,?)",
+        (SEASON, "WAIVERS_TRADITIONAL", '{"QB": 1}',
+         '{"QB": 3, "RB": 8, "WR": 8, "TE": 3, "K": 3, "D/ST": %d}' % dst_limit,
+         PULL, PULL),
+    )
+    db.commit()
+
+
+def test_a_streamed_row_prints_BOTH_horizons_in_the_default_view(db, marginal_world):
+    """ITEM 3.14 STEP 2. A one-week gain printed alone is the number that reads as
+    free. Every SHOWN streamed row now carries the season-long re-valuation and
+    the break-even sentence, WITHOUT --reasons, because the drop it proposes is
+    permanent and the page's only number was weekly."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert plan.streaming
+    rec = plan.streaming[0]
+    assert rec.horizon == 1
+    assert rec.season_long_delta is not None
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "BOTH HORIZONS" in text
+    if rec.season_long_delta < 0 and rec.break_even is not None and rec.break_even > 0:
+        assert "You would need to get an equally good" in text
+        assert f"{rec.break_even:.0%}" in text
+    # and the two numbers are never conflated into one
+    assert f"{rec.gain:+.1f}" in text
+
+
+def test_a_POSITIVE_season_long_delta_says_so_and_is_not_warned_about(db, marginal_world):
+    """Measured: one such swap is a season-long GAIN of 4.27. A break-even
+    percentage on a row with nothing to break even on would be a fabricated
+    measurement, so the renderer must take the other branch."""
+    rec = waiver.ClaimRec(
+        add="Steel D/ST", add_position="DST", add_espn_id="-1",
+        kind=KIND_WAIVER, gain=1.57, drop="Bay D/ST", drop_position="DST",
+        startable_this_week=True, horizon=1, drop_unpriceable=False,
+        waiver_rank=None, reasons=(), season_long_delta=4.27, break_even=None)
+    lines = " ".join(waiver._horizons_lines(rec))
+    assert "season-long GAIN" in lines
+    assert "nothing to reacquire" in lines
+    assert "%" not in lines
+
+
+def test_an_UNCOMPUTED_season_long_delta_never_renders_as_zero(db):
+    """'NOT COMPUTED' and 'costs you nothing' are different facts and only one of
+    them is true. A disclosure that swallowed the failure would be worse than the
+    silence it replaced."""
+    rec = waiver.ClaimRec(
+        add="Steel D/ST", add_position="DST", add_espn_id="-1",
+        kind=KIND_WAIVER, gain=1.57, drop="Bay D/ST", drop_position="DST",
+        startable_this_week=True, horizon=1, drop_unpriceable=False,
+        waiver_rank=None, reasons=(), season_long_delta=None, break_even=None)
+    lines = " ".join(waiver._horizons_lines(rec))
+    assert "UNKNOWN, not zero" in lines
+    assert "+0.0" not in lines
+
+
+def test_the_break_even_sentence_quotes_the_shipped_formula(db):
+    """The exact sentence item 3.14 makes mandatory, with the position spelled the
+    way a novice reads it."""
+    rec = waiver.ClaimRec(
+        add="Steel D/ST", add_position="DST", add_espn_id="-1",
+        kind=KIND_WAIVER, gain=1.57, drop="Bay D/ST", drop_position="DST",
+        startable_this_week=True, horizon=1, drop_unpriceable=False,
+        waiver_rank=None, reasons=(), season_long_delta=-26.55,
+        break_even=waiver.break_even_reacquisition(1.57, -26.55))
+    lines = " ".join(waiver._horizons_lines(rec))
+    assert "You would need to get an equally good D/ST back 94% of the time" in lines
+    # Both numbers render at the page's own one-decimal precision — the same
+    # precision every gain on this page uses, so the two horizons are comparable
+    # at a glance rather than one of them looking more precise than it is.
+    assert "+1.6 this week" in lines and "-26.6 over the rest of the season" in lines
+
+
+def test_a_SEASON_LONG_claim_prints_no_horizons_block(db, marginal_world):
+    """The disclosure belongs to the one lane whose number is a single week. A
+    season-long claim's gain already covers the window it names."""
+    rec = waiver.ClaimRec(
+        add="Free Runner", add_position="RB", add_espn_id="1",
+        kind=KIND_FREE_AGENT, gain=153.1, drop="Sixth Catcher", drop_position="WR",
+        startable_this_week=True, horizon=15, drop_unpriceable=False,
+        waiver_rank=None, reasons=(), season_long_delta=-3.0, break_even=0.98)
+    assert waiver._horizons_lines(rec) == []
+
+
+def test_the_three_mandatory_sentences_reach_the_waivers_streaming_section(db, marginal_world):
+    """DONE-WHEN (d), on the OTHER surface. `ziggurat stream` and the waivers
+    streaming lane print ONE text, imported from `streaming.DST_CARD_SENTENCES` —
+    two surfaces paraphrasing one disclosure is how they start disagreeing about
+    what the recommendation cost."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert any(r.drop_position == "DST" for r in plan.streaming)
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    for sentence in streaming.DST_CARD_SENTENCES:
+        assert sentence in text
+
+
+def test_the_horizons_disclosure_moves_NO_recommendation(db, marginal_world):
+    """FREEZE (item 3.14 step 2: 'this is a disclosure; no recommendation moves').
+
+    The chain, the grabs and the streaming lane must be byte-identical to the
+    pre-3.14 build. Proved by disabling the ONE new call — `_with_season_long`
+    reduced to the identity is exactly the old code path — and comparing every
+    ordered tuple the operator acts on."""
+    _stream_world(marginal_world)
+
+    def snapshot(plan):
+        return [
+            (kind, r.chain_rank, r.add, r.drop, round(r.gain, 9),
+             round(r.gain_alone, 9), r.kind)
+            for kind, bucket in (("claim", plan.claims), ("grab", plan.fcfs_grabs),
+                                 ("stream", plan.streaming))
+            for r in bucket
+        ]
+
+    after = snapshot(_plan(db, claim_budget=10))
+    original = waiver._with_season_long
+    try:
+        waiver._with_season_long = lambda board, s: s          # the pre-3.14 path
+        before = snapshot(_plan(db, claim_budget=10))
+    finally:
+        waiver._with_season_long = original
+    assert before == after
+    assert before, "the freeze must compare a NON-EMPTY plan"
+
+
+def test_a_failed_season_long_valuation_does_not_take_the_page_down():
+    """A disclosure that can refuse to print the page is worse than the gap it
+    fills. The attach swallows BOTH failure modes the matrix can raise (a row from
+    another board -> KeyError, a bad key set -> ValueError) and the renderer then
+    says UNKNOWN rather than printing a zero."""
+    row = SwapRow(
+        add="Steel D/ST", drop="Bay D/ST", gain=1.57, add_position="DST",
+        drop_position="DST", add_status="WAIVERS", add_startable_this_week=True,
+        horizon_weeks=1, reasons=())
+
+    class _Boom:
+        def __init__(self, exc):
+            self._exc = exc
+
+        def season_long_delta(self, row):
+            raise self._exc
+
+    for exc in (ValueError("synthetic failure"), KeyError("not my row")):
+        assert waiver._with_season_long(_Boom(exc), row).season_long_delta is None
+    # and an already-computed row is never re-priced
+    done = replace(row, season_long_delta=-26.55)
+    assert waiver._with_season_long(_Boom(ValueError("x")), done).season_long_delta \
+        == -26.55
+
+
+# ---------------------------- step 3: the second-D/ST rotation slot -----------
+
+
+def test_the_rotation_slot_is_priced_when_OUR_guard_is_what_forbids_it(db, marginal_world):
+    """ITEM 3.14 STEP 3. The H-wk02-1 shape — keep the season-long D/ST, rent a
+    SECOND one into a bench slot — could not be printed at all, because
+    POSITION_CAPS caps D/ST at 1 and the pair never reaches the swap matrix. The
+    page now PRICES it out of numbers it already holds and refuses to RANK it."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    plan = _plan(db, claim_budget=10)
+    assert plan.position_caps["DST"] == 1
+    assert plan.league_limits is not None and plan.league_limits["DST"] == 3
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert waiver.ROTATION_SLOT_HEADER in text
+    assert "NOT A RECOMMENDATION" in text
+    assert "H-wk02-1" in text
+    # it names BOTH sides of the trade and never adds the two horizons together
+    assert "keep " in text and "into a bench slot" in text
+    assert "DIFFERENT HORIZONS" in text or "costs you nothing measurable" in text
+    # and it carries the reason the cap is not a bug
+    assert "15 of 16 rosters" in text
+    assert "never by editing the constant" in text
+    # POSITION_CAPS itself is untouched — the whole point of doing it this way
+    assert marginal.POSITION_CAPS["DST"] == 1
+
+
+def test_the_rotation_slot_is_SILENT_when_the_league_itself_caps_dst_at_one(db, marginal_world):
+    """Pricing a move the app would REFUSE is the failure item 3.8a fixed
+    everywhere else. If the league's own limit is 1, the block is a RULE and
+    there is nothing to disclose."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=1)
+    plan = _plan(db, claim_budget=10)
+    assert plan.league_limits["DST"] == 1
+    assert waiver.ROTATION_SLOT_HEADER not in waiver.format_waiver_plan(plan)
+
+
+def test_the_rotation_slot_is_SILENT_when_no_league_settings_were_read(db, marginal_world):
+    """An unverified legality claim is worse than silence (item 3.8a). With no
+    settings row we do not KNOW a second defense is legal here."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert plan.league_limits is None
+    assert waiver.ROTATION_SLOT_HEADER not in waiver.format_waiver_plan(plan)
+
+
+def test_the_rotation_slot_never_names_an_undroppable_or_unpriceable_body(db, marginal_world):
+    """The fence enumeration item 3.8A's audit paid for: every place a DROP can be
+    named is a place the undroppable list must be checked. This prose line is one
+    of them, and an unpriced body is not a body you can cost."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    plan = _plan(db, claim_budget=10)
+    lines = waiver._rotation_slot_lines(plan)
+    named = [d.player for d in plan.drop_board if d.undroppable or d.unpriceable]
+    blob = " ".join(lines)
+    for who in named:
+        assert who not in blob, who
+
+
+def _doctored_body(plan, *, points, name="Spare Runner", position="RB"):
+    body = plan.drop_board[0]
+    return replace(plan, drop_board=(replace(
+        body, player=name, position=position, marginal_points=points,
+        horizon_weeks=16, unpriceable=False, undroppable=False),))
+
+
+def test_the_rotation_slot_prices_a_POSITIVE_body_as_a_permanent_cost(db, marginal_world):
+    """The branch where the rental actually costs points: one week of rental
+    against a WHOLE SEASON of the body it displaces. The two must never be
+    subtracted, and the page converts the gap into weeks instead."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    lines = " ".join(waiver._rotation_slot_lines(
+        _doctored_body(_plan(db, claim_budget=10), points=6.4)))
+    assert "Spare Runner (RB), worth +6.4 house pts over" in lines
+    assert "what you give up PERMANENTLY" in lines
+    assert "DIFFERENT HORIZONS — do not subtract them" in lines
+    assert "week(s) like this one to cover him" in lines
+
+
+def test_the_rotation_slot_says_a_below_replacement_body_costs_no_POINTS(db, marginal_world):
+    """Measured on the live 2026-09-15 board: the cheapest unspent body prices at
+    -5.7 over 16 weeks, i.e. below a replacement-level free agent. Saying "you give
+    up -5.7" would be unreadable; the honest statement is that the price of this
+    rental is not points at all — and the page then names what it IS."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    lines = " ".join(waiver._rotation_slot_lines(
+        _doctored_body(_plan(db, claim_budget=10), points=-5.7)))
+    assert "BELOW what a replacement-level free agent is worth" in lines
+    assert "costs nothing measurable in points" in lines
+    assert "a roster slot and the attention of re-deciding the slot every week" in lines
+    assert "what you give up PERMANENTLY" not in lines
+
+
+def test_the_rotation_slot_says_so_when_there_is_no_body_to_pay_with(db, marginal_world):
+    """'There is nothing to pay with' is an ANSWER, not a missing feature — and it
+    must not be silence, because silence reads as 'the shape was not considered'."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    plan = _plan(db, claim_budget=10)
+    lines = " ".join(waiver._rotation_slot_lines(replace(plan, drop_board=())))
+    assert waiver.ROTATION_SLOT_HEADER in lines
+    assert "nothing to pay with" in lines
+    assert "the answer for today, not a missing feature" in lines
+
+
+def test_the_both_horizons_note_says_the_season_long_half_is_a_RATE_not_a_forecast(
+        db, marginal_world):
+    """The break-even percentage is a confident-looking number, and the season-long
+    half of it comes off the SAME flat season-rate feed the weekly half does (item
+    3.2). Printing the percentage without saying so hands a novice a forecast that
+    nobody made. Said ONCE, at the head of the lane, not per row."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert any(r.season_long_delta is not None for r in plan.streaming)
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "BOTH-HORIZONS NOTE" in text
+    assert "FLAT SEASON-RATE projection feed" in text
+    assert "NOT a forecast" in text
+    assert text.count("BOTH-HORIZONS NOTE") == 1
+
+
+def test_the_both_horizons_note_is_silent_when_nothing_was_priced(db, marginal_world):
+    """An explanation of numbers that are not on the page is noise, and noise at the
+    top of a lane is how the lane stops being read."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    stripped = replace(plan, streaming=tuple(
+        replace(r, season_long_delta=None, break_even=None) for r in plan.streaming))
+    assert "BOTH-HORIZONS NOTE" not in waiver.format_waiver_plan(stripped)
+
+
+def test_the_rotation_slot_reconciles_itself_with_the_drop_boards_own_sentence(
+        db, marginal_world):
+    """Two renderers of one scan appearing to contradict each other is the failure
+    the item-3.8A audit paid for. The DROP BOARD on this same page prints
+    `marginal.py`'s own 'a second DST is never considered as an add' — which stays
+    TRUE, because it is about the ranked SEARCH — directly below a block that
+    prices exactly that shape. The reconciliation is stated, not left to the
+    reader, and BOTH sentences must be on the page for this test to mean anything."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    text = waiver.format_waiver_plan(_plan(db, claim_budget=10), reasons=True)
+    assert "a second DST is never considered as an add" in text   # marginal.py's
+    assert "This does NOT contradict the drop board below" in text
+    assert "This block is a PRICE, not a ranking." in text

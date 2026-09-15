@@ -514,3 +514,294 @@ def test_dst_weather_multiplier_none_gate_and_bump():
     mult, reason = got
     assert mult == pytest.approx(1.0 + adj.dst_weather_bump)
     assert "28 mph" in reason
+
+
+# ============================ item 3.14 — the weekly market board =============
+#
+# Step 1 swaps the D/ST RANKER: the already-captured FantasyPros weekly D/ST
+# consensus (`fp_weekly_ecr`, page 'dst') orders the page when a board for THIS
+# week exists, and the opponent-quality composite becomes the no-board fallback.
+# Everything below is synthetic (Rule 5); the numbers that justify the swap are
+# measured and live in `streaming.MARKET_LABEL`.
+
+
+def _fp_dst(db, *, team, rank, ecr, week=WEEK, scrape=PULL, retrieved=None,
+            season=SEASON, label=None):
+    """One row of the weekly D/ST consensus board, shaped like migration 016's."""
+    db.execute(
+        "INSERT INTO fp_weekly_ecr (fantasypros_id, page, scrape_date, season, "
+        "nfl_week, week_basis, player, position, team, rank, ecr, pos_rank_label, "
+        "retrieved_as_of, knowable_as_of) VALUES "
+        "(?, 'dst', ?, ?, ?, 'fantasypros_page', ?, 'DST', ?, ?, ?, ?, ?, ?)",
+        (f"FP-{team}-{scrape}", scrape, season, week, f"{team} Defense", team,
+         rank, ecr, label or f"DST{rank}", retrieved or scrape, scrape),
+    )
+
+
+def _two_dst_world(marginal_world, db):
+    """Two free-agent D/STs whose HOUSE projections (and therefore the composite)
+    rank MIA over PIT, plus the offenses that make the opponent tilt non-trivial."""
+    specs = [
+        {"name": "Bay D/ST", "pos": "D/ST", "team": "MIA", "pts": 9.0, "bye": 8},
+        {"name": "Steel D/ST", "pos": "D/ST", "team": "PIT", "pts": 5.0, "bye": 9},
+        {"name": "Giant Runner", "pos": "RB", "team": "NYG", "pts": 12.0, "bye": 7},
+        {"name": "Giant Catcher", "pos": "WR", "team": "NYG", "pts": 10.0, "bye": 7},
+        {"name": "Charge Runner", "pos": "RB", "team": "LAC", "pts": 11.0, "bye": 7},
+        {"name": "Ref Runner B", "pos": "RB", "team": "TB", "pts": 18.0, "bye": 9},
+        {"name": "Ref Catcher C", "pos": "WR", "team": "SEA", "pts": 14.0, "bye": 9},
+    ]
+    marginal_world(specs, retrieved=PULL)
+    _sched(db, game_id="G_MIA", week=WEEK, home="MIA", away="NYG", gameday="2026-09-21")
+    _sched(db, game_id="G_PIT", week=WEEK, home="PIT", away="LAC", gameday="2026-09-21")
+    _sched(db, game_id="G_TB", week=WEEK, home="TB", away="SEA", gameday="2026-09-21")
+    db.commit()
+
+
+def test_the_weekly_market_board_sets_the_dst_order(db, marginal_world):
+    """DONE-WHEN (a). The board RANKS the page, and the teeth are that it ranks it
+    AGAINST the composite: PIT is ranked first on a lower stream_score and a lower
+    house projection than MIA, which can only come from the market board."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10)
+    _fp_dst(db, team="MIA", rank=9, ecr=11.40)
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert board.ranked_on_market is True
+    assert [r.team for r in board.ranked] == ["PIT", "MIA"]
+    top, second = board.ranked
+    # the two rankers genuinely DISAGREE here — without that this test would pass
+    # on a board that changed nothing.
+    assert top.stream_score < second.stream_score
+    assert top.house_points < second.house_points
+    assert (top.market_rank, top.market_label) == (1, "DST1")
+
+
+def test_with_no_weekly_board_the_order_is_the_pre_314_composite(db, marginal_world):
+    """The no-board FALLBACK is the OLD ranker, unchanged — not a re-implementation
+    of it. With no board stored, the order is stream_score-descending and the page
+    says which ranker it used and why."""
+    _two_dst_world(marginal_world, db)
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert board.ranked_on_market is False
+    assert board.market is None
+    assert [r.team for r in board.ranked] == ["MIA", "PIT"]
+    assert [r.stream_score for r in board.ranked] == sorted(
+        [r.stream_score for r in board.ranked], reverse=True)
+    assert all(r.market_ecr is None for r in board.ranked)
+    text = format_stream_board(board)
+    assert "FALLBACK RANKER" in text
+    assert "No D/ST board of any week is stored" in text
+
+
+def test_a_board_scraped_after_the_as_of_cannot_rank_the_page(db, marginal_world):
+    """RULE 1 / LEAKAGE. `knowable_as_of = scrape_date`, so a board scraped AFTER
+    the decision is invisible — this is exactly why item 3.14 needed no fence
+    moved. The SAME rows appear once the as-of reaches the scrape."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10, scrape="2026-09-17")
+    _fp_dst(db, team="MIA", rank=9, ecr=11.40, scrape="2026-09-17")
+    db.commit()
+    early = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert early.market is None
+    assert [r.team for r in early.ranked] == ["MIA", "PIT"]      # composite order
+    later = rank_streamers(db, as_of="2026-09-17", season=SEASON, position="DST",
+                           week=WEEK)
+    assert later.market is not None and later.market.scrape_date == "2026-09-17"
+    assert [r.team for r in later.ranked] == ["PIT", "MIA"]
+
+
+def test_the_newest_scrape_of_the_week_is_the_board(db, marginal_world):
+    """Upstream rewrites this file twice a day and the ranks MOVE (81 of 159 ppr-rb
+    ids in one 5.7-hour window, measured 2026-09-04). Two scrapes of the same week
+    are two versions of one board: the FRESHEST one <= as_of wins, and the stale
+    one must not leak a rank into the order."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=9, ecr=11.4, scrape="2026-09-14")
+    _fp_dst(db, team="MIA", rank=1, ecr=2.1, scrape="2026-09-14")
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10, scrape=PULL)
+    _fp_dst(db, team="MIA", rank=9, ecr=11.40, scrape=PULL)
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert board.market.scrape_date == PULL
+    assert [r.team for r in board.ranked] == ["PIT", "MIA"]
+
+
+def test_a_board_for_another_week_is_never_served_for_this_one(db, marginal_world):
+    """The whole point of the item: a week-1 board ranking week-3 defenses is a
+    season-long list wearing a weekly label. It falls back, and it NAMES what is
+    stored so the operator can tell 'no capture' from 'not this week's'."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10, week=1, scrape="2026-09-14")
+    _fp_dst(db, team="MIA", rank=9, ecr=11.40, week=1, scrape="2026-09-14")
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert board.market is None
+    assert board.market_alt is not None and board.market_alt.week == 1
+    assert [r.team for r in board.ranked] == ["MIA", "PIT"]
+    text = format_stream_board(board)
+    assert "which ranks week 1" in text
+    assert "it is NOT served for week 3" in text
+
+
+def test_a_candidate_absent_from_the_board_ranks_below_every_board_row(db, marginal_world):
+    """An absence of a market opinion is not a low one — but it is also not a
+    reason to rank him on a different ruler than everyone else, so he sits below
+    the boarded rows and the page says he is missing rather than bad."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=20, ecr=24.0)      # boarded, and rated badly
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert [r.team for r in board.ranked] == ["PIT", "MIA"]
+    mia = next(r for r in board.ranked if r.team == "MIA")
+    assert mia.market_ecr is None
+    assert any("is NOT on the week-3 FantasyPros D/ST board" in r for r in mia.reasons)
+    assert any("absent from that board" in n for n in board.notes)
+
+
+def test_every_boarded_row_quotes_the_rho_the_cohort_and_the_paired_margin(db, marginal_world):
+    """RULE 6. A ranker swapped in on a measurement must carry the measurement —
+    INCLUDING the half that does not flatter it (the head-to-head against the
+    composite it replaces is indistinguishable, and the row says so)."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10)
+    _fp_dst(db, team="MIA", rank=9, ecr=11.40)
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    blob = " ".join(r for rec in board.ranked if rec.market_ecr is not None
+                    for r in rec.reasons)
+    for token in ("+0.2701", "+0.1300", "826 rows", "n=38 paired weeks",
+                  "CROSSES ZERO", "INDISTINGUISHABLE", "probe E08c"):
+        assert token in blob, token
+    # and it never promises the market will agree with us later (item 4.1).
+    for banned in ("will confirm", "will agree", "the market will"):
+        assert banned not in blob.lower()
+
+
+def test_the_three_mandatory_card_sentences_are_on_the_dst_card(db, marginal_world):
+    """DONE-WHEN (d). All three, above the table, every time — and NOT on the
+    kicker card, which this item did not measure and did not change."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10)
+    db.commit()
+    text = format_stream_board(
+        rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK))
+    for sentence in streaming.DST_CARD_SENTENCES:
+        assert sentence in text
+    assert len(streaming.DST_CARD_SENTENCES) == 3
+    assert "THE ALTERNATIVE IS HOLDING" in text and "CROSSES ZERO" in text
+    assert "8 WEEKS OUT OF 10" in text and "38 of 45" in text
+    assert "TABLE STAKES" in text and "0 to +0.4 pts/wk" in text
+    # the posture disclosure rides with them, keyed on posture and never a "never"
+    assert "-0.4614" in text and "never a" in text
+    k_text = format_stream_board(
+        rank_streamers(db, as_of=PULL, season=SEASON, position="K", week=WEEK))
+    assert "THE ALTERNATIVE IS HOLDING" not in k_text
+
+
+def test_the_kicker_lane_never_reads_the_market_board(db, marginal_world):
+    """The rho and the paired margin were measured on the D/ST page. A kicker board
+    exists upstream and is captured; using it here would be swapping a ranker on
+    another position's evidence."""
+    _basic_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10)
+    db.execute(
+        "INSERT INTO fp_weekly_ecr (fantasypros_id, page, scrape_date, season, "
+        "nfl_week, week_basis, player, position, team, rank, ecr, retrieved_as_of, "
+        "knowable_as_of) VALUES ('FPK', 'k', ?, ?, ?, 'fantasypros_page', "
+        "'Boot Leg', 'K', 'KC', 1, 1.0, ?, ?)", (PULL, SEASON, WEEK, PULL, PULL))
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="K", week=WEEK)
+    assert board.market is None and board.market_alt is None
+    assert all(r.market_ecr is None for r in board.ranked)
+    assert streaming.MARKET_PAGE == "dst"
+
+
+# ------------------- item 3.17 deliverable 3 (stream half): the age banner -----
+
+
+def _age_one_projection(db, *, team, position, retrieved):
+    """Re-stamp one player's projection rows as an OLD pull, the way a source that
+    stopped refreshing leaves an orphan row behind. Keyed on (team, position)
+    because `projections` has no display-name column — a D/ST row's
+    `source_player_id` IS the team abbr (the 003 contract)."""
+    db.execute(
+        "UPDATE projections SET retrieved_as_of = ? WHERE team = ? AND position = ?",
+        (retrieved, team, position))
+    db.commit()
+
+
+def test_the_projection_age_banner_counts_and_clears_an_unranked_orphan(db, marginal_world):
+    """ITEM 3.17 (3). The shipped banner read the OLDEST pull anywhere on the board
+    and said 'some projections on this board are N days old' — on the live
+    2026-09-15 board that was ONE orphan row of 3,229, and it rendered as a blanket
+    'do not trust this page'. It must COUNT, and it must say whether a RANKED row
+    is among them: a stale row nobody is ranking does not move an order."""
+    _two_dst_world(marginal_world, db)
+    _age_one_projection(db, team="TB", position="RB", retrieved="2026-08-20")
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    banner = " ".join(board.freshness)
+    assert "1 of " in banner and "projection rows on this board" in banner
+    assert "NO ranked candidate on this page is among them" in banner
+    assert "not a reason to distrust the rank" in banner
+    # the old, uncountable wording is gone for good
+    assert "some projections on this board" not in banner
+
+
+def test_the_projection_age_banner_names_a_stale_RANKED_candidate(db, marginal_world):
+    """The other branch, and the one that matters: when the stale row IS on the
+    page, the banner says the rank is affected and names him."""
+    _two_dst_world(marginal_world, db)
+    _age_one_projection(db, team="PIT", position="DEF", retrieved="2026-08-20")
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    banner = " ".join(board.freshness)
+    assert "IS a ranked candidate on this page (Steel D/ST)" in banner
+    assert "this rank IS affected" in banner
+    assert "NO ranked candidate" not in banner
+
+
+def test_the_mkt_column_shows_the_CONSENSUS_and_is_monotone_down_the_page(db, marginal_world):
+    """Measured on the live 2026-09-14 board: upstream's own integer label and its
+    consensus average DISAGREE (TEN is labelled DST11 at ecr 10.89, DET DST10 at
+    11.05). The consensus is what orders the page and what the rho was measured on,
+    so the column must show THAT — a column that is not monotone down its own
+    ordering is a column the reader stops believing — and the page must say the
+    printed DSTn label can sit a place away from it."""
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=11, ecr=10.89, label="DST11")
+    _fp_dst(db, team="MIA", rank=10, ecr=11.05, label="DST10")
+    db.commit()
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert [r.team for r in board.ranked] == ["PIT", "MIA"]     # ecr, not rank
+    text = format_stream_board(board)
+    assert "10.89" in text and "11.05" in text
+    assert "DST11" not in text.split("WHAT THIS RANKING IS")[0]
+    assert "CONSENSUS, lower is better" in text
+    assert "a place or two away from upstream's own printed DSTn label" in text
+    # the label is not lost — it rides in the row's own reasons
+    assert "DST11" in " ".join(board.ranked[0].reasons)
+
+
+def test_the_stream_card_discloses_that_it_prices_ONE_horizon(db, marginal_world):
+    """DONE-WHEN (b), the half this page cannot meet and must not hide. `ziggurat
+    waivers` prints both horizons because it holds the roster and the priced swap
+    matrix; this page holds neither, and building them would turn a ~4 s quick scan
+    into a ~24 s one. So the gap is stated, with the measured magnitude and the
+    command that closes it — never left as an unqualified upside."""
+    _basic_world(marginal_world, db)
+    for pos in ("DST", "K"):
+        board = rank_streamers(db, as_of=PULL, season=SEASON, position=pos, week=WEEK)
+        assert board.ranked, pos
+        text = format_stream_board(board)
+        assert "ONE HORIZON ONLY" in text, pos
+        assert "ziggurat waivers" in text, pos
+    assert "-23.1" in streaming.ONE_HORIZON_NOTE
+    assert "86% break-even" in streaming.ONE_HORIZON_NOTE
+
+
+def test_the_one_horizon_note_is_silent_on_an_empty_board(db, marginal_world):
+    """Nothing was shown, so there is no upside to qualify. An explanation attached
+    to zero rows is the noise that teaches an operator to skim the header."""
+    _basic_world(marginal_world, db)
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=99)
+    assert board.ranked == ()
+    assert "ONE HORIZON ONLY" not in format_stream_board(board)

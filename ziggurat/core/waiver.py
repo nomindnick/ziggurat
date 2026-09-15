@@ -71,8 +71,9 @@ module, never imports from ``ziggurat/draft/``.
 """
 
 import heapq
+import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ziggurat.core.candidates import (
     CandidateBoard,
@@ -95,9 +96,11 @@ from ziggurat.core.marginal import (
     SwapRow,
     WeekResolutionError,
     build_board,
+    break_even_reacquisition,
     classify_acquisition,
     describe_cap,
 )
+from ziggurat.core.streaming import DST_CARD_SENTENCES
 from ziggurat.core.valuation import DEFAULT_ROSTER, RosterStructure
 from ziggurat.data.asof import normalize_as_of
 from ziggurat.data.nfl import base, refresh
@@ -438,6 +441,16 @@ class ClaimRec:
     # changes. ``None`` on a PURE ADD (there is no drop) and whenever the swap
     # itself carried no id.
     drop_espn_id: str | None = None
+    # --- item 3.14 step 2: the other horizon, on every SHOWN streamed row -----
+    # ``gain`` above is ONE WEEK for a streamed row. ``season_long_delta`` is the
+    # same (drop, add) re-valued over the whole window on ``model_full``, and
+    # ``break_even`` is ``1 - gain/cost``: how often you must get an equally good
+    # replacement back for the one-week move to pay for its season-long cost.
+    # ``break_even`` is None when there is nothing to break even on — the delta was
+    # not computed, or it is POSITIVE (a season-long gain, which is not warned
+    # about). DISCLOSURE ONLY: neither field touches an ordering.
+    season_long_delta: float | None = None
+    break_even: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1044,6 +1057,23 @@ def _candidate_notes_by_espn(
     return notes, list(board.notes), board
 
 
+def _with_season_long(board: MarginalBoard, s: SwapRow) -> SwapRow:
+    """Attach the SEASON-LONG re-valuation of a shown streamed row (item 3.14 §2).
+
+    Swallows a failure rather than taking the page down: this is a DISCLOSURE, and
+    a plan that refuses to print because one extra number could not be computed is
+    worse than a plan that prints the number it has and says the other is missing.
+    The renderer states "not computed" when it comes back None — it never prints a
+    zero, which would read as "this costs you nothing".
+    """
+    if s.season_long_delta is not None:
+        return s
+    try:
+        return replace(s, season_long_delta=board.season_long_delta(s))
+    except (KeyError, ValueError):
+        return s
+
+
 def _is_streamed(s: SwapRow) -> bool:
     """A this-week-only D/ST or K swap — 3.5's lane (item 3.4 audit F4). Keyed on
     the DROP position AND a 1-week horizon, so a late-season 1-week season-long swap
@@ -1077,6 +1107,7 @@ def _swap_rec(
     espn_id, caveat = _add_espn_id(s, dup_names)
     shown = s.gain if gain is None else gain
     alone = s.gain if gain_alone is None else gain_alone
+    break_even = break_even_reacquisition(shown, s.season_long_delta)
     return ClaimRec(
         add=s.add,
         add_position=s.add_position,
@@ -1099,6 +1130,8 @@ def _swap_rec(
         gain_alone=alone,
         chain_rank=chain_rank,
         drop_espn_id=None if is_pure_add else s.drop_espn_id,
+        season_long_delta=s.season_long_delta,
+        break_even=break_even,
     )
 
 
@@ -1309,10 +1342,15 @@ def _select_claims(
     stream_sorted = sorted(streamed, key=lambda s: (-s.gain, s.add, s.drop))
     stream_recs = tuple(
         _swap_rec(
-            s, waiver_rank=waiver_rank, team_count=team_count,
+            _with_season_long(board, s),
+            waiver_rank=waiver_rank, team_count=team_count,
             candidate_notes=candidate_notes, dup_names=dup_names, is_pure_add=False,
             faab=faab,
         )
+        # ITEM 3.14 STEP 2: the ORDER is unchanged (still -gain, add, drop — a
+        # one-week lane sorted on its one-week number) and the slice is unchanged.
+        # The season-long re-valuation happens INSIDE the slice, on the rows this
+        # page will actually print, because each one costs a roster valuation.
         for s in stream_sorted[:budget]
     )
     streamed_hidden = max(len(stream_sorted) - len(stream_recs), 0)
@@ -2350,6 +2388,186 @@ def _claim_line(rec: ClaimRec) -> str:
     )
 
 
+def _pos_display(position: str | None) -> str:
+    return "D/ST" if (position or "").upper() == "DST" else (position or "player")
+
+
+def _horizons_lines(rec: ClaimRec) -> list[str]:
+    """BOTH horizons for one streamed row — item 3.14 step 2, DEFAULT view.
+
+    A streamed ``gain`` is ONE WEEK. What it never said is what the same move does
+    to the rest of the season, and on the live board that number is not small: the
+    item's own measurement is a "+1.57 this week" stream costing 26.55 house points
+    over weeks 1-17 if the dropped defense is never reacquired — a 94.09%
+    break-even reacquisition probability the page did not print.
+
+    A POSITIVE season-long delta says so and is NOT warned about (measured: one
+    such swap is a season-long gain of 4.27). ``None`` prints as UNKNOWN, never as
+    zero: "this costs you nothing" is the one thing a missing number must not say.
+    """
+    if rec.horizon != 1:
+        return []
+    who = rec.drop or "the player you drop"
+    if rec.season_long_delta is None:
+        return [
+            f"      BOTH HORIZONS: the season-long cost of this swap could NOT be "
+            f"computed at this as-of. That is UNKNOWN, not zero — treat the "
+            f"{rec.gain:+.1f} above as a one-week number with an unmeasured tail."
+        ]
+    delta = rec.season_long_delta
+    if delta >= 0.0:
+        return [
+            f"      BOTH HORIZONS: {rec.gain:+.1f} this week AND {delta:+.1f} over the "
+            f"rest of the season — this one is a season-long GAIN as well, so there "
+            f"is nothing to reacquire and no break-even to clear."
+        ]
+    if rec.break_even is not None and rec.break_even <= 0.0:
+        return [
+            f"      BOTH HORIZONS: {rec.gain:+.1f} this week against {delta:+.1f} over "
+            f"the rest of the season — this week alone already covers the whole "
+            f"season-long cost, so it pays even if you never get {who} back."
+        ]
+    return [
+        f"      BOTH HORIZONS: {rec.gain:+.1f} this week, but {delta:+.1f} over the "
+        f"rest of the season if you never get {who} back.",
+        f"      You would need to get an equally good {_pos_display(rec.drop_position)} "
+        f"back {rec.break_even:.0%} of the time for this to be worth it.",
+    ]
+
+
+#: Item 3.14 step 3. The one shape the waiver page could not price at all: a
+#: SECOND D/ST rented for a week into a bench slot while the season-long one is
+#: kept. `marginal.POSITION_CAPS` caps D/ST at 1, so the pair never reaches the
+#: swap matrix — the tool printed nothing, not even a refusal, and the operator
+#: hand-priced it in the Week-2 journal (hypothesis H-wk02-1).
+#:
+#: THE DESIGN DECISION, recorded where it is read: this is a DISCLOSURE, not a
+#: flag and not a new "rotation slot" concept in the model. The cap is not a bug —
+#: item 3.2 measured that an uncapped board makes a second defense the top add on
+#: 15 of 16 rosters, because the projection feed is a flat SEASON RATE and prefers
+#: a second D/ST mechanically. Relaxing the cap to rank this move would put that
+#: artefact back on the board for every roster in order to price one hypothesis.
+#: So the page PRICES the shape out of numbers it already holds (the streamed
+#: row's one-week gain and the drop board's season-long body value) and refuses to
+#: rank it.
+ROTATION_SLOT_HEADER = (
+    "ROTATION SLOT — NOT A RECOMMENDATION, priced for the record "
+    "(item 3.14 step 3; hypothesis H-wk02-1)"
+)
+
+
+def _rotation_slot_lines(plan: "WaiverPlan") -> list[str]:
+    """Price the second-D/ST rental the swap matrix cannot contain (item 3.14 §3).
+
+    Prints only when the MODULE guard is what forbids the move and the LEAGUE does
+    not: a cap of 1 that the league also imposes is a rule, and pricing a move the
+    app would refuse is the failure mode item 3.8a fixed everywhere else.
+    """
+    stream = next(
+        (r for r in plan.streaming if r.drop_position == "DST" and r.drop), None)
+    if stream is None:
+        return []
+    caps = plan.position_caps or {}
+    limits = plan.league_limits
+    module_cap = caps.get("DST")
+    league_cap = None if limits is None else limits.get("DST")
+    if module_cap != 1 or league_cap is None or league_cap < 2:
+        # Either the league caps D/ST at one too (then it is a RULE and there is
+        # nothing to disclose), or no settings row was readable — in which case we
+        # do not know it is legal, and item 3.8a's lesson is that an unverified
+        # legality claim is worse than silence.
+        return []
+    spent = {r.drop for r in list(plan.claims) + list(plan.fcfs_grabs) if r.drop}
+    droppable = [
+        d for d in plan.drop_board
+        if not d.unpriceable and not d.undroppable and d.horizon_weeks != 1
+        and d.position not in STREAMED_POSITIONS
+    ]
+    body = next((d for d in droppable if d.player not in spent), None)
+    weeks = len(plan.weeks) or 1
+
+    out = ["", ROTATION_SLOT_HEADER]
+    out.append(
+        f"  The tool CANNOT rank this move: our own `marginal.POSITION_CAPS` caps "
+        f"D/ST at {module_cap}, so a SECOND defense is filtered out of the swap "
+        f"matrix before anything is priced. This league's own limit is {league_cap} "
+        f"(`ziggurat league settings`), so the block is OUR modelling guard, not a "
+        f"rule ESPN would enforce."
+    )
+    out.append(
+        # The drop board on this same page says, in `marginal.py`'s own words, "a
+        # second DST is never considered as an add". That stays TRUE and stays
+        # printed — it is a statement about the ranked SEARCH. Two renderers of one
+        # scan appearing to contradict each other is the failure the item-3.8A
+        # audit paid for, so the reconciliation is stated here rather than left for
+        # the reader to notice.
+        "  This does NOT contradict the drop board below, which says a second D/ST "
+        "is never considered as an add: that is true of the ranked SEARCH and stays "
+        "true. This block is a PRICE, not a ranking."
+    )
+    out.append(
+        f"  THE SHAPE: keep {stream.drop} (the D/ST you already hold), ADD "
+        f"{stream.add} into a bench slot for week-only use, and pay for the body "
+        f"you displace."
+    )
+    out.append(
+        f"    - the rental is worth {stream.gain:+.1f} house pts THIS WEEK over "
+        f"starting {stream.drop} — the SAME one-week number as the streaming row "
+        f"above, from the same one-week model."
+    )
+    if body is None:
+        out.append(
+            "    - but no priceable, droppable, season-long bench body is available "
+            "at this as-of, so there is nothing to pay with and the shape cannot be "
+            "completed. That is the answer for today, not a missing feature."
+        )
+    else:
+        cost = body.marginal_points
+        chain_note = (
+            f" (The chain above already spends {len(spent)} of your droppable bodies; "
+            f"this is the cheapest one it does not.)" if spent else ""
+        )
+        if cost <= 0.0:
+            out.append(
+                f"    - the body it displaces is {body.player} ({body.position}), priced "
+                f"at {cost:+.1f} house pts over {weeks} wks on the drop board — at or "
+                f"BELOW what a replacement-level free agent is worth, so giving him up "
+                f"costs nothing measurable in points." + chain_note
+            )
+            out.append(
+                "    - so the price of this rental is NOT points: it is a roster slot "
+                "and the attention of re-deciding the slot every week. Those are the "
+                "two things this page cannot put a number on."
+            )
+        else:
+            out.append(
+                f"    - the body it displaces is {body.player} ({body.position}), worth "
+                f"{cost:+.1f} house pts over {weeks} wks — his own season-long drop-board "
+                f"value, i.e. what you give up PERMANENTLY." + chain_note
+            )
+            need = math.ceil(cost / stream.gain) if stream.gain > 0 else None
+            out.append(
+                f"    - DIFFERENT HORIZONS — do not subtract them. One week of rental "
+                f"against a whole season of body."
+                + (f" At this week's rate the rotation must beat {stream.drop} in about "
+                   f"{need} week(s) like this one to cover him." if need else "")
+            )
+    out.append(
+        f"  Unlike the SWAP above, this keeps {stream.drop}, so that row's "
+        f"season-long cost does not apply here — you pay with a bench body instead."
+    )
+    out.append(
+        "  WHY THIS IS NOT A RECOMMENDATION: item 3.2 measured that an UNCAPPED board "
+        "makes a second defense the top add on 15 of 16 rosters, because the "
+        "projection feed is a flat SEASON RATE and prefers a second D/ST "
+        "mechanically, not because a matchup is good — and the one-week number above "
+        "comes from that same flat feed. The cap is load-bearing PRECISELY BECAUSE "
+        "the feed is flat. Settle this with a journalled experiment (H-wk02-1 carries "
+        "a Week-5 falsifying trigger), never by editing the constant."
+    )
+    return out
+
+
 def _rejection_line(r: ChainRejection) -> str:
     """One refusal, in the SAME labelled vocabulary the claim lines use.
 
@@ -2553,10 +2771,35 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
     if plan.streaming:
         out.append(f"STREAMING (this week only — item 3.5's lane, NOT a season-long "
                    f"claim)  ({len(plan.streaming)})")
+        if any(r.season_long_delta is not None for r in plan.streaming):
+            # What the BOTH HORIZONS numbers are, said once rather than per row.
+            # The season-long half is priced off the SAME flat season-rate feed the
+            # one-week half is (item 3.2), so it is a comparison of rates, not a
+            # forecast — and a break-even percentage printed without that is a
+            # confident-looking number a novice cannot discount.
+            out.append(
+                "  * BOTH-HORIZONS NOTE: the season-long figure on each row is priced "
+                "off the same FLAT SEASON-RATE projection feed as the weekly one (item "
+                "3.2 measured D/ST as the only position with real week-to-week movement, "
+                "~12% CV). It is a comparison of season RATES — the right order of "
+                "magnitude for 'what does giving him up cost' — and it is NOT a forecast "
+                "of what the defense you drop will actually score."
+            )
+        if any(r.drop_position == "DST" for r in plan.streaming):
+            # Item 3.14: the three mandatory sentences, VERBATIM from
+            # `streaming.DST_CARD_SENTENCES` — this page and `ziggurat stream` print
+            # one text, because two surfaces paraphrasing one disclosure is how they
+            # start disagreeing about what the number cost.
+            for sentence in DST_CARD_SENTENCES:
+                out.append(f"  * {sentence}")
         for rec in plan.streaming:
             out.append(_claim_line(rec))
+            # BOTH horizons, in the DEFAULT view (item 3.14 step 2): a one-week gain
+            # printed alone is the number that reads as free.
+            out.extend(_horizons_lines(rec))
             if reasons:
                 out.extend(f"      - {r}" for r in rec.reasons)
+        out.extend(_rotation_slot_lines(plan))
         out.append("")
 
     # --- drop board -----------------------------------------------------------

@@ -649,6 +649,32 @@ class SwapRow:
     # existing SwapRow constructors and the marginal suite unchanged.
     add_espn_id: str | None = None
     drop_espn_id: str | None = None
+    # --- item 3.14 step 2: the OTHER horizon --------------------------------
+    # ``gain`` for a streamed (D/ST, K) row is a ONE-WEEK number priced on
+    # ``model_now``: the whole point of the streamed lane. What it never said is
+    # what the same (drop, add) does to the REST OF THE SEASON — and that number is
+    # not small. Item 3.14's own measurement: a "+1.57 this week" stream costs
+    # 26.55 house points over weeks 1-17 if the dropped defense is never
+    # reacquired (a 94.09% break-even). Re-measured through this field on the live
+    # 2026-09-15 board: +3.2 this week against -23.1 over weeks 2-17, an 86%
+    # break-even. ``None`` means NOT COMPUTED, never "zero": it is filled in only
+    # for the rows a page actually SHOWS, because each one costs a full roster
+    # valuation at the reporting depth.
+    season_long_delta: float | None = None
+
+
+def break_even_reacquisition(gain: float, season_long_delta: float | None) -> float | None:
+    """``1 - G/C`` — how often you must get an equally good replacement back for a
+    one-week swap to be worth its season-long cost (item 3.14 step 2).
+
+    ``None`` when there is nothing to break even ON: either the season-long delta
+    was not computed, or it is POSITIVE (the swap is a season-long gain too, so it
+    needs no reacquisition at all and must NOT be warned about). A return <= 0 means
+    the one-week gain already covers the whole season-long cost.
+    """
+    if season_long_delta is None or season_long_delta >= 0.0:
+        return None
+    return 1.0 - (gain / -season_long_delta)
 
 
 @dataclass(frozen=True)
@@ -761,6 +787,23 @@ class MarginalBoard:
         RAISES rather than silently pricing a one-week move over the whole window.
         """
         return self._swaps.value_after(swaps, pure_adds=pure_adds)
+
+    def season_long_delta(self, row: SwapRow) -> float:
+        """What this (drop, add) does to the REST OF THE SEASON (item 3.14 step 2).
+
+        The mirror image of ``value_after``, and deliberately a SEPARATE entry
+        point rather than a flag on it: ``value_after`` RAISES on a streamed row
+        because the chain must never price a one-week move over the whole window,
+        and that refusal is load-bearing. This does the opposite ON PURPOSE — it
+        re-values the SAME pair on ``model_full`` at the board's own reporting
+        depth, so a page can print both horizons of one move without either
+        estimator leaking into the other's lane.
+
+        Applies to any row in this matrix, streamed or not. On a season-long row it
+        reproduces the standalone gain by construction (same model, same depth),
+        which makes it a checkable identity rather than a second opinion.
+        """
+        return self._swaps.season_long_delta(row)
 
     @property
     def value_after_evaluations(self) -> int:
@@ -888,6 +931,39 @@ class _SwapMatrix:
         # (float summation order), which is enough to flip an exact-tie comparison
         # between two runs of the same chain.
         value = model_full.value_at_depth(sorted(keys), max(int(depth), 1))
+        self.evaluations += 1
+        self._value_cache[cache_key] = value
+        return value
+
+    def season_long_delta(self, row) -> float:
+        """See ``MarginalBoard.season_long_delta``. Memoised on (drop, add) keys,
+        sharing the ``value_after`` cache — the base roster's season-long value is
+        computed ONCE however many streamed rows a page shows."""
+        _entries, model_full, _model_now, depth = self._ctx
+        drop_key, add_key = self.keys_of(row)
+        d = max(int(depth), 1)
+        cache_key = ("__season_long__", drop_key, add_key)
+        hit = self._value_cache.get(cache_key)
+        if hit is not None:
+            return hit
+        base = self.base_keys()
+        keys = sorted((set(base) - {drop_key}) | {add_key})
+        if len(keys) != len(base):
+            raise ValueError(
+                f"season_long_delta: dropping '{row.drop}' for '{row.add}' leaves "
+                f"{len(keys)} roster keys, expected {len(base)} — a duplicated or "
+                f"off-roster key would be seated twice. Refusing to price it."
+            )
+        base_cache_key = ("__season_long_base__",)
+        base_value = self._value_cache.get(base_cache_key)
+        if base_value is None:
+            # Canonically sorted on BOTH sides, for the reason `value_after`
+            # documents: float summation order alone moves a 16-key roster by
+            # ~4.5e-13, which is enough to flip an exact-tie comparison.
+            base_value = model_full.value_at_depth(sorted(base), d)
+            self.evaluations += 1
+            self._value_cache[base_cache_key] = base_value
+        value = model_full.value_at_depth(keys, d) - base_value
         self.evaluations += 1
         self._value_cache[cache_key] = value
         return value
