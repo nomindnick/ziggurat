@@ -1687,7 +1687,11 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
 - Before the week's FIRST kickoff (usually Thursday night — but check the
   schedule; the 2026 opener is a Wednesday), settle any starter playing in it.
   Slot-lock discipline is in the tool: earliest kickoffs in dedicated slots,
-  FLEX preserved for the latest-locking player.
+  FLEX preserved for the latest-locking player. The card's first line is
+  **LOCKS FIRST** (item 3.17) — the earliest-locking starters and their
+  kickoff — and since item 3.13 the `--now` decision clock also decides the
+  **lock fence**: a starter whose game has kicked off is PINNED where ESPN has
+  him and carried at his projection, never benched or swapped by the tool.
 - Streaming week for D/ST or K: `.venv/bin/ziggurat stream --reasons`.
 - Journal anything acted on; an empty day is fine.
 
@@ -1701,8 +1705,11 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    keyboard, run `.venv/bin/ziggurat league sync` yourself ~08:35–09:30 PT and
    confirm `league status` shows today's snapshot. Then run
    `.venv/bin/ziggurat lineup --reasons --now "<current ET ISO datetime>"` —
-   the real clock matters: the GTD contingency ladder only offers swaps whose
-   window is still open (`window_closed` means that door shut).
+   the real clock matters twice: the GTD contingency ladder only offers swaps
+   whose window is still open (`window_closed` means that door shut), and
+   since item 3.13 the same clock sets the lock fence — the card's SEATED SET
+   depends on it, because a starter whose game has started is pinned in place
+   (a `LOCKED` row is not a removal and not a swap candidate).
 2. Walk the ladder for each Questionable starter in lock-time order; execute
    the branch matching the news.
 3. A hard refusal from the seated-lineup legality check (bye/OUT starter) on a
