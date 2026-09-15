@@ -278,18 +278,33 @@ def test_order_slots_by_lock_degrades_to_a_note_when_no_locks_known():
 
 
 def _gtd_specs():
+    """The GTD roster, WITH the ESPN starting slots the live rows carry.
+
+    Item 3.13 made ``lineup_slot`` load-bearing: it is what ESPN froze at kickoff,
+    so a locked player is pinned into it. ``marginal_world`` defaults every roster
+    row to ``BE``, which is a shape the live league never has for a starter — the
+    slots below are exactly the greedy lineup, so nothing about the pre-3.13
+    assertions changes while a locked starter can now actually be recognised."""
     specs = [
-        {"name": "Pocket Passer", "pos": "QB", "team": "TEN", "pts": 20.0, "bye": 6, "on_team": TEAM},
+        {"name": "Pocket Passer", "pos": "QB", "team": "TEN", "pts": 20.0, "bye": 6, "on_team": TEAM,
+         "slot": "QB"},
         {"name": "GTD Runner", "pos": "RB", "team": "CHI", "pts": 18.0, "bye": 9, "on_team": TEAM,
-         "injury": "QUESTIONABLE"},                       # Sunday-early, game-time decision
-        {"name": "Anchor Runner", "pos": "RB", "team": "BUF", "pts": 20.0, "bye": 7, "on_team": TEAM},
+         "injury": "QUESTIONABLE", "slot": "RB"},         # Sunday-early, game-time decision
+        {"name": "Anchor Runner", "pos": "RB", "team": "BUF", "pts": 20.0, "bye": 7, "on_team": TEAM,
+         "slot": "RB"},
         {"name": "Late Backup", "pos": "RB", "team": "KC", "pts": 9.0, "bye": 8, "on_team": TEAM},
-        {"name": "Wideout One", "pos": "WR", "team": "GB", "pts": 15.0, "bye": 10, "on_team": TEAM},
-        {"name": "Wideout Two", "pos": "WR", "team": "SEA", "pts": 14.0, "bye": 11, "on_team": TEAM},
-        {"name": "Wideout Three", "pos": "WR", "team": "TB", "pts": 12.0, "bye": 6, "on_team": TEAM},
-        {"name": "Tight One", "pos": "TE", "team": "JAX", "pts": 13.0, "bye": 12, "on_team": TEAM},
-        {"name": "Home D/ST", "pos": "D/ST", "team": "MIA", "pts": 6.0, "bye": 8, "on_team": TEAM},
-        {"name": "Steady Kicker", "pos": "K", "team": "NO", "pts": 8.0, "bye": 8, "on_team": TEAM},
+        {"name": "Wideout One", "pos": "WR", "team": "GB", "pts": 15.0, "bye": 10, "on_team": TEAM,
+         "slot": "WR"},
+        {"name": "Wideout Two", "pos": "WR", "team": "SEA", "pts": 14.0, "bye": 11, "on_team": TEAM,
+         "slot": "WR"},
+        {"name": "Wideout Three", "pos": "WR", "team": "TB", "pts": 12.0, "bye": 6, "on_team": TEAM,
+         "slot": "FLEX"},
+        {"name": "Tight One", "pos": "TE", "team": "JAX", "pts": 13.0, "bye": 12, "on_team": TEAM,
+         "slot": "TE"},
+        {"name": "Home D/ST", "pos": "D/ST", "team": "MIA", "pts": 6.0, "bye": 8, "on_team": TEAM,
+         "slot": "D/ST"},
+        {"name": "Steady Kicker", "pos": "K", "team": "NO", "pts": 8.0, "bye": 8, "on_team": TEAM,
+         "slot": "K"},
     ]
     return specs
 

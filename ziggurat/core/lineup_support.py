@@ -38,6 +38,23 @@ tiebreaker, so a coin-flip week just maximises points). Otherwise we hill-climb
 single legal swaps to maximise the win-probability z-score, capping how much
 E(points) a posture move may sacrifice.
 
+THE LOCK FENCE (item 3.13, added 2026-09-15) and why it is a Rule-6 item rather
+than an optimisation. ESPN freezes a player's slot at HIS OWN kickoff
+(``lineupLocktimeType = INDIVIDUAL_GAME``). Until 3.13 this module had no notion
+of that: ``_price_roster`` computed availability as ``has_proj and not on_bye and
+not hard_out``, and ``game_locks()`` was read AFTER the search purely to relabel
+slots. So on 2026-09-13, through the shipped command, the card benched a rival's
+WR who had played the Wednesday opener and banked 5.6 PPR (his IR designation
+landed two days later), promoted two bench receivers into slots ESPN had frozen,
+and carried the same man at full projection inside ``_opponent_lineup`` — up to
+11.3 house points, 13.6 pp of win probability, on that matchup. **Estimated points
+recovered: 0.00.** The operator is a novice; he cannot check an instruction he is
+physically unable to execute, and a card that tells him to do the impossible is
+worse than one that says nothing. Locks now gate AVAILABILITY before the seat
+join, locked starters are PINNED into the slot ESPN gave them, and "not seated"
+is one taxonomy with four distinct sentences — LOCKED, HARD-OUT, BYE,
+UNPRICEABLE — rather than three that sound alike.
+
 Standing rules. Rule 1 — every accessor is keyword-only ``as_of`` with no default
 and threads ``view``. Rule 2 — no scoring constant lives here; ``mu`` comes from
 ``valuation.weekly_lines`` (priced through ``scoring.py``) and sigma is a
@@ -50,7 +67,7 @@ permanent module, never imports from ``ziggurat/draft/``.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -109,6 +126,30 @@ INACTIVE_REPORT_LEAD = timedelta(minutes=90)
 # July projection pricing a November lineup carries a valid knowable_as_of and is
 # Rule-1-invisible.
 STALE_BANNER_DAYS = 7
+
+# ESPN roster slot -> our slot base (item 3.13). ESPN locks a player's slot at HIS
+# OWN kickoff (``lineupLocktimeType = INDIVIDUAL_GAME``), so once his game has
+# started, whatever ESPN has him in IS the lineup — the operator cannot move him
+# out and cannot move anyone else in. Anything not in this map (``BE``, ``IR``, an
+# unknown label) is not a starting slot and therefore pins nothing.
+_ESPN_STARTING_SLOTS = MappingProxyType({
+    "QB": "QB", "RB": "RB", "WR": "WR", "TE": "TE",
+    "FLEX": FLEX_LABEL, "D/ST": "DST", "DST": "DST", "K": "K",
+})
+
+# The one sentence the card owes the operator about a locked player's points
+# (item 3.13 design point 4). We have no live-score source, so a locked player is
+# carried at his PROJECTION. State the tradeoff honestly and do not dress it up:
+# on the one live instance measured (2026-09-13, week 1) the projection (16.9) was
+# FURTHER from the truth (5.6 realised) than deleting him would have been (0.0).
+# This fix buys EXECUTABILITY, not accuracy.
+LOCKED_CARRY_LABEL = (
+    "a locked player is carried at his PROJECTION, not his live score — this tool "
+    "has no live-score feed. On the one live instance measured (2026-09-13, week 1) "
+    "the projection was FURTHER from the realised points than dropping him to zero "
+    "would have been. This is about showing you a lineup you can actually execute, "
+    "NOT about the total being right."
+)
 
 
 class OwnTeamUnresolved(league_state.OwnTeamUnresolved):
@@ -246,6 +287,7 @@ class StarterRec:
     injury_status: str | None
     gtd: bool                       # a genuinely game-time-decision starter
     reasons: tuple[str, ...]
+    locked: bool = False            # item 3.13: his game has started; slot frozen
 
 
 @dataclass(frozen=True)
@@ -260,6 +302,8 @@ class BenchRec:
     sigma: float
     injury_status: str | None
     reasons: tuple[str, ...]
+    locked: bool = False            # item 3.13: his game has started; cannot be seated
+    has_proj: bool = True           # False -> proj_points 0.0 is NO FORECAST, not a zero
 
 
 @dataclass(frozen=True)
@@ -318,6 +362,10 @@ class LineupRecommendation:
     season: int
     week: int
     team_id: int | None
+    # item 3.17 d2 — the lock deadline, always present, rendered at the top.
+    locks_first: tuple[str, ...] = ()
+    # item 3.13 — the LOCKED arm of the not-seated taxonomy.
+    locked_notes: tuple[str, ...] = ()
 
 
 # ------------------------------------------------------------- internal seat row
@@ -341,6 +389,11 @@ class _Seat:
     has_proj: bool
     hard_out: bool
     available: bool
+    # --- item 3.13: the lock fence ---------------------------------------
+    kickoff: datetime | None = None   # his NFL game's ET kickoff, or None (bye/unknown)
+    locked: bool = False              # kickoff <= the `now` DECISION clock
+    pin_slot: str | None = None       # locked AND already in an ESPN starting slot
+    proj_key: tuple | None = None     # the weekly_lines key he was priced from
 
 
 def _norm_team(raw) -> str | None:
@@ -361,6 +414,8 @@ def _price_roster(
     variance: VarianceModel,
     live_status: bool,
     apply_hard_out: bool,
+    locks: Mapping[str, datetime] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, _Seat]:
     """THE SHARED SEAT JOIN. Roster rows -> priced ``_Seat`` map, keyed on the same
     coverage discipline for BOTH your roster and the opponent's: a week is
@@ -370,7 +425,16 @@ def _price_roster(
 
     ``apply_hard_out`` gates whether an ESPN OUT tag benches the player: True for
     your own roster (you must not start someone ruled out), False for the opponent
-    (his lineup is priced all-healthy — symmetric and legible, item 3.5 design)."""
+    (his lineup is priced all-healthy — symmetric and legible, item 3.5 design).
+
+    ``locks`` + ``now`` are the item-3.13 LOCK FENCE, and they are applied
+    IDENTICALLY on both sides. ``now`` is the DECISION clock (the same one the GTD
+    ladder uses), deliberately NOT ``as_of`` — ``as_of`` gates what we may know,
+    ``now`` decides what the operator can still do. A player whose game has kicked
+    off is ``locked``: ESPN froze his slot at his own kickoff, so he can neither be
+    benched nor replaced, and a bench body whose game has started can no longer be
+    moved INTO the lineup. A locked player already in a starting slot carries
+    ``pin_slot``; the seater pins him there rather than re-solving around him."""
     seats: dict[str, _Seat] = {}
     for row in rows:
         row = dict(row)
@@ -397,7 +461,17 @@ def _price_roster(
         status = row.get("injury_status")
         token = str(status or "").strip().upper()
         hard_out = apply_hard_out and live_status and token in HARD_OUT_STATUSES
-        available = has_proj and not on_bye and not hard_out
+
+        # --- item 3.13: the lock fence -----------------------------------
+        kickoff = locks.get(team) if (locks and team is not None) else None
+        locked = kickoff is not None and now is not None and kickoff <= now
+        slot_token = str(row.get("lineup_slot") or "").strip().upper()
+        pin_slot = _ESPN_STARTING_SLOTS.get(slot_token) if locked else None
+
+        # A locked player cannot be moved in EITHER direction. Pinned starters are
+        # seated by the pin, not by availability, so `available` means exactly one
+        # thing everywhere: "the operator could still move this man".
+        available = has_proj and not on_bye and not hard_out and not locked
         sigma = variance.sigma(position, points)
 
         seats[key] = _Seat(
@@ -415,6 +489,10 @@ def _price_roster(
             has_proj=has_proj,
             hard_out=hard_out,
             available=available,
+            kickoff=kickoff,
+            locked=locked,
+            pin_slot=pin_slot,
+            proj_key=proj_key,
         )
     return seats
 
@@ -486,11 +564,84 @@ def _eligible(key: str, label: str, seats: Mapping[str, _Seat],
     return pos == _slot_base(label)
 
 
-def _greedy_fill(seats: Mapping[str, _Seat], structure: RosterStructure) -> LineupFill:
+def build_pins(seats: Mapping[str, _Seat]) -> dict[str, tuple[str, ...]]:
+    """slot base ('QB'/'RB'/.../'FLEX') -> the locked starters ESPN has frozen there.
+
+    Item 3.13. The pin comes from the ROSTER row's own ``lineup_slot``, because
+    that is what ESPN actually locked — not from anything this module would prefer.
+    Deterministic order (points desc, then key) so two locked RBs always land in
+    RB1/RB2 the same way between runs."""
+    pins: dict[str, list[str]] = {}
+    for key, seat in seats.items():
+        if seat.pin_slot:
+            pins.setdefault(seat.pin_slot, []).append(key)
+    for lst in pins.values():
+        lst.sort(key=lambda k: (-seats[k].points, k))
+    return {base: tuple(lst) for base, lst in pins.items()}
+
+
+def _reduced_structure(structure: RosterStructure,
+                       pins: Mapping[str, Sequence[str]]) -> RosterStructure:
+    """``structure`` minus the slots the pins already occupy — what is left to solve."""
+    starters = dict(structure.starters)
+    flex_slots = structure.flex_slots
+    for base, keys in pins.items():
+        if base == FLEX_LABEL:
+            flex_slots = max(0, flex_slots - len(keys))
+        else:
+            starters[base] = max(0, starters.get(base, 0) - len(keys))
+    return replace(structure, starters=starters, flex_slots=flex_slots)
+
+
+def _greedy_fill(seats: Mapping[str, _Seat], structure: RosterStructure,
+                 *, pins: Mapping[str, Sequence[str]] | None = None) -> LineupFill:
+    """Greedy best-projected fill, with item 3.13's locked slots PINNED.
+
+    With no pins this is the pre-3.13 call, verbatim. With pins, the pinned men
+    hold their ESPN slots and the seater solves only what is left — so a locked
+    starter is never benched and nobody is ever promoted into a slot ESPN has
+    frozen. Note the direction of the guarantee: the pin is the ROSTER's, not the
+    optimiser's, which is why it is applied around ``fill_lineup`` rather than
+    inside it (``core/lineup.py`` is the shared seater and knows nothing about a
+    league's lock rules)."""
     positions = {k: s.position for k, s in seats.items()}
     points = {k: s.points for k, s in seats.items()}
     available = {k: s.available for k, s in seats.items()}
-    return fill_lineup(list(seats), positions, points, roster=structure, available=available)
+    if not pins:
+        return fill_lineup(list(seats), positions, points, roster=structure,
+                           available=available)
+
+    pinned_keys = {k for keys in pins.values() for k in keys}
+    free = [k for k in seats if k not in pinned_keys]
+    sub = fill_lineup(free, positions, points,
+                      roster=_reduced_structure(structure, pins),
+                      available={k: available[k] for k in free})
+
+    # Merge back into the FULL label space: pinned men first (they own the
+    # lowest-numbered labels of their base), then the solved occupants in order.
+    remaining: dict[str, list[str | None]] = {}
+    for _label, key in sub.slots:
+        base = _slot_base(_label) if _label != FLEX_LABEL else FLEX_LABEL
+        remaining.setdefault(base, []).append(key)
+
+    slots: list[tuple[str, str | None]] = []
+    seen: dict[str, int] = {}
+    for label in _slot_order(structure):
+        base = FLEX_LABEL if label == FLEX_LABEL else _slot_base(label)
+        i = seen.get(base, 0)
+        seen[base] = i + 1
+        pinned = pins.get(base, ())
+        if i < len(pinned):
+            slots.append((label, pinned[i]))
+            continue
+        queue = remaining.get(base, [])
+        slots.append((label, queue.pop(0) if queue else None))
+
+    starters = frozenset(k for _label, k in slots if k is not None)
+    total = sum(points.get(k, 0.0) for k in starters)
+    bench = tuple(sorted((k for k in free if available[k] and k not in starters),
+                         key=lambda k: (-points.get(k, 0.0), k)))
+    return LineupFill(total=total, slots=tuple(slots), bench=bench, starters=starters)
 
 
 def _slotmap(fill: LineupFill) -> dict[str, str]:
@@ -506,6 +657,7 @@ def _steepest_ascent(
     var_opp: float,
     variance: VarianceModel,
     mu_cap: float,
+    pinned_keys: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """Hill-climb legal single swaps to maximise the win-probability z-score.
 
@@ -513,7 +665,11 @@ def _steepest_ascent(
     replace. Accepted only when it RAISES z and sacrifices no more than ``mu_cap``
     E(points) versus the greedy seed. The roster is tiny, so a handful of passes
     reach a local optimum. Underdog (negative margin) naturally promotes
-    higher-sigma players; favorite promotes floors."""
+    higher-sigma players; favorite promotes floors.
+
+    ``pinned_keys`` are item 3.13's locked starters: their slots are never offered
+    as a swap target. The bench side needs no separate fence — a locked player is
+    ``available=False``, so the search cannot promote one either."""
     slotmap = _slotmap(fill)
     seated = set(slotmap.values())
     mu_greedy, _ = _lineup_stats(seated, seats, variance)
@@ -528,6 +684,8 @@ def _steepest_ascent(
         bench = [k for k, s in seats.items() if s.available and k not in seated]
         best_gain, best_move = 1e-9, None
         for label, q in list(slotmap.items()):
+            if q in pinned_keys:
+                continue          # ESPN has frozen this slot — not a legal move
             for p in bench:
                 if not _eligible(p, label, seats, structure):
                     continue
@@ -594,7 +752,8 @@ def game_locks(conn, *, as_of, season, week, view: base.AsOfView = "historical"
 
 
 def order_slots_by_lock(
-    fill: LineupFill, positions: Mapping[str, str], player_locks: Mapping[str, datetime]
+    fill: LineupFill, positions: Mapping[str, str], player_locks: Mapping[str, datetime],
+    *, pinned: Iterable[str] = (),
 ) -> tuple[LineupFill, str | None]:
     """Relabel — WITHOUT changing WHO starts or the total — so the FLEX slot holds
     the LATEST-locking of the interchangeable surplus-position starters, earlier
@@ -602,18 +761,25 @@ def order_slots_by_lock(
     is the slot you would change last). Best-effort: never raises; returns a plain
     note when optionality cannot be preserved (no known kickoffs).
 
-    ``player_locks`` maps a seated player key to his tz-aware ET kickoff."""
+    ``player_locks`` maps a seated player key to his tz-aware ET kickoff.
+
+    ``pinned`` (item 3.13) are keys whose slot ESPN has already locked. They keep
+    the label ESPN gave them and never enter the relabel group — a locked man has
+    no optionality to preserve, and moving his LABEL would print a slot assignment
+    that disagrees with the app the operator is looking at."""
     slots = list(fill.slots)
+    pinned_set = set(pinned)
     flex = next((i for i, (label, key) in enumerate(slots)
                  if label == FLEX_LABEL and key is not None), None)
-    if flex is None:
+    if flex is None or slots[flex][1] in pinned_set:
         return fill, None
     surplus_pos = positions.get(slots[flex][1])
     if surplus_pos is None:
         return fill, None
 
     group = [(label, key) for label, key in slots
-             if key is not None and positions.get(key) == surplus_pos
+             if key is not None and key not in pinned_set
+             and positions.get(key) == surplus_pos
              and (label == FLEX_LABEL or _slot_base(label) == surplus_pos)]
     if len(group) < 2:
         return fill, None
@@ -647,16 +813,24 @@ def order_slots_by_lock(
 
 def assert_no_illegal_starters(
     fill: LineupFill, *, byes: Iterable[str], statuses: Mapping[str, str | None],
-    week: int, live_status: bool,
+    week: int, live_status: bool, locked: Iterable[str] = (),
 ) -> None:
     """HARD-RAISE if any seated starter is on bye or (once live) ruled OUT.
 
     ``byes`` is the set of seated-player keys on bye this week; ``statuses`` maps a
     key to its ESPN injury status. Belt-and-suspenders with the ``available`` map
-    fed to the seater — a wrong starter is invisible to a novice (Rule 6)."""
+    fed to the seater — a wrong starter is invisible to a novice (Rule 6).
+
+    ``locked`` (item 3.13) is the set of seated keys whose NFL game has already
+    kicked off. They are EXEMPT, and the exemption is the point: a designation
+    that landed AFTER a man played is not an illegal start, it is a status
+    change — the live instance was a WR who played the Wednesday opener and was
+    placed on IR two days later. Raising there would refuse to print a card over
+    a slot the operator is physically unable to change."""
     bye_set = set(byes)
+    locked_set = set(locked)
     for label, key in fill.slots:
-        if key is None:
+        if key is None or key in locked_set:
             continue
         if key in bye_set:
             raise StartabilityError(
@@ -692,11 +866,17 @@ def resolve_opponent(
 
 def _opponent_lineup(
     conn, *, as_of, season, week, opp_team_id, source, byes, variance, structure, view,
+    locks=None, now=None,
 ) -> tuple[float, float] | None:
     """The opponent's deterministic ALL-HEALTHY best-lineup ``(mu, var)`` — the
     symmetric, legible baseline. Byes still score zero (their rows are blank/
     absent), but no injury discount is applied to either side. None when his roster
-    cannot be read."""
+    cannot be read.
+
+    Item 3.13 applies the IDENTICAL lock pinning here. It has to: the live defect
+    was a rival's already-played WR being re-seated by OUR optimiser inside his
+    projected total, which mis-stated the opponent by up to 11.3 house points —
+    13.6 pp of win probability — on the one matchup it fired on."""
     rows = active_players([dict(r) for r in league_state.get_player_state(
         conn, as_of=as_of, season=season, on_team_id=opp_team_id, view=view,
     )])
@@ -705,10 +885,11 @@ def _opponent_lineup(
     lines = weekly_lines(conn, as_of=as_of, season=season, weeks=[week],
                          source=source, view=view)
     seats = _price_roster(rows, lines, week=week, byes=byes, variance=variance,
-                          live_status=False, apply_hard_out=False)
+                          live_status=False, apply_hard_out=False,
+                          locks=locks, now=now)
     if not seats:
         return None
-    fill = _greedy_fill(seats, structure)
+    fill = _greedy_fill(seats, structure, pins=build_pins(seats))
     return _lineup_stats(fill.starters, seats, variance)
 
 
@@ -765,11 +946,22 @@ def build_lineup(
     live = normalize_as_of(as_of) >= normalize_as_of(
         live_status_from(conn, as_of=as_of, season=season, view=view))
 
+    # --- item 3.13: the lock fence is read BEFORE the seat join, not after ---
+    # Pre-3.13 this read happened after the search, so locks could only relabel
+    # slots the optimiser had already decided. They have to gate availability
+    # instead: a locked slot is not a preference, it is a wall.
+    locks = game_locks(conn, as_of=as_of, season=season, week=resolved_week, view=view)
+    now_et = _resolve_now(now, as_of)
+
     seats = _price_roster(active_rows, lines, week=resolved_week, byes=byes,
-                          variance=variance, live_status=live, apply_hard_out=True)
+                          variance=variance, live_status=live, apply_hard_out=True,
+                          locks=locks, now=now_et)
+    pins = build_pins(seats)
+    pinned_keys = frozenset(k for keys in pins.values() for k in keys)
 
     notes: list[str] = []
     sanity_blocks = _sanity_blocks(seats, week=resolved_week)
+    locked_notes = _locked_notes(seats, week=resolved_week)
 
     # --- opponent total + variance -------------------------------------------
     opp_var = variance.opp_flat_sigma ** 2
@@ -783,7 +975,7 @@ def build_lineup(
         opp = (_opponent_lineup(
             conn, as_of=as_of, season=season, week=resolved_week, opp_team_id=opp_id,
             source=source, byes=byes, variance=variance, structure=roster_structure,
-            view=view) if opp_id is not None else None)
+            view=view, locks=locks, now=now_et) if opp_id is not None else None)
         if opp is None:
             mu_opp = None
             opp_source = "unresolved"
@@ -792,7 +984,7 @@ def build_lineup(
             opp_source = "computed"
 
     # --- greedy seed, posture, and the win-prob search -----------------------
-    greedy = _greedy_fill(seats, roster_structure)
+    greedy = _greedy_fill(seats, roster_structure, pins=pins)
     mu_greedy, var_greedy = _lineup_stats(greedy.starters, seats, variance)
 
     if mu_opp is None:
@@ -818,16 +1010,16 @@ def build_lineup(
             posture = "FAVORITE" if margin > 0 else "UNDERDOG"
             slotmap = _steepest_ascent(
                 greedy, seats, roster_structure, mu_opp=mu_opp, var_opp=opp_var,
-                variance=variance, mu_cap=_MU_SACRIFICE_CAP)
+                variance=variance, mu_cap=_MU_SACRIFICE_CAP, pinned_keys=pinned_keys)
             final = _fill_from_slotmap(slotmap, seats, roster_structure)
         mu_final, var_final = _lineup_stats(final.starters, seats, variance)
         win_prob = win_probability(mu_final, mu_opp, var_final, opp_var)
 
     # --- slot-lock relabel (points-neutral) ----------------------------------
-    locks = game_locks(conn, as_of=as_of, season=season, week=resolved_week, view=view)
-    player_locks = {k: locks.get(seats[k].team) for k in seats}
+    player_locks = {k: seats[k].kickoff for k in seats}
     positions = {k: s.position for k, s in seats.items()}
-    final, lock_note = order_slots_by_lock(final, positions, player_locks)
+    final, lock_note = order_slots_by_lock(final, positions, player_locks,
+                                           pinned=pinned_keys)
     if lock_note:
         notes.append(lock_note)
 
@@ -835,10 +1027,10 @@ def build_lineup(
     bye_keys = {k for k, s in seats.items() if s.on_bye}
     statuses = {k: s.injury_status for k, s in seats.items()}
     assert_no_illegal_starters(final, byes=bye_keys, statuses=statuses,
-                               week=resolved_week, live_status=live)
+                               week=resolved_week, live_status=live,
+                               locked=pinned_keys)
 
     # --- GTD contingencies + inactives watch ---------------------------------
-    now_et = _resolve_now(now, as_of)
     snapshot_vintage = _snapshot_vintage(roster_rows)
     contingencies, watch = _gtd_and_watch(
         final, seats, roster_structure, locks=locks, now=now_et,
@@ -862,8 +1054,11 @@ def build_lineup(
     elif opp_source == "override":
         notes.append(f"opponent total {mu_opp:.1f} was supplied directly (--opponent-total).")
 
+    seated_proj_keys = tuple(seats[k].proj_key for k in final.starters
+                             if seats[k].proj_key is not None)
     freshness = tuple(_freshness_lines(conn, lines, roster_rows, as_of=as_of,
-                                       today=today, season=season))
+                                       today=today, season=season,
+                                       seated_proj_keys=seated_proj_keys))
 
     return LineupRecommendation(
         posture=posture,
@@ -882,6 +1077,8 @@ def build_lineup(
         season=int(season),
         week=resolved_week,
         team_id=own_team_id,
+        locks_first=_locks_first(final, seats, now=now_et),
+        locked_notes=locked_notes,
     )
 
 
@@ -906,20 +1103,124 @@ def _fill_from_slotmap(
     return LineupFill(total=total, slots=slots, bench=bench, starters=seated)
 
 
+def _who(s: _Seat) -> str:
+    return f"{s.player} ({s.position}, {s.team or '-'})"
+
+
 def _sanity_blocks(seats: Mapping[str, _Seat], *, week: int) -> tuple[str, ...]:
+    """THE "NOT SEATED" TAXONOMY (item 3.13), one sentence per case.
+
+    Before 3.13 these three read almost alike and one of them was simply wrong:
+    an already-played starter was printed under the same "cannot start week 1"
+    heading as a man ESPN had ruled out on Thursday. They are now three different
+    situations with three different sentences and, for LOCKED, a different block
+    entirely (see ``_locked_notes``) — because LOCKED is not a removal, it is a
+    thing the operator cannot act on at all."""
     out: list[str] = []
     for s in seats.values():
-        if s.available:
-            continue
-        who = f"{s.player} ({s.position}, {s.team or '-'})"
+        if s.available or s.locked:
+            continue          # LOCKED has its own block; it is not a removal
         if s.hard_out:
-            out.append(f"{who}: ESPN lists him {s.injury_status} — removed from the "
-                       f"lineup, cannot start week {week}.")
+            out.append(f"HARD-OUT — {_who(s)}: ESPN lists him {s.injury_status} and "
+                       f"his game has NOT started, so this one you can still fix — "
+                       f"swap him out; he cannot start week {week}.")
         elif s.on_bye:
-            out.append(f"{who}: on BYE in week {week} — cannot start.")
+            out.append(f"BYE — {_who(s)}: his NFL team does not play in week {week}. "
+                       "He would score zero; start someone else.")
         else:
-            out.append(f"{who}: no projection at this as-of for week {week} — cannot "
-                       "be seated (verify manually).")
+            out.append(f"UNPRICEABLE — {_who(s)}: the projection feed carries no "
+                       f"forecast for him in week {week} at this as-of, so this tool "
+                       "cannot price him either way. It is NOT a statement that he is "
+                       "out — verify him manually before the lock.")
+    return tuple(out)
+
+
+def _locked_notes(seats: Mapping[str, _Seat], *, week: int) -> tuple[str, ...]:
+    """The LOCKED arm of the taxonomy (item 3.13): players whose game has started.
+
+    Locked STARTERS are named individually — they are on the card, at a projection
+    that is not a live score, and the operator must be told why a man ESPN lists
+    as INJURY_RESERVE is still seated. Locked BENCH players get one counted line:
+    they are why a body has vanished from the swap options, and naming seven of
+    them on a Sunday evening would bury the starters."""
+    starters = [s for s in seats.values() if s.pin_slot]
+    bench = [s for s in seats.values() if s.locked and not s.pin_slot]
+    if not starters and not bench:
+        return ()
+
+    out: list[str] = []
+    for s in sorted(starters, key=lambda s: (s.kickoff is None,
+                                             s.kickoff.isoformat() if s.kickoff else "",
+                                             s.player)):
+        kick = s.kickoff.isoformat() if s.kickoff else "an unknown time"
+        tag = f", ESPN has him {s.injury_status}" if s.injury_status else ""
+        priced = (f"carried at his projected {s.points:.1f}"
+                  if s.has_proj else
+                  "carried at 0.0 — the feed had no week-"
+                  f"{week} forecast for him, so this is an absence of data, not a zero")
+        out.append(
+            f"LOCKED — {_who(s)} in your {s.pin_slot} slot{tag}: his game kicked off "
+            f"{kick}, so ESPN froze that slot and there is NOTHING you can do about "
+            f"it. He is {priced}.")
+    if bench:
+        names = ", ".join(sorted(s.player for s in bench))
+        out.append(
+            f"LOCKED (bench) — {_plural(len(bench), 'player')} on your bench "
+            f"{'has' if len(bench) == 1 else 'have'} also kicked off and can no "
+            f"longer be moved INTO the lineup: {names}.")
+    if starters:
+        out.append(LOCKED_CARRY_LABEL)
+    return tuple(out)
+
+
+def _locks_first(fill: LineupFill, seats: Mapping[str, _Seat], *, now: datetime
+                 ) -> tuple[str, ...]:
+    """The LOCKS FIRST line (item 3.17 deliverable 2) — UNCONDITIONAL, at the top.
+
+    Week 1 was caught ~11 hours before a Thursday lock by the luck of reading
+    order, not by process: the card computed every kickoff and printed a lock time
+    only inside a GTD contingency, i.e. only if somebody happened to be
+    Questionable. So this line always prints, and it names the earliest-locking
+    seated starters and their ET kickoff — the deadline the whole week's work has
+    to beat."""
+    seated = [(label, seats[key]) for label, key in fill.slots if key is not None]
+    if not seated:
+        return ("LOCKS FIRST: no starters are seated — nothing to lock.",)
+
+    upcoming = [(label, s) for label, s in seated
+                if s.kickoff is not None and s.kickoff > now]
+    already = [(label, s) for label, s in seated
+               if s.kickoff is not None and s.kickoff <= now]
+    unknown = [label for label, s in seated if s.kickoff is None]
+
+    out: list[str] = []
+    if upcoming:
+        first = min(s.kickoff for _label, s in upcoming)
+        names = ", ".join(f"{s.player} ({label})" for label, s in
+                          sorted(upcoming, key=lambda ls: (ls[1].player, ls[0]))
+                          if s.kickoff == first)
+        delta = first - now
+        hours = delta.total_seconds() / 3600.0
+        when = (f"{hours:.1f} h" if hours < 48 else f"{delta.days} days")
+        out.append(f"LOCKS FIRST: {names} — kickoff {first.isoformat()} ET, "
+                   f"{when} from the decision clock ({now.isoformat()}). "
+                   "Every change to those slots must be made before then.")
+    elif already:
+        last = max(s.kickoff for _label, s in already)
+        out.append(f"LOCKS FIRST: every seated starter's game has already kicked off "
+                   f"(the last at {last.isoformat()} ET) — this lineup is locked and "
+                   "this card is a record, not a decision.")
+    else:
+        out.append("LOCKS FIRST: no kickoff time is known for any seated starter "
+                   "(the schedule is not readable at this as-of) — check lock times "
+                   "in the ESPN app yourself before acting on this card.")
+
+    if already and upcoming:
+        out.append(f"  ({_plural(len(already), 'seated starter')} already locked — "
+                   "see the LOCKED block below.)")
+    if unknown:
+        out.append(f"  (no kickoff known for {_plural(len(unknown), 'slot')}: "
+                   f"{', '.join(sorted(unknown))} — verify {'it' if len(unknown) == 1 else 'them'} manually.)")
     return tuple(out)
 
 
@@ -1119,50 +1420,112 @@ def _starter_rows(
                            f"variance) to chase a projected deficit of {margin:+.1f}; a "
                            f"posture swap sacrifices at most {_MU_SACRIFICE_CAP:.0f} "
                            "projected points.")
-        if gtd:
+        if gtd and not s.locked:
             reasons.append(f"GAME-TIME DECISION ({s.injury_status}) — see the "
                            "contingency plan; do not bench pre-emptively if a safe "
                            "wait exists.")
+        if s.locked:
+            reasons.append(
+                f"LOCKED: his game kicked off "
+                f"{s.kickoff.isoformat() if s.kickoff else 'already'} — ESPN froze "
+                "this slot at his own kickoff, so he cannot be benched and nobody "
+                "can be moved in. This row is not a recommendation.")
+            reasons.append(LOCKED_CARRY_LABEL)
         rows.append(StarterRec(
             slot=label, player=s.player, position=s.position, espn_id=s.espn_id,
             gsis_id=s.gsis_id, proj_points=s.points, sigma=s.sigma,
             floor=s.points - s.sigma, ceiling=s.points + s.sigma,
             kickoff=kick.isoformat() if kick else None, injury_status=s.injury_status,
-            gtd=gtd, reasons=tuple(reasons)))
+            gtd=gtd, reasons=tuple(reasons), locked=s.locked))
     return tuple(rows)
 
 
 def _bench_rows(
     fill: LineupFill, seats: Mapping[str, _Seat], variance: VarianceModel
 ) -> tuple[BenchRec, ...]:
+    """Benched players who are still MOVABLE, plus (item 3.13) the locked ones.
+
+    A locked bench body is kept on the page deliberately: he is no longer an
+    option, and silently dropping a 16-point name off the bench list is exactly
+    the kind of disappearance a novice cannot interrogate."""
     seated = set(fill.starters)
     rows: list[BenchRec] = []
-    for k in sorted((k for k, s in seats.items() if s.available and k not in seated),
-                    key=lambda k: (-seats[k].points, k)):
+    for k in sorted((k for k, s in seats.items()
+                     if (s.available or s.locked) and k not in seated),
+                    key=lambda k: (seats[k].locked, -seats[k].points, k)):
         s = seats[k]
+        if s.locked:
+            # A locked man with no forecast prints 0.0 in the points column, and
+            # LOCKED removes him from the UNPRICEABLE block — so the only place
+            # left to say "that zero is an absence of data" is here.
+            priced = (f"{s.points:.1f} projected house pts" if s.has_proj else
+                      "0.0 in the points column ONLY because the feed carries no "
+                      "forecast for him at this as-of — an absence of data, not a "
+                      "measured zero")
+            reason = (f"LOCKED on your bench: {priced}, but his game kicked off "
+                      f"{s.kickoff.isoformat() if s.kickoff else 'already'} — he can no "
+                      "longer be moved into the lineup, so he is not an option this "
+                      "week.")
+        else:
+            reason = (f"benched: {s.points:.1f} house pts, sigma {s.sigma:.1f} — did "
+                      "not make the seated lineup this week.")
         rows.append(BenchRec(
             player=s.player, position=s.position, espn_id=s.espn_id, gsis_id=s.gsis_id,
             proj_points=s.points, sigma=s.sigma, injury_status=s.injury_status,
-            reasons=(f"benched: {s.points:.1f} house pts, sigma {s.sigma:.1f} — did not "
-                     "make the seated lineup this week.",)))
+            reasons=(reason,), locked=s.locked, has_proj=s.has_proj))
     return tuple(rows)
 
 
 # ------------------------------------------------------------------- staleness
 
 
-def _freshness_lines(conn, lines, roster_rows, *, as_of, today, season) -> list[str]:
+def _stale_projection_rows(lines, *, as_of) -> list[tuple]:
+    """The projection keys whose NEWEST pull is older than ``STALE_BANNER_DAYS``.
+
+    Item 3.17 deliverable 3. The pre-3.17 banner took the OLDEST pull date across
+    the whole feed and shouted about it, so ONE orphan row out of 3,229 read as a
+    blanket "do not trust this card". Per-key, newest-first, is the honest unit."""
+    cutoff = normalize_as_of(as_of)
+    stale: list[tuple] = []
+    for key, line in lines.items():
+        if not line.retrieved_as_of:
+            continue
+        newest = max(normalize_as_of(d) for d in line.retrieved_as_of)
+        if (cutoff - newest).days > STALE_BANNER_DAYS:
+            stale.append(key)
+    return stale
+
+
+def _freshness_lines(conn, lines, roster_rows, *, as_of, today, season,
+                     seated_proj_keys: Iterable[tuple] = ()) -> list[str]:
     out: list[str] = []
     cutoff = normalize_as_of(as_of)
 
     pulled = sorted({d for line in lines.values() for d in line.retrieved_as_of})
     if pulled:
         newest = (cutoff - normalize_as_of(pulled[-1])).days
-        gap = (cutoff - normalize_as_of(pulled[0])).days
         out.append(f"projections: pulled {pulled[-1]} — {_plural(newest, 'day')} before {as_of}")
-        if gap > STALE_BANNER_DAYS:
-            out.append(f"  WARNING: some projections are {gap} days old (oldest pull "
-                       f"{pulled[0]}) — run `ziggurat ingest run` before trusting this card.")
+        stale = _stale_projection_rows(lines, as_of=as_of)
+        if stale:
+            # Item 3.17 d3: COUNT the stale rows, and say whether a SEATED player
+            # is among them. A stale bench body is not a reason to distrust the
+            # card; a stale STARTER is the only version of this warning that
+            # should change what the operator does.
+            seated = set(seated_proj_keys)
+            hit = sorted(k for k in stale if k in seated)
+            gap = (cutoff - normalize_as_of(pulled[0])).days
+            head = (f"  WARNING: {len(stale)} of {len(lines)} projection rows are more "
+                    f"than {STALE_BANNER_DAYS} days old (oldest pull {pulled[0]}, "
+                    f"{gap} days)")
+            if hit:
+                out.append(f"{head} — and {_plural(len(hit), 'SEATED starter')} "
+                           f"{'is' if len(hit) == 1 else 'are'} priced off one of them. "
+                           "Run `ziggurat ingest run` before trusting this card.")
+            else:
+                out.append(f"{head}, but NO seated starter is priced off one — every "
+                           "player on this card comes from a fresher pull. A stale "
+                           "bench row is not a reason to distrust the lineup; "
+                           "`ziggurat ingest run` clears it.")
     else:
         out.append("projections: NONE readable at this as-of")
 
@@ -1199,6 +1562,8 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
     out = [
         f"lineup — season {rec.season}, week {rec.week}, as of {rec.as_of}",
     ]
+    # Item 3.17 d2: the lock deadline is the first thing on the page, always.
+    out.extend(rec.locks_first)
     out.extend(rec.freshness)
     out.append("")
     out.append(
@@ -1209,13 +1574,19 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
     out.append(f"{'SLOT':<5} {'PLAYER':<22} {'POS':<4} {'PROJ':>6} {'FLOOR':>6} "
                f"{'CEIL':>6} {'sigma':>6}  STATUS")
     for s in rec.starters:
-        flag = "" if not s.gtd else "  GTD"
+        flag = "  LOCKED" if s.locked else ("" if not s.gtd else "  GTD")
         out.append(
             f"{s.slot:<5} {s.player[:22]:<22} {s.position:<4} {s.proj_points:>6.1f} "
             f"{s.floor:>6.1f} {s.ceiling:>6.1f} {s.sigma:>6.1f}  "
             f"{s.injury_status or '-'}{flag}")
         if reasons:
             out.extend(f"      - {r}" for r in s.reasons)
+
+    if rec.locked_notes:
+        out.append("")
+        out.append("LOCKED (his game has started — nothing you can do about these):")
+        for b in rec.locked_notes:
+            out.append(f"  - {b}")
 
     if rec.sanity_blocks:
         out.append("")
@@ -1248,7 +1619,15 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
         out.append("")
         out.append("BENCH:")
         for b in rec.bench:
-            out.append(f"  {b.player} ({b.position})  {b.proj_points:.1f} pts")
+            tag = "  [LOCKED — cannot be moved in]" if b.locked else ""
+            # A 0.0 with no forecast behind it must never read as a measured zero
+            # (item 3.13) — and it has to say so at EVERY verbosity, because the
+            # points column is the part a novice reads first.
+            if not b.has_proj:
+                tag += "  (0.0 = NO FORECAST at this as-of, not a measured zero)"
+            out.append(f"  {b.player} ({b.position})  {b.proj_points:.1f} pts{tag}")
+            if reasons:
+                out.extend(f"      - {r}" for r in b.reasons)
 
     for note in rec.notes:
         out.append(f"! {note}")
