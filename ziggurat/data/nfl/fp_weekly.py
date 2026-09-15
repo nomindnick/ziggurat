@@ -769,7 +769,7 @@ def pull_fp_weekly(conn, *, retrieved_as_of: str, season: int, environ=None) -> 
     """
     page_week = None
     if week_page_enabled(environ):
-        page_week = resolve_page_week(season=int(season))
+        page_week = resolve_page_week(season=int(season), fetcher=fetch_week_page)
         if page_week is None:
             # Only noted when the opt-in was ON and failed. The OFF case is NOT
             # noted: it is the default, it fires every single day, and a standing
