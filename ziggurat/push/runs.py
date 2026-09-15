@@ -117,29 +117,90 @@ def reap_orphans(conn, *, now, older_than_seconds=ORPHAN_AFTER_SECONDS) -> int:
     return reaped
 
 
+#: ``outbound.publish(dry_run=True)`` stamps this into ``push_runs.ntfy_status``.
+#: It is the ONLY durable mark that separates a ``--no-push`` preview from a run
+#: that actually reached the phone — pinned against outbound by test.
+DRY_RUN_NTFY = "dry_run"
+
+#: Rows listed per bucket. Real runs get the deeper listing because they are the
+#: ones the Monday retro is checking; previews are noise with a short memory.
+_REAL_ROWS = 12
+_DRY_ROWS = 5
+
+
+def is_dry_run(row) -> bool:
+    """True when this run row is a ``--no-push`` preview.
+
+    A preview writes the briefing file and records a perfectly healthy-looking
+    ``ok``; only ``ntfy_status`` tells it apart from a run the operator's phone
+    actually received."""
+    return (row["ntfy_status"] or "") == DRY_RUN_NTFY
+
+
+def _run_line(row) -> str:
+    line = f"  [{row['kind']}] {row['started_at']} -> {row['status']}"
+    if row["events_found"] is not None:
+        line += f"  found={row['events_found']} pushed={row['events_pushed']}"
+    if row["ntfy_status"]:
+        line += f"  ntfy={row['ntfy_status']}"
+    if row["artifact_path"]:
+        line += f"  file={row['artifact_path']}"
+    if row["error"]:
+        line += f"  ERROR={row['error'][:120]}"
+    return line
+
+
 def format_status(conn, *, kind=None) -> str:
+    """Last push runs, with REAL runs and ``--no-push`` previews SEPARATED.
+
+    Item 3.17 (Week-1 retro): the listing used to be one newest-first stream
+    across both kinds, so three afternoon `--no-push` previews sat above the real
+    Wednesday 06:00 run and pushed it out of the operator's view. The kinds are
+    now two labelled buckets with the REAL one first and a summary line above
+    both, so "did this week's briefing actually go out?" is answered by the first
+    line rather than by counting rows. A preview is never silently dropped —
+    hiding it would trade one confusion for another — it is just never mistaken
+    for a send."""
     clause = "" if kind is None else " WHERE kind = :kind"
     params = {} if kind is None else {"kind": kind}
     rows = conn.execute(
         f"SELECT kind, season, status, started_at, finished_at, events_found, events_pushed, "
         f"ntfy_status, artifact_path, error FROM push_runs{clause} "
-        f"ORDER BY run_id DESC LIMIT 15",
+        f"ORDER BY run_id DESC LIMIT 60",
         params,
     ).fetchall()
     if not rows:
         return "no push runs recorded yet."
-    out = ["last push runs (newest first):"]
-    for r in rows:
-        line = f"  [{r['kind']}] {r['started_at']} -> {r['status']}"
-        if r["events_found"] is not None:
-            line += f"  found={r['events_found']} pushed={r['events_pushed']}"
-        if r["ntfy_status"]:
-            line += f"  ntfy={r['ntfy_status']}"
-        if r["artifact_path"]:
-            line += f"  file={r['artifact_path']}"
-        if r["error"]:
-            line += f"  ERROR={r['error'][:120]}"
-        out.append(line)
+
+    real = [r for r in rows if not is_dry_run(r)]
+    dry = [r for r in rows if is_dry_run(r)]
+
+    out: list[str] = []
+    if real:
+        for seen_kind in dict.fromkeys(r["kind"] for r in real):
+            newest = next(r for r in real if r["kind"] == seen_kind)
+            out.append(f"last REAL [{seen_kind}] run: {newest['started_at']} -> {newest['status']}")
+    else:
+        out.append(
+            "no REAL run recorded yet — every run below is a --no-push preview, "
+            "which writes the file but sends nothing."
+        )
+    out.append("")
+    out.append("REAL runs (newest first):")
+    if real:
+        out.extend(_run_line(r) for r in real[:_REAL_ROWS])
+    else:
+        out.append("  (none)")
+    if len(real) > _REAL_ROWS:
+        out.append(f"  ... {len(real) - _REAL_ROWS} more real run(s) among the last "
+                   f"{len(rows)} recorded, not listed")
+    if dry:
+        out.append("")
+        out.append(f"DRY-RUN previews (--no-push; nothing was sent) — {len(dry)} in the "
+                   f"last {len(rows)} recorded, newest first:")
+        out.extend(_run_line(r) for r in dry[:_DRY_ROWS])
+        if len(dry) > _DRY_ROWS:
+            out.append(f"  ... {len(dry) - _DRY_ROWS} older preview(s) not listed")
     return "\n".join(out)
 
 

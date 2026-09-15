@@ -4060,7 +4060,99 @@ standing rule.
 points at any of them is updated in the same change (Monday step 4 currently
 carries an explicit workaround note for (4)).
 **Update:**
-> _[To be completed]_
+> **Deliverables 1 and 4 done 2026-09-15** (2 and 3 are a separate change, same
+> item). Suite **3,135 passed, 16 skipped** (+34 — 28 for the live card, 6 for
+> the status split) **and 1 FAILED, which is pre-existing and reproduces on a
+> clean HEAD with none of this applied** — see the last paragraph of this block.
+>
+> **(1) `ziggurat league live`.** New permanent `ziggurat/league/live.py` plus one
+> new network seam, `source.fetch_live_scoreboard` (`LIVE_VIEWS =
+> mMatchupScore + mBoxscore + mRoster` — deliberately a DIFFERENT, smaller set
+> than `STATE_VIEWS`, because the live fields ride on `mBoxscore`, which the
+> snapshot pull does not ask for). Both Week-1 scratch scripts are folded in:
+> `live_score.py`'s per-side `totalPointsLive` + per-entry `appliedStatTotal`
+> read, and `league_live.py`'s kickoff join — the latter promoted from a
+> hard-coded `PRO` dict and a literal `("2026-09-13","16:25")` comparison to
+> `state._pro_team_map()` + `state._norm_team()` over `get_schedule` at an
+> explicit `as_of`. Own team resolves through `resolve_own_team(SWID)` exactly
+> as `league sync` does (`--team` overrides); the CLI parses, calls and prints
+> (Rule 3, pinned by a test that reads the command body and refuses a branch in
+> it). **READ-ONLY is the contract** — no migration, no write, no run row —
+> pinned by a test that snapshots every table's row count across a full
+> `read_live_matchup`.
+>
+> **Two numbers on the card are LABELLED rather than asserted (Rule 6), because
+> neither is what a novice would assume.** (a) **Game status is a CLOCK
+> ESTIMATE**: ESPN's fantasy views carry no per-game clock, so `final` /
+> `in progress` / `yet to play` is derived from the STORED ET kickoff plus a
+> fixed `TYPICAL_GAME_MINUTES = 195` window, and an overtime or weather-delayed
+> game reads `final` early — the window and the caveat print on every render.
+> (b) **The PROJ column is ESPN's OWN projection** (`statSourceId == 1`, same
+> payload), not the house projection `ziggurat lineup` seats with: `league/` may
+> not import `core/` (the direction is `core -> league -> data`), and labelling
+> someone else's number as ours is exactly what the operator cannot check.
+>
+> **Three degrade paths ship with the command, each a sentence rather than a
+> plausible number.** No stored `schedules` rows for the week → every starter
+> reads `kickoff unknown` and the card names the `ingest` command that fixes it
+> (calling them all "no game" would be a confident wrong answer for the whole
+> roster). ESPN serving no `totalPointsLive` → the card falls back to
+> `totalPoints` and SAYS it did; when the period has closed it adds that
+> `league_matchups`, written by `ziggurat league sync`, is the value to cite from
+> here on. Neither field served → `unavailable`, and only the per-starter column
+> is vouched for. A starter who already has applied points is never reported
+> "yet to play" even when the stored kickoff says he should be — the stored
+> kickoff is the thing that is wrong there, and that is the one output a novice
+> WOULD smell.
+>
+> **One check the scratch scripts did not have:** ESPN's live team total IS the
+> sum of the starters' applied totals, so the card compares them and reports a
+> DISAGREEMENT (naming ESPN's total as the authority) rather than silently
+> showing a starter set this module mis-decoded. Two smaller disclosures ride
+> along: a side ESPN served with NO roster rows says so (an empty table is the
+> `mBoxscore` view failing, not "nobody is playing"), and `--week` on a period
+> other than the current one warns that the score and the per-starter table then
+> describe DIFFERENT weeks unless `--scoring-period` is pinned too.
+>
+> **(4) `brief status` ordering.** `push/runs.format_status` now splits REAL runs
+> from `--no-push` previews into two labelled buckets, REAL first, under a
+> leading `last REAL [<kind>] run:` summary line — so the answer to "did this
+> week's briefing actually go out?" is line 1 rather than a row count. The
+> classifier is `ntfy_status == 'dry_run'`, the only durable mark a preview
+> leaves (a preview writes the briefing file and records a perfectly healthy
+> `ok`), and a test pins that literal against what `outbound.publish(dry_run=
+> True)` actually stamps — if outbound renames it, the bucket silently stops
+> working and every preview reads as a send again. When EVERY recorded run is a
+> preview the report says so in the register item 3.7 paid for
+> (`no REAL run recorded yet` — nothing reached the phone), and the
+> never-run sentinel `no push runs recorded yet.` that CLAUDE.md's preflight
+> quotes is unchanged. An empty alert tick stamps `ntfy_status` NULL, not
+> `dry_run`, so healthy-empty ticks stay in the REAL bucket — pinned. CLAUDE.md's
+> Monday step 4 lost its workaround note and gained the new reading instruction;
+> `ziggurat league live` was added to the Dev-workflow command list.
+>
+> **Deliberately not done:** the live command is NOT wired into the Sunday
+> cadence steps (deliverables 2 and 3 are editing that text in the same item, and
+> two changes to one Sunday block is how a merge loses a sentence); a live ESPN
+> read was NOT exercised — the build ran in an isolated worktree with no `.env`,
+> so every path here is fixture- or injection-tested and the first live read is
+> the session's to make.
+>
+> **One PRE-EXISTING defect found while running the suite, recorded and NOT fixed
+> (it is outside this change's files):
+> `tests/test_nfl_fp_weekly.py::test_a_pull_with_the_authority_on_labels_from_the_page`
+> HITS THE LIVE NETWORK and started failing when the live FantasyPros page rolled
+> to week 2.** It fails on a clean HEAD with no part of this change applied.
+> Cause: `fp_weekly.resolve_page_week(*, season, fetcher=fetch_week_page)` binds
+> its default at DEFINITION time, and `pull_fp_weekly` calls it as
+> `resolve_page_week(season=...)` — so `monkeypatch.setattr(fp_weekly,
+> "fetch_week_page", ...)` never takes, the real page is fetched, and the test
+> asserts against whatever FantasyPros published today (the logged
+> `last_updated_ts` changes between runs; it read 1789474132 on 2026-09-15). A
+> one-line fix at the call site (`resolve_page_week(season=..., fetcher=
+> fetch_week_page)`) or a `fetcher=None` late-bind closes it. Worth doing soon on
+> its own merits: an offline suite that silently reaches upstream is the failure
+> mode item 3.1b's frozen fixtures were supposed to have retired.
 
 ### 3.18 [Fix] The espn_id → gsis crosswalk keeps the wrong id for 2026 rookies (added 2026-09-15, from the Week-2 preflight)
 **Why it exists.** **Every** CLI run prints ~140 lines of

@@ -370,3 +370,85 @@ def test_alert_log_never_touches_operator_intel():
     from ziggurat import paths
 
     assert not str(push_run.ALERTS_DIR).startswith(str(paths.INTEL_DIR))
+
+
+# ------------------------------------------- brief status ordering (item 3.17)
+
+
+def _finished_run(conn, *, kind, started_at, ntfy_status, status=runs.STATUS_OK,
+                  artifact=None):
+    rid = runs.start_run(conn, kind=kind, season=2026, scope="week 2", started_at=started_at)
+    runs.finish_run(conn, rid, status=status, finished_at=started_at,
+                    ntfy_status=ntfy_status, artifact_path=artifact)
+    return rid
+
+
+def test_dry_run_marker_matches_what_outbound_actually_stamps(push_db):
+    """The ONLY durable mark separating a --no-push preview from a real send is
+    the ntfy_status literal outbound writes. If outbound renames it, this bucket
+    silently stops working and every preview reads as a real run again."""
+    result = outbound.publish("body", conn=push_db, as_of="2026-09-16", season=2026,
+                              own_team_id=1, config=_cfg(), dry_run=True,
+                              poster=lambda *a, **k: 200)
+    assert result.status == runs.DRY_RUN_NTFY
+
+
+def test_brief_status_lists_the_real_run_above_the_dry_runs(push_db):
+    """Item 3.17 d4: the Week-1 listing was one newest-first stream across both
+    kinds, so three afternoon previews buried the real Wednesday 06:00 run. The
+    REAL run must be findable at the TOP whatever order the rows went in."""
+    _finished_run(push_db, kind="brief", started_at="2026-09-09T06:04:09",
+                  ntfy_status="200", artifact="/intel/weekly/briefings/x.md")
+    for stamp in ("2026-09-15T13:15:35", "2026-09-15T13:28:34", "2026-09-15T16:17:55"):
+        _finished_run(push_db, kind="brief", started_at=stamp,
+                      ntfy_status=runs.DRY_RUN_NTFY)
+
+    out = runs.format_status(push_db, kind="brief")
+    lines = out.splitlines()
+    assert lines[0] == "last REAL [brief] run: 2026-09-09T06:04:09 -> ok"
+
+    real_at = next(i for i, ln in enumerate(lines) if ln.startswith("REAL runs"))
+    dry_at = next(i for i, ln in enumerate(lines) if ln.startswith("DRY-RUN previews"))
+    assert real_at < dry_at
+    # the real run sits inside the REAL block, above every preview
+    real_row = next(i for i, ln in enumerate(lines)
+                    if ln.startswith("  [") and "2026-09-09T06:04:09" in ln)
+    assert real_at < real_row < dry_at
+    assert all(i > dry_at for i, ln in enumerate(lines) if runs.DRY_RUN_NTFY in ln
+               and ln.startswith("  ["))
+    assert "DRY-RUN previews (--no-push; nothing was sent) — 3" in out
+
+
+def test_brief_status_says_so_when_every_recorded_run_is_a_preview(push_db):
+    """Three previews and no send is NOT a healthy week — the same trap as item
+    3.7's `no push runs recorded yet` reading as healthy."""
+    for stamp in ("2026-09-15T13:15:35", "2026-09-15T13:28:34"):
+        _finished_run(push_db, kind="brief", started_at=stamp, ntfy_status=runs.DRY_RUN_NTFY)
+    out = runs.format_status(push_db, kind="brief")
+    assert out.splitlines()[0].startswith("no REAL run recorded yet")
+    assert "(none)" in out
+
+
+def test_brief_status_keeps_the_never_run_sentinel_the_cadence_quotes(push_db):
+    """CLAUDE.md's preflight distinguishes this exact string from healthy-empty."""
+    assert runs.format_status(push_db, kind="brief") == "no push runs recorded yet."
+
+
+def test_alert_ticks_are_unaffected_because_an_empty_tick_pushes_nothing(push_db):
+    """An empty alert tick records ntfy_status NULL, not 'dry_run' — it must stay
+    in the REAL bucket, since 'nothing to push' is the healthy common case and
+    not a preview."""
+    _finished_run(push_db, kind="alert", started_at="2026-09-15T06:20:00",
+                  ntfy_status=None, status=runs.STATUS_EMPTY)
+    out = runs.format_status(push_db, kind="alert")
+    assert out.splitlines()[0] == "last REAL [alert] run: 2026-09-15T06:20:00 -> empty"
+    assert "DRY-RUN previews" not in out
+
+
+def test_status_across_kinds_summarises_each_kind(push_db):
+    _finished_run(push_db, kind="brief", started_at="2026-09-09T06:04:09", ntfy_status="200")
+    _finished_run(push_db, kind="alert", started_at="2026-09-15T06:20:00", ntfy_status=None,
+                  status=runs.STATUS_EMPTY)
+    out = runs.format_status(push_db)
+    assert "last REAL [alert] run: 2026-09-15T06:20:00 -> empty" in out
+    assert "last REAL [brief] run: 2026-09-09T06:04:09 -> ok" in out

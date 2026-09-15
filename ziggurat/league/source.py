@@ -56,6 +56,14 @@ _TRANSACTION_TYPES = ["FREEAGENT", "WAIVER", "WAIVER_ERROR", "TRADE_ACCEPT", "RO
 # mid-season settings change (roster/scoring/waiver) is visible in the raw pull.
 STATE_VIEWS = ("mTeam", "mRoster", "mMatchupScore", "mStandings", "mSettings")
 
+# Views that carry the IN-GAME numbers (item 3.17). Deliberately a different,
+# smaller set than STATE_VIEWS: the live fields (``totalPointsLive`` on each
+# matchup side, ``rosterForCurrentScoringPeriod`` with per-entry
+# ``appliedStatTotal``) ride on mBoxscore, which the snapshot pull does not ask
+# for. These three are the exact combination the Week-1 Sunday scratch scripts
+# ran on all day.
+LIVE_VIEWS = ("mMatchupScore", "mBoxscore", "mRoster")
+
 
 def _request(league, *, params, headers=None, extend=""):
     """Issue one authenticated league GET, converting ESPN's auth failures into a
@@ -108,6 +116,43 @@ def fetch_league_state(*, league_id: int, season: int, espn_s2, swid) -> dict:
             "ESPN league-state payload carries no teams — the league id or the "
             "season is wrong, ESPN changed the view contract, or the views were "
             "served mid-flush. Refusing rather than writing an empty league."
+        )
+    return data
+
+
+def fetch_live_scoreboard(
+    *,
+    league_id: int,
+    season: int,
+    espn_s2,
+    swid,
+    scoring_period: int | None = None,
+) -> dict:
+    """Pull ONE live scoreboard payload: every matchup with live totals and the
+    current scoring period's rosters (item 3.17).
+
+    READ-ONLY. Nothing downstream of this writes a row, so unlike
+    ``fetch_league_state`` there is no delete-then-write to fence — but it still
+    refuses an empty ``schedule`` rather than returning a payload that renders as
+    a legitimate-looking 0-0: a blank scoreboard on a Sunday afternoon is exactly
+    the failure the operator cannot tell from "your starters have not played yet".
+
+    ``scoring_period`` is left OFF the request by default so ESPN resolves the
+    current period itself (which is what a Sunday read wants); pass it to pin a
+    past week.
+    """
+    league = _client(league_id, season, espn_s2, swid)
+    params: dict = {"view": list(LIVE_VIEWS)}
+    if scoring_period is not None:
+        params["scoringPeriodId"] = int(scoring_period)
+    data = _request(league, params=params)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict) or not (data.get("schedule") or []):
+        raise RuntimeError(
+            "ESPN live payload carries no schedule — the league id or the season "
+            "is wrong, the views were served mid-flush, or ESPN changed the view "
+            "contract. Refusing rather than rendering an empty scoreboard."
         )
     return data
 
