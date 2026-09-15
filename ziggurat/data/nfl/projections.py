@@ -405,18 +405,36 @@ def _sleeper_to_gsis(conn) -> dict[str, str | None]:
     """sleeper_id -> gsis_id from the latest players snapshot (mirrors
     ``base.gsis_by_pfr``). players.py normalizes ``sleeper_id`` to a bare digit
     string, matching Sleeper's ``player_id`` for skill players; DEF/rookies are
-    absent and resolve to None (kept via the source_player_id spine)."""
-    out: dict[str, str | None] = {}
-    for r in conn.execute(
-        """
-        SELECT sleeper_id, gsis_id FROM players p
-        WHERE sleeper_id IS NOT NULL AND retrieved_as_of = (
-            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
-        )
-        """
-    ):
-        out.setdefault(r["sleeper_id"], r["gsis_id"])
-    return out
+    absent and resolve to None (kept via the source_player_id spine).
+
+    **Resolution moved to the shared ``base.preferred_gsis_by`` in item 3.18's
+    paired repair (2026-09-15): a nflverse placeholder (``LOV121782``) never wins
+    over a real ``00-`` id, and a key whose own rows offer only a placeholder is
+    rescued through the player's ESPN identity.**
+
+    This used to be ``setdefault``: first row scanned wins, i.e. SQLite scan
+    order, with no log line at all. Measured on the live crosswalk that stamped
+    the placeholder into **112 of the 266** colliding 2026 projection rows
+    (106,848 rows), while ``weekly_stats`` and ``snap_counts`` carried the same
+    players on their real ``00-`` ids — two id spaces for one player, with the
+    PRICING table on one side and the USAGE tables on the other.
+
+    It is a PAIRED change with ``base.gsis_by_espn``: flipping either map alone
+    moves the join loss instead of removing it (measured — the espn flip alone
+    would have unpriced 5 of the 6 colliding rookies on a league roster and both
+    colliding rows in the top-30-per-position pool, on a waiver Tuesday). See
+    that docstring for the numbers, and
+    ``db/migrations/019_gsis_placeholder_rekey.sql`` for the re-key of rows
+    already stored under the old rule.
+
+    Two live keys ride the identity hop rather than the collision rule
+    (Max Bredeson ``13516``, Jackson Kuwatch ``13586``): nflverse's newest row
+    for their REAL gsis has dropped ``sleeper_id``, so this column sees only the
+    placeholder and has no collision to resolve. Without the hop, Bredeson's 954
+    stored projection rows would have stayed on ``BRE060106`` while his roster row
+    moved to ``00-0041081`` — priced before the repair, unpriceable after it.
+    """
+    return base.preferred_gsis_by(conn, "sleeper_id")
 
 
 # The stored PRIMARY KEY, passed to ``base.upsert`` so its return value is the

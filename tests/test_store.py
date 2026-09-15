@@ -1,4 +1,11 @@
-"""Store bootstrap and migration tests."""
+"""Store bootstrap and migration tests.
+
+The two `schema_version` literals below are LITERALS on purpose (same reasoning
+as `test_migrations.LATEST_SCHEMA_VERSION`: a computed value would agree with any
+mistake), which means a new migration has to bump THREE of them. If you are here
+because one of these failed after adding `db/migrations/0NN_*.sql`, the other two
+are `LATEST_SCHEMA_VERSION` and `MIGRATION_DIGESTS` in tests/test_migrations.py.
+"""
 
 import pytest
 
@@ -13,7 +20,7 @@ def test_schema_bootstraps_migrates_and_is_idempotent(tmp_path):
     apply_schema(conn)
 
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    assert row["value"] == "18"
+    assert row["value"] == "19"
     indexes = {
         row["name"]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
@@ -43,7 +50,7 @@ def test_existing_v1_database_is_upgraded():
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "18"
+    ).fetchone()["value"] == "19"
     assert conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_schedules_lookup'"
     ).fetchone()

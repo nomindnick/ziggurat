@@ -4749,6 +4749,193 @@ applied, a test pins that a placeholder id never wins over a `00-` id.
 > measurement it insisted on first is the only reason the change did not ship and
 > quietly unprice two rostered rookies.
 
+> **Second entry — the PAIRED REPAIR, done 2026-09-15 (same day).** The refusal
+> above was right about the one-line change and right about what to do instead.
+> All three halves shipped together and the split id space is closed: **the
+> stored `projections`, `league_player_state` and `player_news_links` rows are
+> re-keyed, both resolvers apply the `00-` preference, and all six rostered
+> rookies are now priced AND have their Week-1 stats under ONE id.** The live
+> waiver recommendation is UNCHANGED.
+>
+> **What shipped.**
+> 1. **One resolver for all three multi-gsis paths** — `base.preferred_gsis_by`,
+>    now the body of `gsis_by_pfr`, `gsis_by_espn` and
+>    `projections._sleeper_to_gsis`. Three implementations kept in step by hand
+>    is how they drifted apart in the first place.
+> 2. **`db/migrations/019_gsis_placeholder_rekey.sql`** (`schema_version` 18 →
+>    **19**) re-derives the gsis join key on rows already stored under the old
+>    rule. 3.41 s on the 983 MB live-sized copy.
+> 3. **The espn map flips** — safe now, and only now, because 1 and 2 ship with it.
+>
+> Cost, measured rather than assumed: one crosswalk build is **52 ms** on the
+> live-sized database, of which the new pass-2 lookup is **26 ms**, and pass 2
+> runs at all only while some key still resolves to a placeholder. Against a
+> ~24 s `ziggurat waivers` run that is noise; it is written down so nobody
+> re-measures it.
+>
+> **(a) over (b): why a migration rather than a read-time alias.**
+> `projections.gsis_id`, `league_player_state.gsis_id` and
+> `player_news_links.gsis_id` are **DERIVED CROSSWALK COLUMNS, not upstream
+> facts.** The fact each row carries is its own source key —
+> `source_player_id` (Sleeper's player_id) and `espn_player_id`/`espn_id` — and
+> none is touched; the gsis beside it is this system's own answer to "which
+> nflverse player is that", computed at ingest from `players`. Item 3.1 already
+> records `league_player_state.gsis_id` as "explicitly derived and backfillable".
+> So (a) is not rewriting a fact table, it is **re-deriving a derived column**,
+> and it leaves the database with ONE id per player across `weekly_stats`,
+> `snap_counts`, `ngs_*`, `projections`, `league_player_state`,
+> `player_news_links` and all three crosswalk maps. **Rule 1 is untouched**: no
+> row is added or removed and no `retrieved_as_of`/`knowable_as_of` moves — the
+> re-key changes WHICH PLAYER a row is about, never WHEN it became knowable
+> (asserted by test).
+> Option (b) was rejected on two counts. It is a **permanent mechanism for a
+> transient condition**: once `_sleeper_to_gsis` prefers `00-`, every future pull
+> writes the real id, so the alias would exist forever to serve rows that stop
+> being produced today. And it would have to be threaded through `valuation`,
+> `marginal`, `candidates`, `dispersion`, `waiver`, `espn_projections`,
+> `league/state` and `news` — a second id space maintained by hand at eight call
+> sites, which is the failure this item's own standing lesson names.
+>
+> **THE MEASUREMENT THAT CHANGED THE DESIGN MID-BUILD, and the one thing the
+> first entry's "real repair, named and sequenced" got wrong.** Applying the
+> preference to both maps is NOT sufficient, because a collision is a property of
+> the PLAYER and the two columns do not always see it. Every builder reads only
+> `MAX(retrieved_as_of)` per gsis, so an id column upstream DROPS from one gsis's
+> newest row vanishes from that gsis's view of the world. Measured live —
+> **Max Bredeson, espn `4878695`**: nflverse's newest row for his REAL id
+> `00-0041081` carries `sleeper_id` NULL (older rows carried `13516`), while the
+> newest row for his placeholder `BRE060106` still carries it. The sleeper column
+> therefore sees ONE candidate, has **no collision to resolve**, and answers with
+> the placeholder — while `gsis_by_espn`, which sees both rows, answers with the
+> real id. Under the first entry's prescription his 954 stored projection rows
+> would have stayed on `BRE060106` while his roster row moved to `00-0041081`:
+> **priced before the repair, unpriceable after it** — a NEW instance of the exact
+> defect, created by the fix. Measured incidence: **2 sleeper keys** (Bredeson,
+> Jackson Kuwatch), **9 pfr keys**, **0 espn keys**.
+> So `preferred_gsis_by` has a second pass — **one hop through the player's ESPN
+> identity, taken only when the column's own winner is a PLACEHOLDER.** The gate
+> is load-bearing, not caution: upstream gives ONE espn id to TWO genuinely
+> different retired players in the four cases the first entry recorded
+> (`2582138`, `2574010`, `2516049`, `16094`), both ids real `00-`, and an ungated
+> hop would re-point one player's rows onto the other. A placeholder losing to a
+> real id cannot do that — there is only ever one player behind it. Pinned by
+> test in both directions.
+>
+> **The measurement, re-run on a scratch copy of the live DB with the migration
+> applied** (probe re-implemented; counts are *rows / colliding espn ids* over
+> all 266 collisions — the first entry's table reported the ID counts and
+> labelled them "rows", corrected here):
+>
+> | table | on the KEPT id | on the DISCARDED id | ONLY on the discarded |
+> |---|---|---|---|
+> | **BEFORE** `weekly_stats` (2026 wk1 REG) | 0 / 0 | 189 / 96 | **189 / 96** |
+> | **BEFORE** `snap_counts` (2026) | 0 / 0 | 142 / 125 | **142 / 125** |
+> | **BEFORE** `projections` (sleeper 2026) | 106,848 / 112 | 6,030 / 9 | **6,030 / 9** |
+> | **AFTER** `weekly_stats` (2026 wk1 REG) | **189 / 96** | 0 / 0 | **0 / 0** |
+> | **AFTER** `snap_counts` (2026) | **142 / 125** | 0 / 0 | **0 / 0** |
+> | **AFTER** `projections` (sleeper 2026) | **112,878 / 121** | 0 / 0 | **0 / 0** |
+>
+> The six rostered rookies, AFTER — every one priced through
+> `valuation.weekly_lines` at the id his Week-1 stats are on (3,229 board keys,
+> unchanged): Jeremiyah Love `00-0041027` **235.9**, Jadarian Price `00-0041512`
+> **172.1** (both exactly the first entry's figures, now on the real id), Carnell
+> Tate 166.2, KC Concepcion 150.1, Makai Lemon 111.8, De'Zhaun Stribling 102.1 —
+> and Max Bredeson 1.5, who would have been the fix's own casualty.
+> Rows left on a placeholder after the migration: `projections` **2,862 (3 ids)**,
+> `league_player_state` **54 (1 id)**, `player_news_links` **10 (2 ids)** — every
+> one a player with **no real `00-` id anywhere**, which is nflverse's real answer
+> for someone it has not reconciled, not an error to correct.
+>
+> **What is deliberately NOT re-keyed, each checked rather than assumed.**
+> `weekly_stats` / `snap_counts` / `ngs_*` hold **zero** placeholder ids — they
+> were always on the real id, which is exactly why the old rule lost them.
+> `adp_rankings` / `fpecr_panel` / `fp_weekly_ecr` key through
+> `base.ids_by_fantasypros`, which has **ZERO collisions** (0 of 4,781) and whose
+> 3 placeholder winners have no real sibling; between them those tables hold 4
+> placeholder ids and **none of the 262 espn-collision losers**, so the preference
+> is not applied there (unreachable code pinned by nothing is worse than none).
+> **`depth_chart_slots` keeps its 9 collision-loser ids on purpose**: its
+> `gsis_id` is a column of the UPSTREAM nflverse frame, not a value this crosswalk
+> derived, and rewriting it would falsify what upstream published (pinned by test).
+> **32 `projections` rows carry `gsis_id` NULL** and stay NULL — those are older
+> vintages ingested before the player entered `players` at all; filling a NULL is
+> a backfill, not a re-key, and `weekly_lines` already groups them on
+> `source_player_id`.
+>
+> **Live acceptance on the scratch copy** (`ziggurat waivers --reasons
+> --claim-budget 10 --no-freeze --team 10` and `ziggurat candidates --reasons`,
+> A/B against an unmigrated copy running the pre-repair code): **the candidates
+> page is byte-identical (0 diff lines) and the waiver page differs on TWO
+> COUNT LINES ONLY.** The chain is unchanged — #1 Kyler Murray ← Keaton Mitchell
+> +10.6, #2 George Holani ← Chris Rodriguez Jr. +0.6 (+0.8 alone), #3 Jalen Coker
+> ← Josh Jacobs +5.6 (+5.4 alone), **joint +16.8 over 16 wks**, same stop
+> sentence. The two moved numbers are the pool census: priceable free agents
+> **340 → 341**, unpriceable **541 → 540**. The underlying gain is **two** free
+> agents whose projections sat on the real id while their roster row sat on the
+> placeholder and who were therefore invisible as adds — **Carson Beck (QB, 0.7%
+> owned)** and **Justin Joly (TE, 0.05%)** — and **zero lost**, which is the
+> number that matters: the identity hop is why Bredeson is not on a "lost" list.
+> Neither new name is near the claim chain, so no recommendation moves today;
+> what moves is the set of players the tool is *able* to recommend in a later week.
+>
+> **What each test pins.** `_gsis_preference` as a total order in both argument
+> orders and against several rivals; **all three paths answering the identical
+> collision identically, in BOTH row orders** (the flipped order is the
+> load-bearing half — a first-wins rule agrees with a preference on exactly one
+> of the two, so a single-order fixture cannot tell them apart; this REPLACES the
+> first entry's characterization pin, which deliberately asserted the opposite);
+> the identity hop firing on the Bredeson shape, logging its own distinctly
+> labelled summary line, and **not** firing between two real ids; a placeholder
+> with no real sibling kept; the hop provably inert on the espn map; the shared
+> resolver refusing an unknown key column (it is interpolated into SQL, so the
+> allowlist is an injection fence); the ingest storing the real id end to end; the
+> as-of gate unwidened (`knowable_as_of == retrieved_as_of`, an earlier `as_of`
+> still empty) and neither crosswalk taking an `as_of` at all; and for the
+> migration — the three columns re-keyed, **SQL ≡ Python** (every re-keyed row
+> equals what the production resolver returns, checked on the synthetic fixture
+> and re-verified over the whole live table: 0 non-NULL disagreements),
+> idempotency, no row and no timestamp moved, a non-colliding key untouched, a
+> stored id that is NOT its own key's alternate untouched, the source scoping on
+> `projections`, `depth_chart_slots` untouched, and no temp table left behind.
+> **Four migration fences were mutation-verified** — dropping the alternate
+> fence, the source scoping, or the `DROP TABLE`s, or inverting the preference,
+> each fails a named test.
+>
+> **The operator/session step after merge, and it is not optional: run any
+> `ziggurat` command on the live database.** `open_db` applies migration 019 on
+> every command that opens the DB, so `ziggurat league status` is enough; it takes
+> ~3.4 s once. Back up first (`cp db/ziggurat.sqlite db/ziggurat.sqlite.bak-v18-pre-3.18`)
+> — the same discipline 4.2b used at 14 → 18, and this migration UPDATEs rows
+> rather than adding a column. **Two cautions for whoever runs it.** (1) The
+> systemd timers run `ziggurat` from the working tree, so the FIRST timer to fire
+> after merge applies it, reviewed or not — apply it by hand first so it is a
+> decision rather than an accident. (2) Between merge and that first command the
+> repo is in the one state this item warns about: the maps say `00-` and the
+> stored rows still say placeholder. It is 3.4 s wide; do not leave it open across
+> a Tuesday.
+>
+> **Two downstream consequences, disclosed rather than discovered later.**
+> (1) **No Phase-4 input moves.** The re-key touches only rows that exist:
+> `projections` holds season **2026 only** (3,075,043 rows, one source) and
+> `league_player_state` begins 2026-07-24 and `player_news_links` 2026-08-04, so no 2021–25
+> replay input is altered and every frozen `data/backtest/replay/` JSONL keeps
+> its manifest. `weekly_stats` and `snap_counts` — what a TRAIN-week decide
+> actually reads — are not written at all.
+> (2) **A decision freeze (item 4.2b) taken after the migration differs from one
+> taken before, in the same two numbers the live A/B moved** (the priceable /
+> unpriceable free-agent census), plus two more rows in the evaluated pool. The
+> frozen files themselves are untouched; it is a fresh capture that differs. A
+> Tuesday journal that quotes a pre-migration `capture_id` still reconciles — the
+> chain, the claims and the joint total are identical.
+>
+> **Standing lesson this entry paid for: two id columns do not see the same
+> collision, because a crosswalk that reads only the newest row per key stops
+> being able to see a column upstream has dropped from it.** Giving both maps the
+> same RULE was the first entry's prescription and it was not enough — it would
+> have created a fresh instance of the very defect it was fixing, on a player
+> nobody would have checked. The repair is not a shared rule, it is a shared
+> IDENTITY.
+
 ### 3.19 [Experiment] Availability pilot — practice status, honest 2026 injury stamps, and the injury-return discount (added 2026-09-15, from the qualitative sweep finding 1 + literature hint 3)
 **Why it exists.** **`practice_status` is ingested and read by nothing** (grep:
 only `data/nfl/injuries.py` and its test). Wednesday/Thursday/Friday practice

@@ -539,6 +539,128 @@ class _CollisionTally:
         )
 
 
+#: The rule every multi-gsis crosswalk resolves by, named once so the summary
+#: line, the docstrings and the migration all quote the same sentence.
+_PREFERENCE_RULE = "the deterministic '00-' preference (see base._gsis_preference)"
+
+_ALIAS_RULE = (
+    "the same '00-' preference applied across the player's ESPN identity, because "
+    "this column's own rows offered only a placeholder (see base.preferred_gsis_by)"
+)
+
+
+def _real_gsis_by_espn(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """espn_id -> every REAL (``00-``) gsis on the latest players snapshot.
+
+    Read over ALL latest rows, not only rows carrying some other source id —
+    which is the whole point. See :func:`preferred_gsis_by`.
+    """
+    out: dict[str, list[str]] = {}
+    for r in conn.execute(
+        """
+        SELECT espn_id, gsis_id FROM players p
+        WHERE espn_id IS NOT NULL AND gsis_id LIKE '00-%' AND retrieved_as_of = (
+            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
+        )
+        """
+    ):
+        out.setdefault(r["espn_id"], []).append(r["gsis_id"])
+    return out
+
+
+def preferred_gsis_by(
+    conn: sqlite3.Connection, key_col: str, *, source_key: str | None = None
+) -> dict[str, str]:
+    """``<key_col>`` -> gsis_id from the latest players snapshot, resolved by the
+    ``00-`` preference and then by ONE hop through the player's ESPN identity.
+
+    THE ONE RESOLVER for every ``players`` column that can map to more than one
+    gsis (``pfr_id``, ``espn_id``, ``sleeper_id``). Item 3.18's paired repair;
+    before it, the espn and sleeper paths each resolved a collision by SQLite
+    SCAN ORDER, independently, so one player could be priced under a placeholder
+    and measured under his real id with nothing raising anywhere.
+
+    **Why there are TWO passes and not one.** Pass 1 is the collision rule: among
+    the gsis ids THIS column offers for one key, ``_gsis_preference`` wins. That
+    is enough whenever both of a player's ``players`` rows carry the key.
+
+    They do not always. Every builder reads only ``MAX(retrieved_as_of)`` per
+    gsis, so a column that upstream DROPS from its newest row for one gsis
+    disappears from that gsis's view of the world. Measured live 2026-09-15 —
+    Max Bredeson, espn ``4878695``: nflverse's newest row for his real id
+    ``00-0041081`` carries ``sleeper_id`` NULL (older rows carried ``13516``),
+    while the newest row for his placeholder ``BRE060106`` still carries it. The
+    sleeper column therefore sees ONE candidate, has no collision to resolve,
+    and answers with the placeholder — while ``gsis_by_espn``, which sees both
+    rows, answers with the real id. Two maps, one player, two ids. That split is
+    the exact defect this item exists to close, so closing it only for the keys
+    that happen to collide would have left it open on a key that does not.
+
+    Pass 2 is therefore narrow and one-directional: **only when a key's winner is
+    a placeholder**, look for a real ``00-`` gsis among the latest rows sharing
+    that winner's ESPN id, and prefer it. The gate matters. Without it the hop
+    would also fire where BOTH candidates are real — and upstream has four such
+    espn ids, each shared by two genuinely DIFFERENT retired players (recorded in
+    ``gsis_by_espn``); re-pointing one of those would attribute one player's rows
+    to another. A placeholder losing to a real id cannot do that: there is only
+    ever one player behind it.
+
+    Measured effect of pass 2 on the live crosswalk: ``sleeper_id`` 2 keys
+    (Bredeson, Kuwatch), ``pfr_id`` 9 keys, ``espn_id`` 0 — the espn map is its
+    own identity, so the hop is provably a no-op there and is kept only so the
+    three paths share ONE implementation rather than three that must be kept in
+    step by hand.
+
+    Collisions and hops log through :class:`_CollisionTally`: at most two summary
+    WARNING lines per build, with per-collision detail at DEBUG.
+
+    COST, measured rather than assumed (the 3.11a lesson): one build is 52 ms on
+    the live-sized database, of which the pass-2 lookup is 26 ms — and pass 2
+    runs at all only when some key still resolves to a placeholder (6 espn keys
+    after the migration). Against a `ziggurat waivers` run that takes ~24 s this
+    is noise; it is recorded so the next person does not have to re-measure it.
+    """
+    source_key = source_key or key_col
+    if key_col not in ("pfr_id", "espn_id", "sleeper_id"):
+        # Code-authored SQL only (the column is interpolated, never bound).
+        raise ValueError(f"preferred_gsis_by: unsupported key column {key_col!r}")
+
+    out: dict[str, str] = {}
+    espn_of: dict[str, str | None] = {}
+    tally = _CollisionTally(source_key, _PREFERENCE_RULE)
+    for r in conn.execute(
+        f"""
+        SELECT {key_col} AS k, gsis_id, espn_id FROM players p
+        WHERE {key_col} IS NOT NULL AND retrieved_as_of = (
+            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
+        )
+        """
+    ):
+        key, gsis = r["k"], r["gsis_id"]
+        espn_of[gsis] = r["espn_id"]
+        if key in out and out[key] != gsis:
+            keep = min(out[key], gsis, key=_gsis_preference)
+            tally.record(key, out[key], gsis, keep)
+            out[key] = keep
+            continue
+        out[key] = gsis
+    tally.flush()
+
+    hops = [k for k, g in out.items() if not (g or "").startswith("00-")]
+    if hops:
+        real_by_espn = _real_gsis_by_espn(conn)
+        alias = _CollisionTally(f"{source_key} (via the player's ESPN id)", _ALIAS_RULE)
+        for key in hops:
+            candidates = real_by_espn.get(espn_of.get(out[key]) or "")
+            if not candidates:
+                continue
+            keep = min(candidates, key=_gsis_preference)
+            alias.record(key, out[key], keep, keep)
+            out[key] = keep
+        alias.flush()
+    return out
+
+
 def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
     """pfr_id -> gsis_id from the latest players snapshot (crosswalk resolution
     for PFR-keyed sources like snap counts).
@@ -560,28 +682,18 @@ def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
     Measured 0 flips across one re-pull, i.e. luck rather than correctness. If the
     preference is later shown to pick the wrong id, that is a one-line change here
     plus a re-pull; a nondeterministic table is not repairable at all.
+
+    **Item 3.18 (2026-09-15) moved the body onto the shared
+    :func:`preferred_gsis_by`**, which adds the ESPN-identity hop. Measured
+    effect here: **9 pfr ids** whose own rows offer only a placeholder now
+    resolve to the real ``00-`` id (e.g. ``AndeAa00`` -> ``00-0041491``). None
+    of the nine has a stored ``snap_counts`` row today — the table holds ZERO
+    placeholder gsis ids — so this re-keys nothing now and prevents the split
+    the first time one of those players records a snap. ``snap_counts`` keys on
+    ``(pfr_player_id, season, week, team, retrieved_as_of)``, so a re-pull
+    OVERWRITES the gsis on the row rather than duplicating it.
     """
-    out: dict[str, str] = {}
-    tally = _CollisionTally(
-        "pfr_id", "the deterministic '00-' preference (see base._gsis_preference)"
-    )
-    for r in conn.execute(
-        """
-        SELECT pfr_id, gsis_id FROM players p
-        WHERE pfr_id IS NOT NULL AND retrieved_as_of = (
-            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
-        )
-        """
-    ):
-        pfr, gsis = r["pfr_id"], r["gsis_id"]
-        if pfr in out and out[pfr] != gsis:
-            keep = min(out[pfr], gsis, key=_gsis_preference)
-            tally.record(pfr, out[pfr], gsis, keep)
-            out[pfr] = keep
-            continue
-        out[pfr] = gsis
-    tally.flush()
-    return out
+    return preferred_gsis_by(conn, "pfr_id")
 
 
 def ids_by_fantasypros(conn: sqlite3.Connection) -> dict[str, tuple[str | None, str | None]]:
@@ -592,6 +704,16 @@ def ids_by_fantasypros(conn: sqlite3.Connection) -> dict[str, tuple[str | None, 
     id should map to exactly one player, so a collision is logged (not silently
     last-write-wins) and the first mapping kept. players.py already normalizes
     espn_id/fantasypros_id to bare digit strings, so no per-row coercion here.
+
+    **Measured 2026-09-15 (item 3.18, paired repair): ZERO collisions on the live
+    crosswalk** (0 of 4,781 fantasypros ids), so the ``00-`` preference the espn,
+    sleeper and pfr paths carry is not applied here — it would be unreachable
+    code pinned by nothing, and the resolution it would change has never
+    happened. The consumers (``adp_rankings``, ``fpecr_panel``, ``fp_weekly_ecr``)
+    were checked directly rather than by inference: between them they hold 4
+    distinct placeholder gsis ids and **none of the 262 espn-collision losers**,
+    so no re-key applies to them either. If this ever stops being zero, the fix
+    is the paired one — see ``gsis_by_espn``, and re-key before you re-resolve.
     """
     out: dict[str, tuple[str | None, str | None]] = {}
     tally = _CollisionTally("fantasypros_id", "keeping the first row scanned")
@@ -691,48 +813,58 @@ def gsis_by_espn(conn: sqlite3.Connection) -> dict[str, str]:
     immutable. D/ST never appears here — ESPN gives team defenses synthetic
     negative ids and nflverse has no gsis for them; they join by team abbr.
 
-    **The ``00-`` preference is DELIBERATELY NOT applied here (item 3.18, measured
-    2026-09-15 on the live crosswalk). It would move the join loss, not remove
-    it.** 266 espn ids collide; 262 are a 2026 rookie whose nflverse placeholder
-    id (``LOV121782``) sits beside his real one (``00-0041027``), and scan order
-    keeps the PLACEHOLDER in 264 of 266. Under that resolution:
+    **The ``00-`` preference IS applied here, as HALF of a paired change (item
+    3.18, measured 2026-09-15, applied 2026-09-15).** A nflverse placeholder
+    (``LOV121782``) never wins over a real gsis (``00-0041027``).
 
-    * ``weekly_stats`` (2026 wk1 REG): 0 rows on the kept id, **96 on the
-      discarded** one — every available row is lost.
-    * ``snap_counts`` (2026): 0 on the kept id, **125 on the discarded** one.
-    * ``projections`` (``sleeper_rotowire`` 2026): **112 on the KEPT id**, 9 on
-      the discarded one — because ``projections._sleeper_to_gsis`` resolves its
-      own collision the same accidental way and stamps the SAME placeholder into
-      the stored rows.
+    The first half of 3.18 measured the collision and REFUSED this one-line
+    change, and the refusal was right at the time. 266 espn ids collide; 262 are
+    a 2026 rookie whose placeholder id sits beside his real one, and the old
+    scan-order rule kept the PLACEHOLDER in 264 of 266. Under that rule:
 
-    So preferring ``00-`` here alone would repair 96 stats + 125 snap joins and
-    break 112 pricing joins — including 5 of the 6 colliding players on a league
-    roster today and both colliding players in the top-30-per-position priced
-    pool (Jeremiyah Love RB, Jadarian Price RB), who would go from priced to
-    unpriceable on a waiver Tuesday. The id spaces disagree; a preference on ONE
-    of them cannot reconcile them. The repair is paired and sequenced: give
-    ``projections._sleeper_to_gsis`` the same ``_gsis_preference``, re-pull 2026
-    projections onto the real ids, and only then flip this map. Until that lands,
-    a colliding row travels with its alternates (``id_alternates``, item 4.2b)
-    rather than being silently re-pointed.
+    * ``weekly_stats`` (2026 wk1 REG): 0 rows on the kept id, **96 colliding
+      espn ids (189 rows) on the discarded** one — every available row lost.
+    * ``snap_counts`` (2026): 0 on the kept id, **125 ids (142 rows)** on the
+      discarded one.
+    * ``projections`` (``sleeper_rotowire`` 2026): **112 ids (106,848 rows) on
+      the KEPT id**, 9 on the discarded one — because
+      ``projections._sleeper_to_gsis`` resolved its own collision the same
+      accidental way and stamped the SAME placeholder into the stored rows.
+
+    So flipping THIS map alone would have repaired the usage joins and broken
+    112 pricing joins — 5 of the 6 colliding players on a league roster and both
+    colliding rows in the top-30-per-position priced pool (Jeremiyah Love RB,
+    Jadarian Price RB) would have gone from priced to unpriceable on a waiver
+    Tuesday. **A preference on ONE of two disagreeing id spaces cannot reconcile
+    them; it chooses which join to break.**
+
+    What makes the preference safe here is that all three parts of the repair
+    ship together:
+
+    1. ``projections._sleeper_to_gsis`` now applies the same preference, so every
+       FUTURE projection pull is keyed on the real id;
+    2. ``db/migrations/019_gsis_placeholder_rekey.sql`` re-derives the gsis join
+       key on rows ALREADY stored under the old rule — ``projections`` (keyed by
+       ``source_player_id`` = Sleeper id), ``league_player_state`` and
+       ``player_news_links`` (keyed by ESPN id);
+    3. this map, so the roster side and the pricing side name the same player.
+
+    ``weekly_stats``/``snap_counts``/``ngs_*`` needed no re-key: they were always
+    on the real ``00-`` id (measured: 0 placeholder ids in any of them), which is
+    exactly why the old rule lost them. ``depth_chart_slots`` is deliberately NOT
+    re-keyed — its ``gsis_id`` is an UPSTREAM column from the nflverse frame, not
+    a value this crosswalk derived, and 9 of its ids are placeholders because
+    upstream published them that way.
+
+    **FOUR espn ids are a different bug and no preference can help them**
+    (``2582138``, ``2574010``, ``2516049``, ``16094``): upstream gives ONE espn
+    id to TWO genuinely different retired players, and both gsis ids are real
+    ``00-`` ids. All four are inert (0 rows in every fact table). They are the
+    reason :func:`preferred_gsis_by`'s identity hop fires only when the winner is
+    a PLACEHOLDER — a hop that also fired between two real ids would re-point one
+    of these players' rows onto the other.
     """
-    out: dict[str, str] = {}
-    tally = _CollisionTally("espn_id", "keeping the first row scanned (see the docstring)")
-    for r in conn.execute(
-        """
-        SELECT espn_id, gsis_id FROM players p
-        WHERE espn_id IS NOT NULL AND retrieved_as_of = (
-            SELECT MAX(retrieved_as_of) FROM players p2 WHERE p2.gsis_id = p.gsis_id
-        )
-        """
-    ):
-        espn, gsis = r["espn_id"], r["gsis_id"]
-        if espn in out and out[espn] != gsis:
-            tally.record(espn, out[espn], gsis, out[espn])
-            continue
-        out[espn] = gsis
-    tally.flush()
-    return out
+    return preferred_gsis_by(conn, "espn_id")
 
 
 def select_as_of(
