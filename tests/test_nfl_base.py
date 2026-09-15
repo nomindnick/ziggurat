@@ -641,7 +641,9 @@ def test_an_uncollided_pfr_id_is_unaffected(db):
 
 
 # ===========================================================================
-# item 3.18 — the espn_id -> gsis collision: measured, logged once, NOT re-ruled
+# item 3.18 — the espn_id -> gsis collision: measured, logged once, and (in the
+# PAIRED repair of 2026-09-15) resolved by the same deterministic `00-` rule the
+# pfr path has always used.
 # ===========================================================================
 
 def _players_espn(conn, rows):
@@ -665,21 +667,23 @@ LIVE_COLLISION_ESPN = "4685365"
 def test_the_measured_espn_collision_shape_resolves_to_exactly_one_gsis(db):
     """The fixture IS the live shape: a placeholder beside a real `00-` id.
 
-    One espn id, two gsis rows, one entry out — never two, never a crash.
+    One espn id, two gsis rows, one entry out — never two, never a crash — and
+    since the paired repair (2026-09-15) that one entry is the REAL id.
     """
     _players_espn(db, [(LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_ESPN),
                        (LIVE_COLLISION_REAL, LIVE_COLLISION_ESPN)])
     got = base.gsis_by_espn(db)
     assert list(got) == [LIVE_COLLISION_ESPN]
-    assert got[LIVE_COLLISION_ESPN] in (LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_REAL)
+    assert got[LIVE_COLLISION_ESPN] == LIVE_COLLISION_REAL
 
 
 def test_a_placeholder_gsis_never_outranks_a_real_one_under_the_preference():
-    """`_gsis_preference` is the deterministic `00-` rule the pfr path applies.
+    """`_gsis_preference` is the deterministic `00-` rule EVERY multi-gsis path
+    now applies (pfr, espn, sleeper).
 
     Pinned on the measured live pair and on the 3.2c pair, in both argument
-    orders, so the rule stays available (and correct) for the paired repair item
-    3.18 names — even though `gsis_by_espn` deliberately does not use it today.
+    orders, so a change to the rule fails here rather than silently re-pointing
+    a stored join key.
     """
     ph, real = LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_REAL
     assert min(ph, real, key=base._gsis_preference) == real
@@ -690,35 +694,42 @@ def test_a_placeholder_gsis_never_outranks_a_real_one_under_the_preference():
     assert min("AAA000002", "ZZZ000001", key=base._gsis_preference) == "AAA000002"
 
 
-def test_the_espn_path_deliberately_has_no_preference_rule_while_pfr_does(db):
-    """CHARACTERIZATION pin for the item-3.18 measurement, not an endorsement.
+def test_every_gsis_path_answers_the_identical_collision_identically(db):
+    """THE paired-repair pin (item 3.18, 2026-09-15). Replaces the
+    CHARACTERIZATION test that used to assert the opposite.
 
-    Measured on the live crosswalk 2026-09-15: preferring `00-` on the espn path
-    ALONE would repair 96 `weekly_stats` and 125 `snap_counts` joins and BREAK
-    112 `projections` joins — because `projections._sleeper_to_gsis` stamped the
-    same placeholder into the stored rows. Five of the six colliding players on a
-    league roster, and both colliding players in the top-30-per-position priced
-    pool, would go from priced to unpriceable. So the rule was NOT changed.
+    Until this repair the espn and sleeper paths resolved a multi-gsis collision
+    by SQLite SCAN ORDER, so which id won depended on which row came back first
+    — and they won differently from the pfr path, which has always applied the
+    `00-` preference. That is how one player ended up with his usage rows
+    (`weekly_stats`, `snap_counts`) on the real id and his PRICING rows
+    (`projections`) on the placeholder: two id spaces, one player, no error
+    anywhere.
 
-    The two maps therefore behave differently on the identical collision, and
-    that difference is what this pins: `gsis_by_pfr` gives the same answer
-    whichever row is scanned first (it has a total order); `gsis_by_espn` does
-    not (it has none). If someone adds the preference here, this fails and sends
-    them to the docstring and the 3.18 Update block — which is the point.
+    So the property under test is not "the espn map prefers `00-`" on its own —
+    it is that ALL THREE paths give the SAME answer to the SAME collision, and
+    give it in BOTH row orders. A map with a total order and a map without one
+    can agree by luck on one fixture; only the flipped-order half can tell them
+    apart. (The predecessor of this test proved `gsis_by_espn` disagreed with
+    itself across row orders; if you are reading this because it failed, the
+    docstrings on `gsis_by_espn` / `_sleeper_to_gsis` and 3.18's second Update
+    block explain why a one-sided change is worse than none.)
     """
+    from ziggurat.data.nfl import projections as proj
     from ziggurat.data.store import apply_schema
 
     ph, real, espn = (LIVE_COLLISION_PLACEHOLDER, LIVE_COLLISION_REAL,
                       LIVE_COLLISION_ESPN)
-    pfr = "HarrZx00"
+    pfr, sleeper = "HarrZx00", "9912"
 
     def seed(conn, order):
-        # ONE row per gsis carrying BOTH source ids, so the identical collision
-        # is offered to both builders off the same two rows.
+        # ONE row per gsis carrying ALL THREE source ids, so the identical
+        # collision is offered to every builder off the same two rows.
         conn.executemany(
-            "INSERT INTO players (gsis_id, pfr_id, espn_id, retrieved_as_of, "
-            "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
-            [(g, pfr, espn) for g in order],
+            "INSERT INTO players (gsis_id, pfr_id, espn_id, sleeper_id, "
+            "retrieved_as_of, knowable_as_of) "
+            "VALUES (?, ?, ?, ?, '2026-09-15', '2026-09-15')",
+            [(g, pfr, espn, sleeper) for g in order],
         )
         conn.commit()
 
@@ -727,15 +738,39 @@ def test_the_espn_path_deliberately_has_no_preference_rule_while_pfr_does(db):
     apply_schema(flipped)
     seed(flipped, (real, ph))
     try:
-        # pfr: a preference IS applied — same answer both ways, and it is `00-`.
-        assert base.gsis_by_pfr(db)[pfr] == real
-        assert base.gsis_by_pfr(flipped)[pfr] == real
-
-        # espn: NO preference — the answer follows the row order, which is
-        # exactly the property the measurement says must not be "fixed" alone.
-        assert base.gsis_by_espn(db)[espn] != base.gsis_by_espn(flipped)[espn]
+        for conn in (db, flipped):
+            assert base.gsis_by_pfr(conn)[pfr] == real
+            assert base.gsis_by_espn(conn)[espn] == real
+            assert proj._sleeper_to_gsis(conn)[sleeper] == real
+        # …and the two orders agree with each other, which is the half a
+        # single-fixture test cannot see.
+        assert base.gsis_by_espn(db)[espn] == base.gsis_by_espn(flipped)[espn]
+        assert (proj._sleeper_to_gsis(db)[sleeper]
+                == proj._sleeper_to_gsis(flipped)[sleeper])
     finally:
         flipped.close()
+
+
+def test_a_placeholder_never_wins_even_against_several_rivals(db):
+    """The preference is a TOTAL order, not a two-element rule.
+
+    Three gsis ids on one espn id (two placeholders and one real) must still
+    resolve to the real one, in any row order — a `min` over a sort key, never a
+    pairwise comparison that depends on which pair it meets first.
+    """
+    import itertools
+
+    from ziggurat.data.store import apply_schema
+
+    ids = ("ZZZ999999", "00-0041328", "AAA111111")
+    for order in itertools.permutations(ids):
+        conn = connect(":memory:")
+        apply_schema(conn)
+        try:
+            _players_espn(conn, [(g, "4685365") for g in order])
+            assert base.gsis_by_espn(conn)["4685365"] == "00-0041328"
+        finally:
+            conn.close()
 
 
 def _many_espn_collisions(conn, n=12):
@@ -764,6 +799,10 @@ def test_many_espn_collisions_log_ONE_summary_line_naming_the_count(caplog, db):
     assert "12 collision(s)" in msg      # and of collision EVENTS
     assert "4700000" in msg              # one worked example...
     assert "4700007" not in msg          # ...never all twelve
+    assert "'00-' preference" in msg     # and the rule that decided them
+
+    # Every one of the twelve resolved to the REAL id, not the placeholder.
+    assert all(g.startswith("00-") for g in got.values())
 
 
 def test_the_per_collision_detail_is_kept_at_debug(caplog, db):
@@ -827,3 +866,167 @@ def test_the_fantasypros_crosswalk_also_summarises(caplog, db):
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1
     assert "1 fantasypros_id" in warnings[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# item 3.18, pass 2 — the ESPN-identity hop, and the gate that keeps it narrow
+# ---------------------------------------------------------------------------
+#
+# A crosswalk reads only MAX(retrieved_as_of) per gsis. So when upstream DROPS a
+# source id from a gsis's newest row, that id column stops being able to see the
+# player's other gsis at all — there is no collision to resolve, and the column
+# answers with whatever it still holds. Measured live 2026-09-15 on Max Bredeson
+# (espn 4878695): the newest row for his REAL id 00-0041081 carries sleeper_id
+# NULL (older rows carried 13516) while the newest row for his placeholder
+# BRE060106 still carries it. `gsis_by_espn` sees both rows and says 00-0041081;
+# the sleeper column sees one and says BRE060106. Two maps, one player, two ids
+# — which is the exact split this whole item exists to close.
+
+_HOP_REAL, _HOP_PH, _HOP_ESPN, _HOP_SLEEPER = (
+    "00-0041081", "BRE060106", "4878695", "13516")
+
+
+def _bredeson_shape(conn):
+    """The live asymmetry: the REAL row has lost its sleeper_id, the PLACEHOLDER
+    row still has it. Both rows carry the espn id, which is the identity."""
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+        [(_HOP_REAL, _HOP_ESPN, None), (_HOP_PH, _HOP_ESPN, _HOP_SLEEPER)],
+    )
+    conn.commit()
+
+
+def test_a_key_whose_own_rows_offer_only_a_placeholder_is_rescued_by_espn(db):
+    """Pass 2. Without it the sleeper map answers with the placeholder while the
+    espn map answers with the real id — and the projections table and the roster
+    table then name the same player differently, silently."""
+    from ziggurat.data.nfl import projections as proj
+
+    _bredeson_shape(db)
+    assert base.gsis_by_espn(db)[_HOP_ESPN] == _HOP_REAL
+    assert proj._sleeper_to_gsis(db)[_HOP_SLEEPER] == _HOP_REAL
+
+
+def test_the_hop_is_logged_as_its_own_summary_line(caplog, db):
+    """It is a DIFFERENT resolution from the collision rule and says so — a
+    reader must be able to tell "this column had two candidates and I picked one"
+    from "this column had no idea and I asked the ESPN identity"."""
+    from ziggurat.data.nfl import projections as proj
+
+    _bredeson_shape(db)
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        proj._sleeper_to_gsis(db)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert "via the player's ESPN id" in warnings[0]
+    assert _HOP_SLEEPER in warnings[0]
+    assert f"keeping {_HOP_REAL}" in warnings[0]
+
+
+def test_the_hop_does_NOT_fire_between_two_real_gsis_ids(db):
+    """THE GATE, and it is load-bearing.
+
+    Upstream gives ONE espn id to TWO genuinely different retired players in four
+    measured cases (2582138, 2574010, 2516049, 16094), both with real `00-` ids.
+    An ungated identity hop would re-point one player's rows onto the other —
+    strictly worse than the join loss being repaired, and undetectable
+    downstream. So the hop fires only when the column's own winner is a
+    PLACEHOLDER, where there can only be one player behind it.
+    """
+    from ziggurat.data.nfl import projections as proj
+
+    # the live shape of espn 2582138: two real gsis, two sleeper ids, one espn id
+    db.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, '2582138', ?, '2026-09-15', '2026-09-15')",
+        [("00-0032430", "3480"), ("00-0032606", "3481")],
+    )
+    db.commit()
+    got = proj._sleeper_to_gsis(db)
+    assert got["3480"] == "00-0032430"
+    assert got["3481"] == "00-0032606"     # NOT re-pointed onto the other player
+
+
+def test_the_hop_is_a_no_op_on_the_espn_map_itself(db):
+    """`gsis_by_espn` is keyed on the identity the hop looks through, so the hop
+    can only ever re-pick inside the group it already resolved — and it reaches
+    that branch only when the group holds no `00-` id at all. Provably inert;
+    pinned so the shared implementation is not "simplified" on the assumption
+    that it does something here.
+    """
+    _players_espn(db, [("PLC000001", "4700000"), ("PLC000002", "4700000")])
+    got = base.gsis_by_espn(db)
+    assert got["4700000"] == "PLC000001"   # a placeholder with no real rival stands
+
+
+def test_a_placeholder_with_no_real_sibling_anywhere_is_still_kept(db):
+    """The hop never invents an id. A player nflverse has not reconciled at all
+    has to join to something, and that something is his placeholder."""
+    from ziggurat.data.nfl import projections as proj
+
+    db.execute(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES ('ORP000001', '4700111', '5555', "
+        "'2026-09-15', '2026-09-15')")
+    db.commit()
+    assert proj._sleeper_to_gsis(db)["5555"] == "ORP000001"
+    assert base.gsis_by_espn(db)["4700111"] == "ORP000001"
+
+
+def test_the_pfr_path_gets_the_same_hop(db):
+    """All three multi-gsis paths share ONE resolver, so `gsis_by_pfr` is rescued
+    too. Measured live: 9 pfr ids move (e.g. AndeAa00 -> 00-0041491). None has a
+    stored `snap_counts` row today — the table holds ZERO placeholder gsis ids —
+    so nothing is re-keyed now; this stops the split appearing the first time one
+    of those players records a snap.
+    """
+    db.executemany(
+        "INSERT INTO players (gsis_id, espn_id, pfr_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, '4700222', ?, '2026-09-15', '2026-09-15')",
+        [("00-0041491", None), ("AND035767", "AndeAa00")],
+    )
+    db.commit()
+    assert base.gsis_by_pfr(db)["AndeAa00"] == "00-0041491"
+
+
+def test_the_shared_resolver_refuses_an_unknown_key_column(db):
+    """The column name is INTERPOLATED into SQL, never bound, so the allowlist is
+    the injection fence — not a style preference."""
+    with pytest.raises(ValueError, match="unsupported key column"):
+        base.preferred_gsis_by(db, "name")
+    with pytest.raises(ValueError, match="unsupported key column"):
+        base.preferred_gsis_by(db, "gsis_id) --")
+
+
+def test_pass_1_stands_on_its_own_when_no_espn_identity_exists(db):
+    """Pass 1 pinned SEPARATELY from pass 2, because pass 2 HIDES it.
+
+    Wherever both colliding rows carry an espn id, the identity hop rescues a
+    placeholder that pass 1 wrongly chose, so a first-wins pass 1 gives the right
+    answer anyway — measured: the equivalent mutant survived every other test in
+    this file and in `test_migrations.py`. This fixture removes the rescue: two
+    gsis on one key, neither row carrying an espn id, so only pass 1 can decide.
+    Rows with a null espn_id are common upstream, so this is a real shape.
+
+    Both row orders, because a first-wins rule agrees with a preference on
+    exactly one of them.
+    """
+    from ziggurat.data.nfl import projections as proj
+    from ziggurat.data.store import apply_schema
+
+    for order in (("PLC900001", "00-0049999"), ("00-0049999", "PLC900001")):
+        conn = connect(":memory:")
+        apply_schema(conn)
+        try:
+            conn.executemany(
+                "INSERT INTO players (gsis_id, espn_id, sleeper_id, pfr_id, "
+                "retrieved_as_of, knowable_as_of) "
+                "VALUES (?, NULL, '4242', 'NoEspn00', '2026-09-15', '2026-09-15')",
+                [(g,) for g in order],
+            )
+            conn.commit()
+            assert proj._sleeper_to_gsis(conn)["4242"] == "00-0049999"
+            assert base.gsis_by_pfr(conn)["NoEspn00"] == "00-0049999"
+        finally:
+            conn.close()

@@ -504,3 +504,130 @@ def test_a_non_kicker_row_is_never_charged_with_a_bucket_mismatch(db):
     with base.collect_drops() as tally:
         projections.ingest_projections(db, [qb], retrieved_as_of="2026-08-30")
     assert tally["incomplete"] == 0
+
+
+# =========================================================================
+# item 3.18 (paired repair, 2026-09-15) — the sleeper_id -> gsis collision
+# =========================================================================
+#
+# nflverse mints a placeholder gsis (`LOV121782`) for a player it has not yet
+# reconciled, and the real one (`00-0041027`) arrives beside it. `players` is
+# keyed (gsis_id, retrieved_as_of), so such a player is TWO rows sharing one
+# sleeper_id — and `_sleeper_to_gsis` used to resolve that with `setdefault`,
+# i.e. SQLite scan order, with no log line at all. Measured on the live
+# database 2026-09-15: that stamped the PLACEHOLDER into 106,848 stored 2026
+# projection rows (112 ids) while `weekly_stats` and `snap_counts` carried the
+# same players on their real `00-` ids. The pricing table and the usage tables
+# named the same player differently, and nothing anywhere raised.
+
+_PH, _REAL, _SLEEPER = "LOV121782", "00-0041027", "12441"
+
+
+def _collision_players(conn, order, sleeper_id=_SLEEPER, retrieved="2026-09-15"):
+    conn.executemany(
+        "INSERT INTO players (gsis_id, sleeper_id, retrieved_as_of, knowable_as_of) "
+        "VALUES (?, ?, ?, ?)",
+        [(g, sleeper_id, retrieved, retrieved) for g in order],
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("order", [(_PH, _REAL), (_REAL, _PH)])
+def test_a_placeholder_gsis_never_wins_the_sleeper_crosswalk(db, order):
+    """The measured live shape, in BOTH row orders.
+
+    The flipped order is the load-bearing half: a first-wins rule agrees with a
+    preference on exactly one of the two orders, so a single-order fixture
+    cannot tell them apart.
+    """
+    _collision_players(db, order)
+    assert projections._sleeper_to_gsis(db)[_SLEEPER] == _REAL
+
+
+def test_the_sleeper_collision_logs_one_summary_line_naming_the_rule(caplog, db):
+    """It used to log NOTHING — the espn path at least printed 266 lines.
+
+    One summary WARNING per build (``base._CollisionTally``), naming the key
+    count, the collision count and the rule that decided them.
+    """
+    import logging
+
+    _collision_players(db, (_PH, _REAL))
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        projections._sleeper_to_gsis(db)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    msg = warnings[0].getMessage()
+    assert "1 sleeper_id" in msg
+    assert _SLEEPER in msg
+    assert f"keeping {_REAL}" in msg
+    assert "'00-' preference" in msg
+
+
+def test_a_sleeper_id_with_only_a_placeholder_keeps_it(caplog, db):
+    """A placeholder with no rival is a real answer, not a defect.
+
+    The preference chooses BETWEEN colliding ids; it never rejects an id. A
+    player nflverse has not reconciled at all still has to join to something,
+    and silence is the healthy state for him.
+    """
+    import logging
+
+    _collision_players(db, (_PH,), sleeper_id="7777")
+    with caplog.at_level(logging.WARNING, logger="ziggurat.data.nfl"):
+        got = projections._sleeper_to_gsis(db)
+    assert got["7777"] == _PH
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_an_ingest_stores_the_real_gsis_for_a_colliding_rookie(db):
+    """End to end: the repair has to reach the STORED row, not just the map.
+
+    That stored value is the join key ``valuation.weekly_lines`` groups on, so a
+    placeholder here is a rookie priced under an id ``weekly_stats`` has never
+    heard of — invisible to ``marginal``, ``waivers`` and ``candidates`` in
+    exactly the weeks a rookie breaks out.
+    """
+    _collision_players(db, (_PH, _REAL))
+    rookie = dict(_by_id(_raw_rows(), "3163"), player_id=_SLEEPER)
+    projections.ingest_projections(db, [rookie], retrieved_as_of="2026-09-15")
+
+    stored = db.execute(
+        "SELECT gsis_id FROM projections WHERE source_player_id = ?", (_SLEEPER,)
+    ).fetchall()
+    assert [r["gsis_id"] for r in stored] == [_REAL]
+
+
+def test_the_repaired_crosswalk_does_not_widen_the_as_of_gate(db):
+    """LEAKAGE. The crosswalk is crosswalk-at-now by design (no ``as_of``), and
+    that must not become a way for a row to be read before it was knowable.
+
+    A row ingested today under the repaired resolution is stamped exactly as
+    before — ``knowable_as_of == retrieved_as_of`` — so an earlier ``as_of``
+    still sees nothing. The re-key changes WHICH PLAYER a row is about, never
+    WHEN it became knowable.
+    """
+    _collision_players(db, (_PH, _REAL))
+    rookie = dict(_by_id(_raw_rows(), "3163"), player_id=_SLEEPER)
+    projections.ingest_projections(db, [rookie], retrieved_as_of="2026-09-15")
+
+    assert projections.get_projections(db, as_of="2026-09-14", season=2023, week=1) == []
+    later = projections.get_projections(db, as_of="2026-09-15", season=2023, week=1)
+    assert len(later) == 1
+    assert later[0]["gsis_id"] == _REAL
+    assert later[0]["knowable_as_of"] == later[0]["retrieved_as_of"] == "2026-09-15"
+
+
+def test_the_sleeper_crosswalk_takes_no_as_of_argument():
+    """Crosswalk-at-now is a DELIBERATE property, so pin it.
+
+    gsis<->sleeper identity is immutable, and gating it would hide the whole
+    crosswalk behind a past ``as_of`` (the ``players`` backfill stamps
+    ``knowable_as_of`` = pull day). An ``as_of`` appearing here would be someone
+    "fixing" Rule 1 in the one place it does not apply — and it would silently
+    unprice every player on a backtest read.
+    """
+    import inspect
+
+    assert "as_of" not in inspect.signature(projections._sleeper_to_gsis).parameters
+    assert "as_of" not in inspect.signature(base.gsis_by_espn).parameters

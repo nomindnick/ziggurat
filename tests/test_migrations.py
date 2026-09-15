@@ -49,7 +49,7 @@ from ziggurat.paths import MIGRATIONS_DIR, SCHEMA_PATH
 
 #: Bump with every migration. A literal, not a computed value: if this file
 #: derived the number from the directory it would agree with any mistake.
-LATEST_SCHEMA_VERSION = 18
+LATEST_SCHEMA_VERSION = 19
 
 #: sha256 of every shipped migration. Pinned as literals for the reason spelled
 #: out in `test_an_applied_migration_is_never_edited` — this is the guard against
@@ -90,6 +90,8 @@ MIGRATION_DIGESTS: dict[str, str] = {
         "fb5a5e851761a1c6494c5fc62fd4b5a1b2897735ad2a0a12e318aef1a2e1e565",
     "018_decision_freezes.sql":
         "4f48b58c589e9175dc90fc908299efbec969d359b70a25cf5f78471fadb91b1d",
+    "019_gsis_placeholder_rekey.sql":
+        "aa87ac6768eadcd336dbcd8241088836eaa27fa12f9e5e4a5983a59e81b8ea88",
 }
 
 #: The doctrine, printed by the test that enforces it. Long on purpose: the next
@@ -839,3 +841,354 @@ def test_without_the_busy_timeout_the_same_write_fails(tmp_path):
 
     thread.join()
     impatient.close()
+
+
+# =====================================================================
+# Migration 019 — item 3.18's paired repair: re-derive the gsis join key
+# =====================================================================
+#
+# The point of this migration is NARROWNESS. It rewrites a derived crosswalk
+# column on rows already stored under an accidental resolution, and the failure
+# mode that matters is not "it missed a row" — it is "it re-pointed a row it had
+# no business touching", which would silently attribute one player's projections
+# to another with nothing raising anywhere. So every test below is about the
+# FENCE as much as the fix.
+
+_M019 = "019_gsis_placeholder_rekey.sql"
+_PH, _REAL = "LOV121782", "00-0041027"
+_ESPN, _SLEEPER = "4870808", "12441"
+
+
+def _seed_collision(conn):
+    """The measured live shape: one player, two `players` rows, one espn id and
+    one sleeper id — with every fact table stored the way the live database
+    actually had it before the repair."""
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+        [(_PH, _ESPN, _SLEEPER), (_REAL, _ESPN, _SLEEPER)],
+    )
+    # projections: keyed on the PLACEHOLDER (what `setdefault` stamped)
+    conn.executemany(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('sleeper_rotowire', ?, ?, 2026, ?, 'regular', 'RB', 'NO', "
+        "'2026-09-15', '2026-09-15')",
+        [(_SLEEPER, _PH, w) for w in (1, 2, 3)],
+    )
+    # league_player_state: the same placeholder, derived from gsis_by_espn
+    conn.execute(
+        "INSERT INTO league_player_state (season, espn_player_id, gsis_id, player, "
+        "position, retrieved_as_of, knowable_as_of) VALUES "
+        "(2026, ?, ?, 'A Rookie', 'RB', '2026-09-15', '2026-09-15')",
+        (_ESPN, _PH),
+    )
+    # player_news_links: likewise
+    conn.execute(
+        "INSERT INTO player_news_links (source, news_id, espn_id, gsis_id, "
+        "published_at, knowable_as_of, retrieved_as_of) VALUES "
+        "('espn', 'n1', ?, ?, '2026-09-15T12:00:00Z', '2026-09-15', '2026-09-15')",
+        (_ESPN, _PH),
+    )
+    conn.commit()
+
+
+def _migrate_from_18(conn):
+    _at_version(conn, 18)
+    _seed_collision(conn)
+    apply_schema(conn)
+    return conn
+
+
+@pytest.fixture()
+def rekeyed():
+    conn = connect(":memory:")
+    _migrate_from_18(conn)
+    yield conn
+    conn.close()
+
+
+def test_019_rekeys_the_three_derived_columns_onto_the_real_gsis(rekeyed):
+    """The fix. Every table whose gsis this system DERIVED lands on the real id."""
+    assert [r["gsis_id"] for r in rekeyed.execute(
+        "SELECT gsis_id FROM projections ORDER BY week")] == [_REAL] * 3
+    assert rekeyed.execute(
+        "SELECT gsis_id FROM league_player_state").fetchone()["gsis_id"] == _REAL
+    assert rekeyed.execute(
+        "SELECT gsis_id FROM player_news_links").fetchone()["gsis_id"] == _REAL
+
+
+def test_019_agrees_with_the_python_resolvers_it_is_repairing(rekeyed):
+    """SQL ≡ Python. The migration expresses `_gsis_preference` as a SQL sort
+    key; the ingesters express it in Python. Two encodings of one rule drift
+    silently unless something compares them — and a drift here means the next
+    pull re-splits the id space the migration just merged.
+    """
+    from ziggurat.data.nfl import base
+    from ziggurat.data.nfl import projections as proj
+
+    by_espn = base.gsis_by_espn(rekeyed)
+    by_sleeper = proj._sleeper_to_gsis(rekeyed)
+
+    for row in rekeyed.execute(
+            "SELECT source_player_id, gsis_id FROM projections"):
+        assert row["gsis_id"] == by_sleeper[row["source_player_id"]]
+    for row in rekeyed.execute(
+            "SELECT espn_player_id, gsis_id FROM league_player_state"):
+        assert row["gsis_id"] == by_espn[row["espn_player_id"]]
+    for row in rekeyed.execute("SELECT espn_id, gsis_id FROM player_news_links"):
+        assert row["gsis_id"] == by_espn[row["espn_id"]]
+
+
+def test_019_is_idempotent(rekeyed):
+    """A second application is a no-op — the rewrite condition ("the preferred id
+    differs from the stored one") is false for every row once it has run.
+
+    `apply_schema` is version-gated and will never re-run it, so this is about
+    the SQL being safe rather than about the runner: an operator re-running the
+    file by hand, or a future migration reusing the same statement, must not be
+    a second, different rewrite.
+    """
+    sql = (MIGRATIONS_DIR / _M019).read_text(encoding="utf-8")
+    before = _fingerprint(rekeyed)
+    rekeyed.executescript(sql)
+    rekeyed.commit()
+    assert _fingerprint(rekeyed) == before
+
+
+def _fingerprint(conn):
+    return (
+        [tuple(r) for r in conn.execute(
+            "SELECT source_player_id, gsis_id, week, retrieved_as_of, knowable_as_of "
+            "FROM projections ORDER BY week")],
+        [tuple(r) for r in conn.execute(
+            "SELECT espn_player_id, gsis_id, retrieved_as_of, knowable_as_of "
+            "FROM league_player_state")],
+        [tuple(r) for r in conn.execute(
+            "SELECT espn_id, gsis_id, retrieved_as_of, knowable_as_of "
+            "FROM player_news_links")],
+    )
+
+
+def test_019_moves_no_row_and_no_timestamp(rekeyed):
+    """RULE 1. The migration changes WHICH PLAYER a row is about, never WHEN it
+    became knowable — and it must not add or drop a row either.
+
+    A migration that silently re-stamped `knowable_as_of` would make a July pull
+    readable in June, which is the one class of defect this repo's default view
+    exists to make impossible.
+    """
+    assert rekeyed.execute("SELECT COUNT(*) FROM projections").fetchone()[0] == 3
+    assert rekeyed.execute(
+        "SELECT COUNT(*) FROM league_player_state").fetchone()[0] == 1
+    assert rekeyed.execute(
+        "SELECT COUNT(*) FROM player_news_links").fetchone()[0] == 1
+    for table in ("projections", "league_player_state", "player_news_links"):
+        stamps = {tuple(r) for r in rekeyed.execute(
+            f"SELECT retrieved_as_of, knowable_as_of FROM {table}")}
+        assert stamps == {("2026-09-15", "2026-09-15")}
+
+
+def test_019_leaves_a_non_colliding_key_alone():
+    """The fence, part 1: a sleeper/espn id with ONE gsis is never touched, even
+    when that one gsis is a placeholder.
+
+    A placeholder with no rival is nflverse's real answer for an unreconciled
+    player, not an error to correct — rewriting it would invent an id.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.execute(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES ('SOLO01', '999', '888', '2026-09-15', '2026-09-15')")
+    conn.execute(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('sleeper_rotowire', '888', 'SOLO01', 2026, 1, 'regular', 'WR', 'NO', "
+        "'2026-09-15', '2026-09-15')")
+    conn.commit()
+    apply_schema(conn)
+    assert conn.execute("SELECT gsis_id FROM projections").fetchone()[0] == "SOLO01"
+    conn.close()
+
+
+def test_019_leaves_a_row_whose_stored_id_is_not_its_own_alternate_alone():
+    """The fence, part 2 — the one that stops a re-key becoming a corruption.
+
+    A projections row may carry a gsis that is NOT one of its own sleeper id's
+    alternates (a stale crosswalk, a hand-loaded row, a source change). Rewriting
+    that would move a stat line from one player to a DIFFERENT player, which is
+    strictly worse than the join loss being repaired, and nothing downstream
+    could detect it. So the migration requires the stored id to be one of THAT
+    key's own ids before it will move it.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+        [(_PH, _ESPN, _SLEEPER), (_REAL, _ESPN, _SLEEPER)],
+    )
+    conn.execute(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('sleeper_rotowire', ?, '00-0099999', 2026, 1, 'regular', 'RB', 'NO', "
+        "'2026-09-15', '2026-09-15')", (_SLEEPER,))
+    conn.commit()
+    apply_schema(conn)
+    assert conn.execute("SELECT gsis_id FROM projections").fetchone()[0] == "00-0099999"
+    conn.close()
+
+
+def test_019_is_scoped_to_the_sleeper_keyed_projection_source():
+    """The fence, part 3: `source_player_id` only means "Sleeper player_id" for
+    `sleeper_rotowire`. Another source numbers its players its own way, and a
+    collision on OUR sleeper map says nothing about ITS key space.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+        [(_PH, _ESPN, _SLEEPER), (_REAL, _ESPN, _SLEEPER)],
+    )
+    conn.execute(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('some_other_feed', ?, ?, 2026, 1, 'regular', 'RB', 'NO', "
+        "'2026-09-15', '2026-09-15')", (_SLEEPER, _PH))
+    conn.commit()
+    apply_schema(conn)
+    assert conn.execute("SELECT gsis_id FROM projections").fetchone()[0] == _PH
+    conn.close()
+
+
+def test_019_does_not_touch_the_upstream_depth_chart_gsis():
+    """The fence, part 4, and the one deliberate exception.
+
+    `depth_chart_slots.gsis_id` is a column of the UPSTREAM nflverse frame, not a
+    value this crosswalk derived — 9 of its live ids are collision losers and it
+    keeps them, because rewriting it would falsify what upstream published. A
+    consumer that needs the spine joins through `espn_id`, which the same table
+    carries.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+        [(_PH, _ESPN, _SLEEPER), (_REAL, _ESPN, _SLEEPER)],
+    )
+    conn.execute(
+        "INSERT INTO depth_chart_slots (season, team, pos_grp_id, pos_id, pos_rank, "
+        "pos_abb, observed_at, retrieved_as_of, knowable_as_of, espn_id, gsis_id) "
+        "VALUES (2026, 'NO', 'RB', 'RB', 1, 'RB', '2026-09-15', '2026-09-15', "
+        "'2026-09-15', ?, ?)",
+        (_ESPN, _PH))
+    conn.commit()
+    apply_schema(conn)
+    assert conn.execute("SELECT gsis_id FROM depth_chart_slots").fetchone()[0] == _PH
+    conn.close()
+
+
+def test_019_leaves_no_temp_table_behind(rekeyed):
+    """`apply_schema` hands this connection back to the caller — every CLI
+    command runs it — so a leftover TEMP table would outlive the migration for
+    the life of the process."""
+    assert [r["name"] for r in rekeyed.execute(
+        "SELECT name FROM sqlite_temp_master WHERE type = 'table'")] == []
+
+
+def test_019_re_keys_a_row_whose_key_column_never_saw_the_collision():
+    """Pass 2 in SQL, on the measured live shape (Max Bredeson, espn 4878695).
+
+    His REAL row has lost its `sleeper_id`, so the sleeper column offers ONE
+    candidate and pass 1 has nothing to resolve — while `gsis_by_espn` sees both
+    rows and moves his roster row to the real id. Without this hop his 954 stored
+    projection rows stay on the placeholder and he goes from priced to
+    UNPRICEABLE: a fresh instance of the defect, created by the fix.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, ?, ?, '2026-09-15', '2026-09-15')",
+        [("00-0041081", "4878695", None), ("BRE060106", "4878695", "13516")],
+    )
+    conn.execute(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('sleeper_rotowire', '13516', 'BRE060106', 2026, 1, 'regular', 'TE', 'GB', "
+        "'2026-09-15', '2026-09-15')")
+    conn.execute(
+        "INSERT INTO league_player_state (season, espn_player_id, gsis_id, player, "
+        "position, retrieved_as_of, knowable_as_of) VALUES "
+        "(2026, '4878695', 'BRE060106', 'Max Bredeson', 'TE', "
+        "'2026-09-15', '2026-09-15')")
+    conn.commit()
+    apply_schema(conn)
+
+    # both sides land on the SAME id — which is the whole point
+    assert conn.execute("SELECT gsis_id FROM projections").fetchone()[0] == "00-0041081"
+    assert conn.execute(
+        "SELECT gsis_id FROM league_player_state").fetchone()[0] == "00-0041081"
+    conn.close()
+
+
+def test_019_does_not_hop_between_two_real_gsis_ids():
+    """The pass-2 GATE, in SQL. Same fence as `base.preferred_gsis_by`'s.
+
+    Upstream gives ONE espn id to TWO genuinely different retired players in four
+    measured cases (2582138, 2574010, 2516049, 16094), both with real `00-` ids.
+    An ungated hop would move one player's projection rows onto the other — which
+    is strictly worse than the join loss being repaired and invisible downstream.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, '2582138', ?, '2026-09-15', '2026-09-15')",
+        [("00-0032430", "3480"), ("00-0032606", "3481")],
+    )
+    conn.executemany(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('sleeper_rotowire', ?, ?, 2026, 1, 'regular', 'TE', 'NO', "
+        "'2026-09-15', '2026-09-15')",
+        [("3480", "00-0032430"), ("3481", "00-0032606")],
+    )
+    conn.commit()
+    apply_schema(conn)
+
+    got = dict(conn.execute("SELECT source_player_id, gsis_id FROM projections"))
+    assert got == {"3480": "00-0032430", "3481": "00-0032606"}
+    conn.close()
+
+
+def test_019_pass_1_stands_on_its_own_when_no_espn_identity_exists():
+    """Pass 1 pinned SEPARATELY from pass 2, because pass 2 hides it.
+
+    Wherever both colliding rows carry an espn id, the identity hop rescues a
+    placeholder that pass 1 wrongly chose — so an INVERTED preference produces
+    the right answer anyway and every other test here stays green (measured: that
+    exact mutant survived the whole file). This fixture removes the rescue: two
+    gsis on one sleeper id, neither row carrying an espn id, so only pass 1 can
+    decide. `players` rows with a null espn_id are common upstream, which is why
+    this is a real case and not a contrivance.
+    """
+    conn = connect(":memory:")
+    _at_version(conn, 18)
+    conn.executemany(
+        "INSERT INTO players (gsis_id, espn_id, sleeper_id, retrieved_as_of, "
+        "knowable_as_of) VALUES (?, NULL, '4242', '2026-09-15', '2026-09-15')",
+        [("PLC900001",), ("00-0049999",)],
+    )
+    conn.execute(
+        "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+        "season_type, position, team, retrieved_as_of, knowable_as_of) VALUES "
+        "('sleeper_rotowire', '4242', 'PLC900001', 2026, 1, 'regular', 'WR', 'NO', "
+        "'2026-09-15', '2026-09-15')")
+    conn.commit()
+    apply_schema(conn)
+    assert conn.execute("SELECT gsis_id FROM projections").fetchone()[0] == "00-0049999"
+    conn.close()
