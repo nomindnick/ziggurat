@@ -591,10 +591,20 @@ def test_a_past_season_is_refused_and_force_cannot_reach_it(db):
     assert refresh.BACKFILL_EXCLUDED["ff_opportunity"] in decision.reason
 
 
-def test_the_scope_line_says_whether_the_day_costs_a_download(db, tmp_path):
+def test_the_scope_line_says_whether_the_day_costs_a_download(db, tmp_path, monkeypatch):
+    """Both branches, against a TEMP mirror dir: the test used to read the real
+    `data/ffopp/` tree and failed on any day the 07:22 timer had already
+    captured today's parquet (first seen Tue 2026-09-15) — a test that reads
+    operator state is the alert-log lesson again."""
+    monkeypatch.setattr(refresh, "FFOPP_ARCHIVE_DIR", tmp_path)
     ctx = refresh.IngestContext(conn=db, season=2026, retrieved_as_of="2026-09-15",
                                 today="2026-09-15")
     assert "fresh" in refresh._scope_ff_opportunity(ctx)
+    Path(refresh.ffopp_mirror_path(2026, "2026-09-15")).write_bytes(b"x")
+    assert "existing" in refresh._scope_ff_opportunity(ctx)
+    forced = refresh.IngestContext(conn=db, season=2026, retrieved_as_of="2026-09-15",
+                                   today="2026-09-15", force=True)
+    assert "fresh" in refresh._scope_ff_opportunity(forced)
 
 
 # ------------------------------------------------------------- the scope fence
