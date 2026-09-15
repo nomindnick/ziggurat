@@ -5264,7 +5264,52 @@ three-game baseline, an active-game record that distinguishes zero involvement
 from inactive from bye from missing) is defined so it can be shadow-run on
 2026 without a second search.
 **Update:**
-> _[To be completed]_
+> **OPENED 2026-09-15 — pre-registration FROZEN, no grade run.** The
+> pre-registration is gitignored `intel/research/realised-points-4.2c-prereg.md`
+> (1,560 lines; frozen text ends at the line `END OF FROZEN TEXT`, dated
+> amendments only below it), **sha256
+> `40ca93cc1702b703b827e17cf0e184b06ab8df6356f311cf2ff214aecb513763`**, pinned
+> here by the session after re-hashing the file. Written by an Opus agent from
+> the item text, the external-review tracker, the 4.1/4.2 designs and the
+> `backtest/` code, with NO result computed (no `score_offense` call was made).
+> Decisions frozen: **R1 PRIMARY** (top-3 by week-T carries+targets within
+> position in the common eligible universe — defined in 54/54 TRAIN cells from
+> `weekly_stats`; R2's `wp` page is absent for 2022 wk1 / 2023 wk1 / every wk18
+> and is the same object the eligibility cut and the market-only arm come from,
+> so under R2 "beat the benchmark" and "beat the market" collapse into one
+> number), R2 and a preseason-ADP-anchored R3 as SECONDARIES printed on every
+> table. **Unit: house points per claim over the four-week window**
+> (+ per-season at a labelled 14 claims/season); **practical floor +2.0 per
+> claim** from decision utility (the repo's own revealed thresholds — 4.6
+> shipped nothing at +0.15/player-week and called +1.5/wk "the prize"; total
+> points is the seeding tiebreak); **detectable-effect bar, printed as a
+> SEPARATE row (C22): +4.3 per claim** at 80% power, n = 42 paired weeks, from
+> item 3.5's `DEFAULT_VARIANCE` — so the floor is 0.47 of the bar, power at
+> the floor is 26%, and 80% power at the floor needs ≈193 weeks; stated in
+> advance as a limit of the instrument. Method: studentised paired statistic
+> (delete-one-block jackknife SE), moving-block bootstrap-t within season at
+> L = 4 with mandatory sensitivity at L ∈ {1,2,4,6,8}, block sign-flip
+> permutation with `m` and `2^-m` printed per row, B = 10,000, seed 0; **no
+> search is run** (the family rule is stated only as what would govern one).
+> **Nine spec-vs-code contradictions were found before the freeze and are
+> resolved IN the document (§12), not silently:** R2 ≡ the market-only arm; "best
+> available by r0" has no cross-position order (a `surplus_rank` rule is pinned);
+> the `wp` page is missing in two graded weeks, where `build_pool` excludes
+> nobody; "confirmed non-participation" was undefined and the naive
+> no-row-means-missing reading would exclude 6.6% of horizon weeks (snap
+> coverage 1,630/1,630 makes absence a positive fact); C22's "use 4.1/4.2's
+> SEs" is not executable in house-point units; `marginal.py` is rest-of-season
+> by construction, so the four-week window carries a pre-registered
+> 2/4/8/RoS sensitivity; a clock landing after a horizon week's games (2021
+> wk15) needed a precedence exclusion; the tracker's S28 "pursue as an option"
+> vs the plan's "no search" is named and NOT exercised; and
+> `stats.sign_flip_permutation`'s tie defect is still unfixed at the freeze
+> (4.2b Wave 2), so both paths are pre-registered. Appendix A pins n = 42
+> graded decision weeks, holdout ledger 4 → 4, `schema_version` 18, the TRAIN
+> vintage partitions, and six content fingerprints to assert equal before and
+> after the grade. **Remaining:** the build named in the document's §11 (a
+> `backtest/` grader for the new objective + the 4.2d `challenger.py` seam),
+> then the TRAIN scorecards. Not scheduled for Week 2.
 
 ### 4.3 [Build] Podcast pipeline
 **Goal:** RSS archive harvest for a chosen pod slate (must have existed 2021–2025 and still publish), local Whisper with vocabulary biasing + phonetic entity resolution against the player table, claim extraction to the SPEC schema via the routing interface, claim-resolution logic (did the claimed thing happen?).
