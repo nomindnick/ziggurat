@@ -6041,6 +6041,74 @@ says.
 > **Remaining for this item:** the first live Tuesday (2026-09-15) captured
 > end-to-end with the candidate half present; the three-week five-way
 > classification; Wave 2.
+>
+> **Amendment 2026-09-15 (item 3.14a) — B5's `WeeklyEcrCollapse` floor is now
+> PER PAGE and PER WEEK. It threw away a complete `dst` page on the first
+> in-season Tuesday.** Measured at 07:22 PT, then reproduced by hand at 07:30:
+> `ingest run --source fp_weekly_ecr --force` refused the whole week-2 board —
+> *"the incoming board carries 356 rows for season 2026 but the capture stored on
+> 2026-09-14 holds 683 (floor 478 = 70%)"* — and the run logged `failed`, wrote 0
+> rows, and lost a PERISHABLE capture that exists nowhere else once upstream
+> rewrites the file. The live per-page shape was `dst` 32, `k` 33, `qb` 33,
+> `ppr-rb` 88, `ppr-te` 54, `ppr-wr` 116 against a stored week-1 board of 32 / 36
+> / 82 / 146 / 147 / 240. **`dst` was 32 of 32 NFL teams — COMPLETE — and it is
+> the page item 3.14 had made `ziggurat stream`'s PRIMARY D/ST ranker that same
+> morning.** Two independent faults, both fixed:
+>
+> * **The unit was the board.** A whole-board floor cannot tell "one page failed
+>   to publish" from "the whole file is truncated", and it refuses a complete
+>   page because a sibling is thin. The floor is now applied per page, a refused
+>   page's rows are dropped from the batch, and everything else is WRITTEN.
+> * **The baseline crossed a week boundary.** The fence exists because
+>   `select_as_of` resolves the newest `retrieved_as_of` per key — and the key is
+>   `(fantasypros_id, page, scrape_date)`, with `nfl_week` a deterministic
+>   function of `scrape_date`. So two captures labelled different weeks occupy
+>   **disjoint key spaces**: a week-2 row cannot shadow a week-1 row, and
+>   refusing it protects nothing. It would also cry wolf every Tuesday for the
+>   rest of the season, because a new week's board is BUILT UP through the week
+>   (week 1 grew `ppr-wr` 206 → 257 over six days). **Decision, recorded in the
+>   module docstring: the floor bites only on a SAME-WEEK re-scrape**, which is
+>   the case that can genuinely shadow and the only case where "this page shrank"
+>   is evidence of a fault rather than of a different population. The narrowest
+>   defensible scope would be the same `scrape_date`; same-WEEK is deliberately
+>   one notch wider, and that extra notch is a choice rather than an accident.
+>
+> The whole-board TOTAL arm is deleted as strictly implied (if every stored page
+> clears `f`, the total clears `f`). Within-week headroom for the 0.70 floor is
+> measured, not assumed: the live week-1 `qb` page fell 96 → 82 (−15%) on its
+> Monday and passed.
+>
+> **A refusal is a new loss channel, not a drop** (`base.note_refused`, a fourth
+> channel beside dropped / filtered / collapsed). Routing it through the drop
+> ceiling would have called a working fence `failed` — 291 of 356 rows is 82%,
+> four times the 20% ceiling, whose own sentence diagnoses "an unresolvable key …
+> rather than a few odd rows", the opposite of a fence that understood the rows
+> and judged them. So `refused` is OFF the ceiling; a partial refusal is
+> `partial` with `rows_dropped` still 0, a total refusal still RAISES (item
+> 3.1b — "wrote 0 rows" is never `ok`, and it is not `empty` either), and the
+> refused pages are named on the run summary line AND under a new
+> **`REFUSED`** label in `ziggurat ingest status` — `partial` is not a PROBLEM
+> status, so without its own label the refusal would sit inside a report that
+> calls the source fine. A page the stored week HAD and the capture does not is
+> reported with ZERO rows refused, which is why `run_ingest` reads the refusal
+> SENTENCES rather than the count.
+>
+> **Live verification on a copy of the production DB** (`ingest run --source
+> fp_weekly_ecr --force --path <scratch>`): all six pages landed, 356 rows,
+> status `ok`, no refusals — the cross-week case, which is what 2026-09-15
+> actually was. `ziggurat stream --path <scratch>` then engaged the primary
+> ranker: *"MKT = FantasyPros week-2 D/ST CONSENSUS, lower is better (2026-09-15
+> scrape) — THIS orders the page (item 3.14)"*, off a 32-defense board. Tests pin
+> BOTH sides on the identical live numbers: `dst` 32/32 lands while `ppr-wr`
+> 116/240 is refused under a same-week baseline, and nothing at all is refused
+> under a week-1 baseline.
+>
+> **Standing lesson: a collapse floor is only as correct as the KEY it is stated
+> against.** The fence was written from "a later capture shadows an earlier one",
+> which is true per `(id, page, scrape_date)` — and it was then enforced over a
+> quantity (the whole board, across weeks) that shares no key with the thing it
+> was protecting. The same file carries the same rule for `_MIN_BOARD_FRACTION`;
+> it is stated per page now because that is the granularity upstream publishes at.
 
 ### 4.2c [Experiment] Realised-points instrument — pre-registered (added 2026-09-04; opens 2026-09-15)
 **Goal:** Replace market-rank movement as the PRIMARY objective with what the

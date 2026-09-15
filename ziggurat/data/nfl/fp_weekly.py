@@ -50,6 +50,54 @@ only": the capture is local, and **nothing captured is ever committed**. The
 committed fixture under ``tests/fixtures/nfl/`` is a trimmed copy of the public
 NFL board — player names only, no league-private data.
 
+THE COLLAPSE FENCE IS PER PAGE AND PER WEEK (item 3.14a, 2026-09-15), and the
+scope was ARGUED FROM THE KEY rather than chosen for symmetry. Stated once, here,
+because it is the sort of rule a later reader tightens "to be safe" and thereby
+re-breaks:
+
+* **Why per PAGE.** Measured live on the first in-season Tuesday: the week-2
+  board at 07:30 PT carried ``dst`` 32 (of 32 NFL teams — COMPLETE), ``k`` 33,
+  and skill pages at roughly half their eventual size (``ppr-wr`` 116, ``ppr-rb``
+  88, ``qb`` 33). A whole-board floor read 356 against a stored 683 and refused
+  the LOT — including a complete ``dst`` page, which item 3.14 had made the
+  PRIMARY D/ST ranker for ``ziggurat stream`` that same morning. A complete page
+  must never be thrown away because a sibling page is thin; the pages are
+  published independently and there is no reason for them to fail together.
+* **Why per WEEK, and why a cross-week thin page is NOT refused.** The stored
+  primary key is ``(fantasypros_id, page, scrape_date, retrieved_as_of)`` and
+  :func:`get_fp_weekly_ecr` resolves per ``(fantasypros_id, page, scrape_date)``.
+  ``nfl_week`` is a deterministic function of ``scrape_date``
+  (:func:`infer_weekly_board_week`, or the page authority read once per pull), so
+  two captures carrying different weeks necessarily carry different
+  ``scrape_date``s and therefore occupy **disjoint key spaces**. A week-2 row
+  cannot shadow a week-1 row — not "usually", structurally. Refusing a thin
+  week-2 page because last week's was fatter protects nothing that
+  ``select_as_of`` could hide, and costs a perishable capture that exists
+  nowhere else once upstream rewrites the file. It would also cry wolf every
+  Tuesday of the season, since a new week's board is BUILT UP through the week
+  (measured: week 1 grew ``ppr-wr`` 206 -> 257 over six days).
+* **What the fence does still bite on: a truncated re-scrape of the SAME week.**
+  That is the case where the incoming rows really can shadow stored ones — same
+  page, same week, and (when it is the same ``scrape_date`` re-fetched a day
+  later) the same keys. It is also the only case where "this page shrank" is
+  evidence of a publishing fault rather than of a different population.
+* **The narrowest defensible scope would be same ``scrape_date``**, since that is
+  exactly the shadowing key. Same-WEEK is deliberately one notch wider: within a
+  week the page ranks the same population, so a halving is a fault worth
+  refusing even when it lands under a new ``scrape_date`` and shadows nothing.
+  Recorded so the extra notch is a choice rather than an accident.
+* **THE ONE HOLE THIS LEAVES, stated rather than discovered later.** "Different
+  week implies a different ``scrape_date``" is exact in one direction only. The
+  converse can fail: if upstream does NOT rewrite the file for a day and the
+  OPT-IN page authority has meanwhile flipped weeks, two pulls of the SAME
+  ``scrape_date`` can be labelled N and N+1 — same key, different week — and the
+  later one would find no same-week baseline and so face no COUNT floor. The
+  absolute arm still fires (it needs no baseline), so the emptied-values
+  catastrophe is still caught; what slips is a half-sized re-fetch of a file that
+  by construction has not changed. Judged not worth a second baseline path, which
+  would be more machinery than the corner is worth — but it is a hole, not an
+  absence of one.
+
 WHAT IS NOT STORED, AND WHY THERE IS NO RAW MIRROR. ``ff_opportunity`` keeps a
 lossless parquet mirror of every capture because it stores 25 of 159 columns and
 a perishable vintage cannot be re-fetched. Here 20 of upstream's 28 columns are
@@ -183,8 +231,8 @@ _TEXT_COLUMNS = (
 #: tuple against the key SQLite actually enforces on every ingest.
 _PK_COLS = ("fantasypros_id", "page", "scrape_date", "retrieved_as_of")
 
-#: THE CAPTURE FLOOR (see :class:`WeeklyEcrCollapse`). One fraction, applied
-#: three ways: total keys, per-page keys, and the share of rows carrying an
+#: THE CAPTURE FLOOR (see :class:`WeeklyEcrCollapse`). One fraction, applied PER
+#: PAGE two ways: the page's key count, and the share of its rows carrying an
 #: ``ecr``. A LABELLED HYPOTHESIS, and the number is set by BYE WEEKS rather than
 #: by a revision measurement (there is none yet — recon UNKNOWN 5's neighbour).
 #: The arithmetic: FantasyPros ranks the players who PLAY, and 2026 runs up to
@@ -194,6 +242,12 @@ _PK_COLS = ("fantasypros_id", "page", "scrape_date", "retrieved_as_of")
 #: actually exists to catch — a page missing entirely, or a half-written file —
 #: is a far bigger move than 30%. The cost of the loose setting is stated rather
 #: than hidden: a genuinely 30%-truncated scrape would pass.
+#:
+#: WITHIN ONE WEEK the observed move is smaller still and the direction is not
+#: always up: the live week-1 board grew ``ppr-wr`` 206 -> 257 over six days and
+#: then fell to 240, and ``qb`` fell 96 -> 82 on the Monday (−15%). So 0.70 has
+#: real headroom against a same-week wobble, which is the only comparison this
+#: fence now makes.
 _MIN_BOARD_FRACTION = 0.70
 
 #: The column whose emptiness is the ``players.CrosswalkCollapse`` signature
@@ -234,17 +288,32 @@ class WeeklyEcrCollapse(RuntimeError):
     deleted for the good rows to become unreadable. This ingester has no delete
     path at all, and it still needs a floor.
 
-    Four shapes are refused, all before anything is written:
+    **THE UNIT OF REFUSAL IS THE PAGE, NOT THE BOARD (item 3.14a, 2026-09-15).**
+    See :func:`page_floor_verdicts` for the scope rule and the measurement that
+    forced it. The shapes a page is refused for:
 
-    * a capture in which NOT ONE row carries an ``ecr`` (checked even on the
-      first capture of a season, where there is nothing to compare against);
-    * fewer than ``_MIN_BOARD_FRACTION`` of the newest stored capture's rows —
-      a truncated or half-published file;
-    * a PAGE the stored capture had that this one has lost or that shrank below
-      the same fraction — the sharp case, because a scrape that published only
-      ``qb`` is otherwise indistinguishable from a small week;
-    * a materially smaller share of rows carrying an ``ecr`` — the emptied-values
-      shape, which no row count can see.
+    * a page in which NOT ONE row carries an ``ecr`` — checked even on the first
+      capture of a season, where there is nothing to compare against;
+    * fewer than ``_MIN_BOARD_FRACTION`` of the same page's rows in the newest
+      stored capture OF THE SAME WEEK — a truncated or half-published re-scrape;
+    * a materially smaller share of that page's rows carrying an ``ecr`` — the
+      emptied-values shape, which no row count can see.
+
+    A page the stored week HAD and this capture does not is reported as a refusal
+    (0 rows to refuse) rather than raising: there is nothing to write and nothing
+    to shadow, but "upstream stopped publishing ``dst``" must not be silent.
+
+    THE EXCEPTION IS STILL RAISED, and means exactly one thing now: **no page
+    survived**, so there is nothing to write at all. "Wrote 0 rows" is never
+    ``ok`` (item 3.1b), and a whole-capture failure is the honest status for it.
+    A capture where SOME pages land and others are refused is a ``partial`` run
+    with the refused pages named — see :func:`base.note_refused`.
+
+    THE WHOLE-BOARD TOTAL ARM IS GONE, and nothing is lost by it: if every stored
+    page clears ``f`` then the total clears ``f`` too (sum of per-page floors),
+    so the total arm could only ever fire in cases the per-page arm already
+    catches. What it COULD do, and did on 2026-09-15, is refuse a page that was
+    complete because its siblings were thin.
     """
 
 
@@ -534,86 +603,189 @@ def read_fp_weekly(source):
 # ------------------------------------------------------------------ the floor
 
 
-def _stored_capture(conn, *, season: int) -> tuple[str | None, dict[str, int], int, int]:
-    """The newest stored capture for ``season``: (day, rows per page, rows, valued)."""
+def stored_page_capture(
+    conn, *, season: int, page: str, nfl_week: int | None
+) -> tuple[str | None, int, int]:
+    """The newest stored capture of ONE page in ONE week: ``(day, rows, valued)``.
+
+    THE BASELINE IS SCOPED TO ``(season, page, nfl_week)`` — see the module
+    docstring for why the week belongs in the scope and the whole board does not.
+    ``nfl_week=None`` matches the stored NULL week (``IS``, not ``=``), which is
+    the pre-opener / unlabellable cohort: those captures compare against each
+    other and never against a labelled week.
+
+    AND TO ONE ``scrape_date`` WITHIN THAT DAY, which is what makes "the stored
+    capture" mean one upstream FILE. Two forced pulls on one day can land two
+    different ``scrape_date``s under a single ``retrieved_as_of`` (the PK carries
+    both, so neither replaces the other) — and a Tuesday morning pull plus an
+    afternoon one to catch upstream's fill-in is exactly the habit this item's
+    own finding invites. Counting their union would compare tomorrow's single
+    file against two files added together and refuse a healthy board.
+    """
+    week = None if nfl_week is None else int(nfl_week)
+    scope = (int(season), str(page), week)
     row = conn.execute(
-        "SELECT MAX(retrieved_as_of) FROM fp_weekly_ecr WHERE season = ?", (int(season),)
+        "SELECT MAX(retrieved_as_of) FROM fp_weekly_ecr "
+        "WHERE season = ? AND page = ? AND nfl_week IS ?", scope,
     ).fetchone()
     day = row[0] if row else None
     if day is None:
-        return None, {}, 0, 0
-    per_page = {
-        str(r[0]): int(r[1])
-        for r in conn.execute(
-            "SELECT page, COUNT(*) FROM fp_weekly_ecr WHERE season = ? AND "
-            "retrieved_as_of = ? GROUP BY page", (int(season), day),
-        )
-    }
-    valued = int(conn.execute(
-        f"SELECT COUNT(*) FROM fp_weekly_ecr WHERE season = ? AND retrieved_as_of = ? "
-        f"AND {_VALUE_COLUMN} IS NOT NULL", (int(season), day),
-    ).fetchone()[0])
-    return day, per_page, sum(per_page.values()), valued
+        return None, 0, 0
+    row = conn.execute(
+        "SELECT MAX(scrape_date) FROM fp_weekly_ecr "
+        "WHERE season = ? AND page = ? AND nfl_week IS ? AND retrieved_as_of = ?",
+        (*scope, day),
+    ).fetchone()
+    scrape = row[0] if row else None
+    counts = conn.execute(
+        f"SELECT COUNT(*), COUNT({_VALUE_COLUMN}) FROM fp_weekly_ecr "
+        "WHERE season = ? AND page = ? AND nfl_week IS ? AND retrieved_as_of = ? "
+        "AND scrape_date = ?",
+        (*scope, day, scrape),
+    ).fetchone()
+    return day, int(counts[0]), int(counts[1])
 
 
-def _check_board_floor(conn, rows, *, season: int) -> None:
-    """Refuse a capture that would shadow a better one. See :class:`WeeklyEcrCollapse`."""
-    incoming_pages: dict[str, int] = {}
+def page_floor_verdicts(conn, rows, *, season: int) -> tuple[set[str], list[str]]:
+    """``(refused page keys, refusal sentences)`` for one season's incoming rows.
+
+    PURE DECISION, NO WRITES. The caller drops the refused pages' rows, reports
+    the sentences through :func:`base.note_refused` / :func:`base.note_run`, and
+    writes what is left — so a complete page always lands, whatever its siblings
+    did. The page key is ``(page, nfl_week)``: two weeks of one page in a single
+    capture (which upstream does not currently do, but nothing stops it) are two
+    independent decisions, not one.
+
+    THE MEASUREMENT THIS EXISTS FOR (2026-09-15, 07:30 PT, the first in-season
+    Tuesday): the live week-2 board carried ``dst`` 32/32, ``k`` 33, and skill
+    pages at roughly half their eventual size. The pre-3.14a whole-board floor
+    compared 356 incoming rows against a 683-row week-ONE capture and refused
+    every page — including the complete ``dst`` page that item 3.14 had made the
+    primary ``ziggurat stream`` D/ST ranker hours earlier. Two separate faults:
+    the unit was the board, and the baseline crossed a week boundary whose key
+    space is disjoint (module docstring).
+    """
+    by_page: dict[tuple[str, int | None], list[dict]] = {}
     for row in rows:
-        page = str(row["page"])
-        incoming_pages[page] = incoming_pages.get(page, 0) + 1
-    incoming_total = len(rows)
-    incoming_valued = sum(1 for row in rows if row[_VALUE_COLUMN] is not None)
+        week = row.get("nfl_week")
+        by_page.setdefault(
+            (str(row["page"]), None if week is None else int(week)), []
+        ).append(row)
 
-    if incoming_valued == 0:
-        # THE ABSOLUTE CASE, checked even on a first capture: rows present,
-        # consensus empty. This is the shape `players.CrosswalkCollapse` was
-        # written for, and it is the one a row count cannot see.
-        raise WeeklyEcrCollapse(
-            f"fp_weekly_ecr: the incoming board carries {incoming_total} rows for season "
-            f"{season} and NOT ONE of them has an {_VALUE_COLUMN} — the consensus is this "
-            "source's entire reason to exist. Rows with empty values do not have to "
-            "delete anything to hide good ones: select_as_of resolves the NEWEST "
-            "retrieved version per key, so merely arriving later is enough. Refusing to "
-            "write; check the download and re-run."
+    refused: set[str] = set()
+    sentences: list[str] = []
+
+    for (page, week), page_rows in sorted(
+        by_page.items(), key=lambda kv: (kv[0][0], -1 if kv[0][1] is None else kv[0][1])
+    ):
+        label = f"week {week}" if week is not None else "an unlabelled week"
+        now_rows = len(page_rows)
+        now_valued = sum(1 for r in page_rows if r[_VALUE_COLUMN] is not None)
+
+        if now_valued == 0:
+            # THE ABSOLUTE ARM, checked even with no baseline: rows present,
+            # consensus empty. This is the shape `players.CrosswalkCollapse` was
+            # written for, and it is the one a row count cannot see.
+            refused.add(_page_key(page, week))
+            sentences.append(
+                f"page {page!r} ({label}): {now_rows} row(s) and NOT ONE carries an "
+                f"{_VALUE_COLUMN} — the consensus is this source's entire reason to "
+                "exist. Empty values do not have to delete anything to hide good ones: "
+                "select_as_of resolves the NEWEST retrieved version per key, so merely "
+                "arriving later is enough. Page refused."
+            )
+            continue
+
+        day, was_rows, was_valued = stored_page_capture(
+            conn, season=season, page=page, nfl_week=week
         )
+        if day is None:
+            continue                      # nothing of this page/week to shadow
 
-    day, stored_pages, stored_total, stored_valued = _stored_capture(conn, season=season)
-    if day is None:
-        return
+        floor = int(was_rows * _MIN_BOARD_FRACTION)
+        if now_rows < floor:
+            refused.add(_page_key(page, week))
+            sentences.append(
+                f"page {page!r} ({label}): {now_rows} row(s) incoming against {was_rows} "
+                f"in the same page+week captured on {day} (floor {floor} = "
+                f"{_MIN_BOARD_FRACTION:.0%}, which already allows for a six-team bye "
+                "week). A truncated re-scrape of a week already stored shadows it on "
+                "every key it shares. Page refused; the other pages are unaffected."
+            )
+            continue
 
-    floor = int(stored_total * _MIN_BOARD_FRACTION)
-    if incoming_total < floor:
-        raise WeeklyEcrCollapse(
-            f"fp_weekly_ecr: the incoming board carries {incoming_total} rows for season "
-            f"{season} but the capture stored on {day} holds {stored_total} (floor "
-            f"{floor} = {_MIN_BOARD_FRACTION:.0%}, which already allows for a six-team "
-            "bye week). That is a truncated or half-published scrape, and it would "
-            "shadow the stored one for every key it does contain. Refusing to write."
-        )
-
-    for page in sorted(stored_pages):
-        was, now = stored_pages[page], incoming_pages.get(page, 0)
-        if now < int(was * _MIN_BOARD_FRACTION):
-            raise WeeklyEcrCollapse(
-                f"fp_weekly_ecr: page {page!r} holds {was} rows in the season-{season} "
-                f"capture stored on {day} but only {now} in the incoming one (floor "
-                f"{_MIN_BOARD_FRACTION:.0%}). A page that vanishes or halves is a "
-                "half-published scrape — and it is invisible in the TOTAL, which is why "
-                "this arm exists separately. Refusing to write the WHOLE capture: a "
-                "partial one is how a board ends up half-versioned with nothing saying so."
+        was_share = was_valued / was_rows if was_rows else 0.0
+        now_share = now_valued / now_rows
+        if was_share and now_share < was_share * _MIN_BOARD_FRACTION:
+            refused.add(_page_key(page, week))
+            sentences.append(
+                f"page {page!r} ({label}): {now_share:.1%} of its rows carry an "
+                f"{_VALUE_COLUMN}, against {was_share:.1%} on {day} (floor "
+                f"{_MIN_BOARD_FRACTION:.0%} of that). The row COUNT is fine, which is "
+                "exactly why this arm exists separately: a page whose values were "
+                "emptied upstream shadows a good one on every key it shares. Page "
+                "refused."
             )
 
-    was_share = stored_valued / stored_total if stored_total else 0.0
-    now_share = incoming_valued / incoming_total if incoming_total else 0.0
-    if was_share and now_share < was_share * _MIN_BOARD_FRACTION:
-        raise WeeklyEcrCollapse(
-            f"fp_weekly_ecr: {now_share:.1%} of the incoming season-{season} rows carry an "
-            f"{_VALUE_COLUMN}, against {was_share:.1%} in the capture stored on {day} "
-            f"(floor {_MIN_BOARD_FRACTION:.0%} of that). The row COUNT is fine, which is "
-            "exactly why this check exists separately: a board whose values were emptied "
-            "upstream shadows a good one on every key it shares. Refusing to write."
-        )
+    sentences.extend(_vanished_page_sentences(conn, by_page, season=season))
+    return refused, sentences
+
+
+def _page_key(page: str, week: int | None) -> str:
+    """The identity a refusal is recorded under — one page in one week."""
+    return f"{page}@{'?' if week is None else week}"
+
+
+def _vanished_page_sentences(conn, by_page, *, season: int) -> list[str]:
+    """Pages the stored week HAD that this capture does not carry at all.
+
+    Not a refusal in the literal sense — there is nothing to write and nothing to
+    shadow — but "upstream stopped publishing ``dst``" is exactly the fault the
+    old per-page arm existed to surface, and it is invisible in every count this
+    capture produces. Reported so the run goes ``partial`` and names it.
+
+    Scoped to the weeks this capture actually carries: a capture of week 3 says
+    nothing about whether week 2's pages still exist, and week 2's stored rows
+    are not at risk from it either way.
+
+    AND TO THE PREVIOUS CAPTURE, NOT TO EVERY CAPTURE OF THE WEEK — so this is a
+    TRANSITION, not a standing state (the item-3.8A latching lesson). Comparing
+    against the union of the week would re-print the same headline every day for
+    the rest of the week once a page stopped being published, which is how a
+    report earns being skimmed.
+    """
+    weeks = {week for _, week in by_page}
+    present = set(by_page)
+    out: list[str] = []
+    for week in sorted(weeks, key=lambda w: -1 if w is None else w):
+        bound = (int(season), None if week is None else int(week))
+        day_row = conn.execute(
+            "SELECT MAX(retrieved_as_of) FROM fp_weekly_ecr "
+            "WHERE season = ? AND nfl_week IS ?", bound,
+        ).fetchone()
+        day = day_row[0] if day_row else None
+        if day is None:
+            continue
+        scrape_row = conn.execute(
+            "SELECT MAX(scrape_date) FROM fp_weekly_ecr "
+            "WHERE season = ? AND nfl_week IS ? AND retrieved_as_of = ?", (*bound, day),
+        ).fetchone()
+        stored = {
+            str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT page FROM fp_weekly_ecr WHERE season = ? AND "
+                "nfl_week IS ? AND retrieved_as_of = ? AND scrape_date = ?",
+                (*bound, day, scrape_row[0] if scrape_row else None),
+            )
+        }
+        label = f"week {week}" if week is not None else "an unlabelled week"
+        for page in sorted(stored - {p for p, w in present if w == week}):
+            out.append(
+                f"page {page!r} ({label}): present in the capture stored on {day} and "
+                "ABSENT from this one — upstream published no rows for it at all. "
+                "Nothing to write and nothing shadowed, but a page that stops being "
+                "published is the fault this arm exists to surface."
+            )
+    return out
 
 
 # ------------------------------------------------------------------ ingest
@@ -750,11 +922,60 @@ def ingest_fp_weekly(conn, df, *, retrieved_as_of: str, page_week=None) -> int:
             f"{sorted(LEAGUE_PAGES)} pages."
         )
 
+    # THE FENCE, PER PAGE, BEFORE THE WRITE. A refused page's rows are removed
+    # from the batch and everything else is written — so a complete page is never
+    # thrown away because a sibling page is thin (item 3.14a; see
+    # :func:`page_floor_verdicts`). The refusals ride `base.note_refused`, which
+    # is OFF `run_ingest`'s drop ceiling and makes the run `partial`, and are
+    # named on a `note_run` line so `ingest status` can print WHICH pages.
+    refused_keys: set[str] = set()
+    refusal_notes: list[str] = []
+    for season in sorted({int(row["season"]) for row in kept}):
+        keys, sentences = page_floor_verdicts(
+            conn, [r for r in kept if int(r["season"]) == season], season=season
+        )
+        refused_keys |= keys
+        refusal_notes.extend(f"season {season}: {s}" for s in sentences)
+
+    survivors = [
+        row for row in kept
+        if _page_key(str(row["page"]), row.get("nfl_week")) not in refused_keys
+    ]
+    if refusal_notes:
+        # One sentence per refused page key, then one per page that is stored for
+        # this week and absent from the capture entirely — so the two counts
+        # partition `refusal_notes` and neither hides inside the other.
+        absent = len(refusal_notes) - len(refused_keys)
+        base.note_refused(
+            "fp_weekly_ecr", len(kept) - len(survivors), len(kept),
+            why="; ".join(refusal_notes),
+        )
+        # FIRST, deliberately: `ingest status` truncates the joined note at 220
+        # chars and labels it off its opening word, so a long week-label note in
+        # front of this one would hide the only line naming the refused pages.
+        base.note_run(
+            "fp_weekly_ecr",
+            f"REFUSED {len(refused_keys)} page(s) at the capture floor"
+            + (f" + {absent} absent from the capture" if absent else "")
+            + f"; wrote {len(survivors)} of {len(kept)} row(s) — "
+            + "; ".join(refusal_notes),
+        )
+
+    if not survivors:
+        # Every page refused. "Wrote 0 rows" is never ok (item 3.1b), and there is
+        # nothing to write, so the whole capture fails LOUDLY with each page's
+        # own sentence rather than returning a healthy-looking zero.
+        raise WeeklyEcrCollapse(
+            f"fp_weekly_ecr: NO PAGE survived the capture floor — all {len(kept)} row(s) "
+            "refused, so there is nothing to write. "
+            + " | ".join(refusal_notes)
+        )
+
     unresolved = sum(
-        1 for row in kept if row["gsis_id"] is None and row["position"] != "DST"
+        1 for row in survivors if row["gsis_id"] is None and row["position"] != "DST"
     )
     base.note_incomplete(
-        "fp_weekly_ecr", unresolved, len(kept),
+        "fp_weekly_ecr", unresolved, len(survivors),
         why="unresolved FantasyPros crosswalk id (kept, NULL gsis_id)",
     )
     for (season, basis), why in sorted(week_notes.items()):
@@ -763,12 +984,8 @@ def ingest_fp_weekly(conn, df, *, retrieved_as_of: str, page_week=None) -> int:
             f"season {season} week label from {basis!r}: {why}",
         )
 
-    for season in sorted({int(row["season"]) for row in kept}):
-        _check_board_floor(conn, [r for r in kept if int(r["season"]) == season],
-                           season=season)
-
     with conn:
-        return base.upsert(conn, "fp_weekly_ecr", kept, key_cols=_PK_COLS, commit=False)
+        return base.upsert(conn, "fp_weekly_ecr", survivors, key_cols=_PK_COLS, commit=False)
 
 
 def pull_fp_weekly(conn, *, retrieved_as_of: str, season: int, environ=None) -> int:

@@ -925,6 +925,60 @@ def test_by_design_filtering_does_not_count_against_the_ceiling(db):
     assert not refresh.run_failed(out)
 
 
+def test_a_fence_refusal_is_partial_and_never_reaches_the_drop_ceiling(db):
+    """THE FOURTH CHANNEL (item 3.14a, `base.note_refused`). A collapse fence
+    INSIDE an ingester that declines part of a capture is not a drop: the rows
+    were understood perfectly and judged, which is the opposite diagnosis to the
+    ceiling's own sentence ("an unresolvable key ... rather than a few odd rows").
+
+    Measured warrant: `fp_weekly_ecr`'s per-page fence would have refused 291 of
+    356 rows on a healthy live board (82%, four times the ceiling), and a working
+    fence reported `failed` is how the word stops meaning anything. The verdict is
+    `partial` with `dropped` still 0 — never `ok`, and never `failed`."""
+    def _refuses_most(ctx):
+        base.note_refused("fake", 291, 356, why="page 'ppr-wr': 116 against 240")
+        return 65
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _refuses_most),), season=2026,
+                             retrieved_as_of="2026-07-24", today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_PARTIAL
+    assert out[0]["dropped"] == 0 and out[0]["rows"] == 65
+    assert not refresh.run_failed(out)
+    assert "REFUSED 291 row(s) at 1 collapse fence(s)" in out[0]["reason"]
+
+
+def test_a_fence_that_refused_everything_is_failed_not_empty(db):
+    """"Wrote 0 rows" is never `ok` (item 3.1b) — and it is not `empty` either,
+    which means "upstream returned nothing" and sends the operator to check the
+    download. This branch sits AHEAD of quiet_ok/empty for that reason."""
+    def _refuses_all(ctx):
+        base.note_refused("fake", 356, 356, why="every page below its floor")
+        return 0
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _refuses_all, quiet_ok=True),),
+                             season=2026, retrieved_as_of="2026-07-24",
+                             today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_FAILED
+    assert refresh.run_failed(out)
+    assert "REFUSED every row" in out[0]["reason"]
+
+
+def test_a_refusal_with_no_rows_is_still_a_fence_firing(db):
+    """A whole PAGE that vanished from a capture refuses 0 rows and is still the
+    fence reporting a fault, so `run_ingest` reads the SENTENCES rather than the
+    count. Reading the count here would report a silently `ok` run about upstream
+    dropping a page."""
+    def _reports_a_vanished_page(ctx):
+        base.note_refused("fake", 0, 100, why="page 'dst': stored but ABSENT")
+        return 100
+
+    out = refresh.run_ingest(db, sources=(_spec("z", _reports_a_vanished_page),),
+                             season=2026, retrieved_as_of="2026-07-24",
+                             today="2026-07-24")
+    assert out[0]["status"] == refresh.STATUS_PARTIAL
+    assert out[0]["dropped"] == 0
+
+
 def test_rows_kept_with_a_missing_field_are_not_counted_as_dropped(db):
     """adp_rankings called note_drops for rows it KEPT — its own line comment read
     "kept (NULL gsis_id), not dropped" — inflating the ratio with rows that were
