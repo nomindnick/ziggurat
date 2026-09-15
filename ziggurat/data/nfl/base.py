@@ -494,14 +494,61 @@ def _gsis_preference(gsis: str | None) -> tuple[int, str]:
     return (0 if gsis.startswith("00-") else 1, gsis)
 
 
+class _CollisionTally:
+    """Accumulates one crosswalk build's collisions so they log ONCE, not once
+    per colliding id (item 3.18).
+
+    Measured on the live crosswalk 2026-09-15: ``gsis_by_espn`` emitted **266**
+    warning lines and ``gsis_by_pfr`` **239** — 505 identical-shaped lines on any
+    CLI run that builds both, every one of them the same fact (a 2026 rookie
+    whose nflverse placeholder id sits beside his real ``00-`` id). A warning
+    printed 266 times is a warning the operator learns to scroll past, which is
+    how the one that matters gets missed.
+
+    The per-collision detail is NOT discarded — it is logged at DEBUG, so
+    ``--log-level DEBUG`` (or a test's ``caplog.at_level``) still reads every
+    pair. Only the default-visibility volume changes; the resolution rule is
+    untouched.
+    """
+
+    __slots__ = ("source_key", "resolution", "pairs")
+
+    def __init__(self, source_key: str, resolution: str) -> None:
+        self.source_key = source_key
+        self.resolution = resolution
+        self.pairs: list[tuple[object, object, object, object]] = []
+
+    def record(self, key: object, old: object, new: object, kept: object) -> None:
+        self.pairs.append((key, old, new, kept))
+        logger.debug(
+            "crosswalk: %s %s maps to multiple values (%s, %s); keeping %s",
+            self.source_key, key, old, new, kept,
+        )
+
+    def flush(self) -> None:
+        if not self.pairs:
+            return
+        keys = {p[0] for p in self.pairs}
+        example = self.pairs[0]
+        logger.warning(
+            "crosswalk: %d %s value(s) map to more than one target (%d collision(s) "
+            "total); resolved by %s. Example: %s -> (%s, %s), keeping %s. "
+            "Per-collision detail is at DEBUG.",
+            len(keys), self.source_key, len(self.pairs), self.resolution,
+            example[0], example[1], example[2], example[3],
+        )
+
+
 def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
     """pfr_id -> gsis_id from the latest players snapshot (crosswalk resolution
     for PFR-keyed sources like snap counts).
 
     A pfr_id should map to exactly one gsis_id. It does not always: 15 pfr ids in
     the live crosswalk map to two, a pseudo-id (``ALT577722``) and a real one
-    (``00-0041453``) for the same player (item 3.2c, F-J). Every collision is
-    logged — never silently last-write-wins.
+    (``00-0041453``) for the same player (item 3.2c, F-J) — **re-measured
+    2026-09-15 (item 3.18): now 239, the 2026 rookie class.** Every collision is
+    still reported — never silently last-write-wins — but as ONE summary line
+    with the count, not 239 of them (``_CollisionTally``; detail at DEBUG).
 
     **Which one is kept is DETERMINISTIC (``00-`` preferred, then lexicographic),
     not verified correct.** Nobody has established that the ``00-`` id is the right
@@ -515,6 +562,9 @@ def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
     plus a re-pull; a nondeterministic table is not repairable at all.
     """
     out: dict[str, str] = {}
+    tally = _CollisionTally(
+        "pfr_id", "the deterministic '00-' preference (see base._gsis_preference)"
+    )
     for r in conn.execute(
         """
         SELECT pfr_id, gsis_id FROM players p
@@ -526,14 +576,11 @@ def gsis_by_pfr(conn: sqlite3.Connection) -> dict[str, str]:
         pfr, gsis = r["pfr_id"], r["gsis_id"]
         if pfr in out and out[pfr] != gsis:
             keep = min(out[pfr], gsis, key=_gsis_preference)
-            logger.warning(
-                "crosswalk: pfr_id %s maps to multiple gsis (%s, %s); keeping %s "
-                "(deterministic '00-' preference — see base._gsis_preference)",
-                pfr, out[pfr], gsis, keep,
-            )
+            tally.record(pfr, out[pfr], gsis, keep)
             out[pfr] = keep
             continue
         out[pfr] = gsis
+    tally.flush()
     return out
 
 
@@ -547,6 +594,7 @@ def ids_by_fantasypros(conn: sqlite3.Connection) -> dict[str, tuple[str | None, 
     espn_id/fantasypros_id to bare digit strings, so no per-row coercion here.
     """
     out: dict[str, tuple[str | None, str | None]] = {}
+    tally = _CollisionTally("fantasypros_id", "keeping the first row scanned")
     for r in conn.execute(
         """
         SELECT fantasypros_id, gsis_id, espn_id FROM players p
@@ -557,12 +605,10 @@ def ids_by_fantasypros(conn: sqlite3.Connection) -> dict[str, tuple[str | None, 
     ):
         fp, gsis, espn = r["fantasypros_id"], r["gsis_id"], r["espn_id"]
         if fp in out and out[fp] != (gsis, espn):
-            logger.warning(
-                "crosswalk: fantasypros_id %s maps to multiple players (%s, %s); keeping first",
-                fp, out[fp], (gsis, espn),
-            )
+            tally.record(fp, out[fp], (gsis, espn), out[fp])
             continue
         out[fp] = (gsis, espn)
+    tally.flush()
     return out
 
 
@@ -579,8 +625,18 @@ def espn_by_gsis(conn: sqlite3.Connection) -> dict[str, str]:
     ``MAX(retrieved_as_of)`` with NO as-of gate — fine for immutable gsis<->espn
     identity and current draft use; if valuation is ever run at a past as_of for
     backtest, the id mapping is today's, not as-of.
+
+    **Measured 2026-09-15 (item 3.18): this direction has ZERO collisions on the
+    live crosswalk** (0 of 8,192 gsis ids map to more than one espn id) — and it
+    is zero STRUCTURALLY, not by luck: ``players`` is keyed
+    ``(gsis_id, retrieved_as_of)`` and this reads only ``MAX(retrieved_as_of)``
+    per gsis, so one gsis can offer at most one row and its espn id cannot fork.
+    The branch below is therefore unreachable on a well-formed table; it is kept
+    as a belt-and-braces guard against a future key change. The collision problem
+    is entirely on the reverse map ``gsis_by_espn`` — see its docstring.
     """
     out: dict[str, str] = {}
+    tally = _CollisionTally("gsis_id", "keeping the first row scanned")
     for r in conn.execute(
         """
         SELECT gsis_id, espn_id FROM players p
@@ -591,10 +647,10 @@ def espn_by_gsis(conn: sqlite3.Connection) -> dict[str, str]:
     ):
         gsis, espn = r["gsis_id"], r["espn_id"]
         if gsis in out and out[gsis] != espn:
-            logger.warning("crosswalk: gsis_id %s maps to multiple espn (%s, %s); keeping first",
-                           gsis, out[gsis], espn)
+            tally.record(gsis, out[gsis], espn, out[gsis])
             continue
         out[gsis] = espn
+    tally.flush()
     return out
 
 
@@ -634,8 +690,34 @@ def gsis_by_espn(conn: sqlite3.Connection) -> dict[str, str]:
     read is crosswalk-at-now (no as-of gate) because gsis<->espn identity is
     immutable. D/ST never appears here — ESPN gives team defenses synthetic
     negative ids and nflverse has no gsis for them; they join by team abbr.
+
+    **The ``00-`` preference is DELIBERATELY NOT applied here (item 3.18, measured
+    2026-09-15 on the live crosswalk). It would move the join loss, not remove
+    it.** 266 espn ids collide; 262 are a 2026 rookie whose nflverse placeholder
+    id (``LOV121782``) sits beside his real one (``00-0041027``), and scan order
+    keeps the PLACEHOLDER in 264 of 266. Under that resolution:
+
+    * ``weekly_stats`` (2026 wk1 REG): 0 rows on the kept id, **96 on the
+      discarded** one — every available row is lost.
+    * ``snap_counts`` (2026): 0 on the kept id, **125 on the discarded** one.
+    * ``projections`` (``sleeper_rotowire`` 2026): **112 on the KEPT id**, 9 on
+      the discarded one — because ``projections._sleeper_to_gsis`` resolves its
+      own collision the same accidental way and stamps the SAME placeholder into
+      the stored rows.
+
+    So preferring ``00-`` here alone would repair 96 stats + 125 snap joins and
+    break 112 pricing joins — including 5 of the 6 colliding players on a league
+    roster today and both colliding players in the top-30-per-position priced
+    pool (Jeremiyah Love RB, Jadarian Price RB), who would go from priced to
+    unpriceable on a waiver Tuesday. The id spaces disagree; a preference on ONE
+    of them cannot reconcile them. The repair is paired and sequenced: give
+    ``projections._sleeper_to_gsis`` the same ``_gsis_preference``, re-pull 2026
+    projections onto the real ids, and only then flip this map. Until that lands,
+    a colliding row travels with its alternates (``id_alternates``, item 4.2b)
+    rather than being silently re-pointed.
     """
     out: dict[str, str] = {}
+    tally = _CollisionTally("espn_id", "keeping the first row scanned (see the docstring)")
     for r in conn.execute(
         """
         SELECT espn_id, gsis_id FROM players p
@@ -646,10 +728,10 @@ def gsis_by_espn(conn: sqlite3.Connection) -> dict[str, str]:
     ):
         espn, gsis = r["espn_id"], r["gsis_id"]
         if espn in out and out[espn] != gsis:
-            logger.warning("crosswalk: espn_id %s maps to multiple gsis (%s, %s); keeping first",
-                           espn, out[espn], gsis)
+            tally.record(espn, out[espn], gsis, out[espn])
             continue
         out[espn] = gsis
+    tally.flush()
     return out
 
 
