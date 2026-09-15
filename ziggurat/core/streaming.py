@@ -16,6 +16,26 @@ one thing a streamer must not do. The PRIMARY adjustment here is therefore
 opponent quality: a defense that draws a weak offense this week is tilted up.
 Vegas and weather are secondary, pre-game-safe context tilts.
 
+ITEM 3.14 AMENDS THAT, FOR D/ST ONLY: THE WEEKLY MARKET BOARD IS THE RANKER.
+The tilt above was built because the feed has no week-specific content. It does
+not, and that is not fixable inside the feed — but a genuinely week-specific
+board was already being captured. ``fp_weekly_ecr`` (item 4.2b) holds the
+FantasyPros WEEKLY D/ST consensus, stamped ``knowable_as_of = scrape_date``, so a
+Tuesday read needs no leakage fence moved. Measured on 2021-23 (probe E08c, this
+file's ``MARKET_LABEL``): Spearman vs realised house points **+0.2701** for the
+board against **+0.1300** for the composite below it. So when a board for THIS
+week exists it sets the order, and the opponent-quality composite becomes the
+NO-BOARD FALLBACK — still computed, still shown, no longer the ranker. Kickers
+are untouched: nothing comparable was measured for the ``k`` page.
+
+WHAT THAT BUYS, STATED THE WAY THE CARD STATES IT. The alternative to streaming
+is HOLDING, and against holding a drafted incumbent the board's paired margin is
+**+1.84 house pts/wk, 95% CI [-0.47, +4.16], n=38 paired weeks** — the interval
+CROSSES ZERO. Head-to-head against the composite it replaces, the same replay is
+**-0.24 [-3.03, +2.40]** (13 W / 13 L / 12 ties): indistinguishable. The reason
+to prefer the board is the rho over 826 pool rows, not that 38-week replay, and
+the card says so rather than quoting the flattering half.
+
 RULE 2 IS THE SPINE. ``house_points`` for every candidate comes VERBATIM from
 ``valuation.weekly_lines(weeks=[week])`` — the SAME priced-through-``scoring.py``
 spine that marginal uses — so the raw number can never disagree between the two
@@ -42,6 +62,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from statistics import mean, pstdev
+from types import MappingProxyType
 
 from ziggurat.core import scoring
 from ziggurat.core.marginal import (
@@ -56,6 +77,7 @@ from ziggurat.core.marginal import (
 from ziggurat.core.valuation import canon_position, weekly_lines
 from ziggurat.data.asof import normalize_as_of
 from ziggurat.data.nfl import base
+from ziggurat.data.nfl.fp_weekly import get_fp_weekly_ecr
 from ziggurat.data.nfl.game_odds import get_game_odds
 from ziggurat.data.nfl.schedules import get_schedule
 from ziggurat.data.nfl.weather import get_game_weather
@@ -81,9 +103,155 @@ STALE_BANNER_DAYS = 7
 # Hard-out designations that bench a candidate once live_status has turned on.
 _HARD_OUT = DEFAULT_AVAILABILITY.hard_out_statuses
 
+# ------------------------------------------- the weekly market board (item 3.14)
+
+#: The ``fp_weekly_ecr`` page this module reads. **D/ST ONLY, deliberately.** The
+#: rho and the paired margin below were both measured on the D/ST board; nothing
+#: comparable was ever measured for the ``k`` page, and a ranker swapped in on the
+#: strength of another position's evidence is exactly the move Rule 6 exists to
+#: stop. Kickers keep the weather-primary composite.
+MARKET_PAGE = "dst"
+
+#: The labelled hypothesis (Rule 6), quoted VERBATIM in every ranked D/ST row's
+#: reasons. It carries BOTH halves of the measurement, including the half that
+#: does not flatter the change.
+MARKET_LABEL = (
+    "HYPOTHESIS (item 3.14 step 1, 2026-09-15): the FantasyPros weekly D/ST "
+    "consensus ranks streamable defenses better than our opponent-quality "
+    "composite. Spearman vs REALISED house points, 2021-23 waiver pool (826 rows, "
+    "42 weeks): FantasyPros +0.2701, the shipped composite +0.1300, the closing "
+    "implied total +0.3372. Against HOLDING a drafted incumbent the board is worth "
+    "+1.84 house pts/wk, 95% CI [-0.47, +4.16], n=38 paired weeks, sign p=0.041 "
+    "(24 W / 11 L) — the interval CROSSES ZERO. Head to head against the composite "
+    "it replaces, that same replay is -0.24 [-3.03, +2.40] (13 W / 13 L / 12 ties), "
+    "i.e. INDISTINGUISHABLE: the reason to prefer the board is the rho over 826 "
+    "rows, not the 38-week top-one replay. [probe E08c, seasons 2021-23; 2024-25 "
+    "stay locked]"
+)
+
+#: The three sentences item 3.14 makes MANDATORY on any page that ranks D/ST
+#: streams (Rule 6). They are a tuple so `waiver.py` prints the identical text —
+#: two surfaces paraphrasing one disclosure is how they start disagreeing.
+#: Never say the market will confirm anything (item 4.1's instrument finding).
+DST_CARD_SENTENCES = (
+    "THE ALTERNATIVE IS HOLDING, and the interval CROSSES ZERO. Streaming this "
+    "board beat holding a drafted incumbent by +1.84 house pts/wk over 38 paired "
+    "weeks (2021-23), 95% CI [-0.47, +4.16]. That is a lead we cannot yet "
+    "distinguish from zero — not a settled edge.",
+    "ACTING ON THIS MEANS A D/ST SWAP IN ROUGHLY 8 WEEKS OUT OF 10 (38 of 45 "
+    "measured decision weeks fired a swap). The attention cost is real, it is "
+    "weekly, and it is the honest price of the number above.",
+    "THIS IS TABLE STAKES, NOT A PRIVATE EDGE: a colleague reading FantasyPros "
+    "gets most of it free. Our own private share — what the house scoring and the "
+    "matchup work add on top of the public board — is 0 to +0.4 pts/wk.",
+)
+
+#: Item 3.14 step 2 asks that no streamed row is ever SHOWN without the
+#: season-long number beside it. On `ziggurat waivers` it is beside it, because
+#: that page holds the roster and the priced swap matrix. THIS page ranks the free
+#: agents and knows neither, and pricing a season-long swap here would mean
+#: building the whole marginal board — turning a ~4 s quick scan into a ~24 s one
+#: for a number the operator reaches two commands later anyway. So the gap is
+#: DISCLOSED with a pointer and a measured magnitude, rather than silently left as
+#: "this page shows only the upside". Recorded as a deferral in the 3.14 Update.
+ONE_HORIZON_NOTE = (
+    "ONE HORIZON ONLY: this page ranks THIS WEEK. It does NOT price what dropping "
+    "the player you currently hold costs you over the rest of the season, and that "
+    "cost can dwarf the weekly gain — measured on the live 2026-09-15 board, a "
+    "streamed row worth +3.2 house pts this week cost -23.1 over the remaining "
+    "weeks, an 86% break-even on getting an equally good D/ST back. Both horizons, "
+    "and that break-even, are printed per row on `ziggurat waivers`, which knows "
+    "your roster. Decide the SWAP there; decide WHICH defense here."
+)
+
+#: Qualitative-sweep #3, folded in as a POSTURE disclosure and never as a rule
+#: (item 3.14). The guides say "never start a D/ST against your own QB"; we
+#: measured the correlation and it is a VARIANCE statement, not a mean one.
+DST_POSTURE_NOTE = (
+    "POSTURE, not a rule: if a defense here faces YOUR OWN quarterback, the two "
+    "scores move against each other (we measured QB vs opposing D/ST rho = -0.4614). "
+    "That LOWERS your week's variance — which helps when you are the FAVOURITE and "
+    "hurts when you are the UNDERDOG. It is not a points penalty and it is never a "
+    "'never'; `ziggurat lineup` is where your posture for the week is decided."
+)
+
 
 class StreamPositionError(ValueError):
     """``position`` was neither 'DST' nor 'K'. Raised rather than guessing."""
+
+
+@dataclass(frozen=True)
+class MarketBoard:
+    """One captured FantasyPros weekly positional board, newest scrape only.
+
+    ``by_team`` is normalized team abbr -> ``(rank, ecr, pos_rank_label)``. D/ST
+    rows carry a FantasyPros TEAM id and a NULL ``gsis_id`` (the migration-016
+    contract), so team abbr is the ONLY join — the same key ``_line_for`` already
+    uses for a D/ST projection line.
+    """
+
+    page: str
+    week: int | None
+    scrape_date: str
+    by_team: Mapping[str, tuple[int | None, float, str | None]]
+    source_table: str = "fp_weekly_ecr"
+
+    @property
+    def size(self) -> int:
+        return len(self.by_team)
+
+
+def dst_market_board(
+    conn, *, as_of, season: int, week: int | None,
+    view: base.AsOfView = "historical",
+) -> MarketBoard | None:
+    """The newest weekly D/ST consensus board knowable at ``as_of`` (item 3.14).
+
+    Rule 1: ``as_of`` is keyword-only and ``view`` threads straight into the
+    accessor, which gates BOTH ``knowable_as_of`` (= the scrape day) and
+    ``retrieved_as_of``. A board scraped after the decision is therefore invisible,
+    which is the whole reason this source needed no fence moved.
+
+    ``week=None`` asks "what IS stored, whatever week it ranks" — used only to
+    tell the operator what the fallback is falling back FROM. A board for one week
+    is never served for another: a week-1 board ranking week-2 defenses would be a
+    season-long list wearing a weekly label, which is the exact failure the item
+    exists to end.
+    """
+    rows = [
+        dict(r) for r in get_fp_weekly_ecr(
+            conn, as_of=as_of, season=int(season),
+            nfl_week=(None if week is None else int(week)),
+            page=MARKET_PAGE, view=view,
+        )
+    ]
+    rows = [r for r in rows if r.get("ecr") is not None and _norm_team(r.get("team"))]
+    if not rows:
+        return None
+    # `select_as_of` resolves the newest RETRIEVAL per (id, page, scrape_date), so
+    # every scrape day <= as_of comes back. The freshest SCRAPE is the board.
+    newest = max(str(r["scrape_date"]) for r in rows)
+    fresh = [r for r in rows if str(r["scrape_date"]) == newest]
+    by_team: dict[str, tuple[int | None, float, str | None]] = {}
+    for r in sorted(fresh, key=lambda r: (float(r["ecr"]), str(r.get("team")))):
+        team = _norm_team(r.get("team"))
+        if team is None or team in by_team:
+            continue
+        rank = r.get("rank")
+        by_team[team] = (
+            int(rank) if rank is not None else None,
+            float(r["ecr"]),
+            (str(r["pos_rank_label"]) if r.get("pos_rank_label") else None),
+        )
+    if not by_team:
+        return None
+    weeks = {r.get("nfl_week") for r in fresh if r.get("nfl_week") is not None}
+    return MarketBoard(
+        page=MARKET_PAGE,
+        week=(int(next(iter(weeks))) if len(weeks) == 1 else None),
+        scrape_date=newest,
+        by_team=MappingProxyType(by_team),
+    )
 
 
 # ------------------------------------------------------------- adjustment model
@@ -267,6 +435,13 @@ class StreamRec:
     percent_owned: float
     startable_this_week: bool
     reasons: tuple[str, ...]
+    # --- item 3.14: the weekly market board, when one covers this candidate ----
+    # ``market_ecr`` is the ORDERING key whenever it is not None; ``stream_score``
+    # is then a shown-but-not-ranking hypothesis. Both are always displayed, so the
+    # operator can see the two disagree rather than being told only the winner.
+    market_ecr: float | None = None
+    market_rank: int | None = None
+    market_label: str | None = None      # upstream's own 'DST4'
 
 
 @dataclass(frozen=True)
@@ -283,6 +458,17 @@ class StreamBoard:
     odds_available: bool = False
     weather_available: bool = False   # an adjustment was actually APPLIED
     weather_readable: bool = False    # a weather row EXISTED for some candidate game
+    # --- item 3.14 ------------------------------------------------------------
+    # ``market`` is the board that ORDERED this page (None => the composite did).
+    # ``market_alt`` is what IS stored for some other week when ``market`` is None:
+    # "no board" and "a board for a week that is not this one" are different
+    # problems and only the second one is about to fix itself.
+    market: MarketBoard | None = None
+    market_alt: MarketBoard | None = None
+
+    @property
+    def ranked_on_market(self) -> bool:
+        return self.market is not None
 
 
 # ------------------------------------------------------------- internal helpers
@@ -427,6 +613,18 @@ def rank_streamers(
         live_status_from(conn, as_of=as_of, season=season, view=view)
     )
 
+    # ITEM 3.14: the weekly consensus board is the D/ST ranker when one exists for
+    # THIS week. ``market_alt`` is only read when it does not, and only to say what
+    # the fallback is falling back from.
+    market = (
+        dst_market_board(conn, as_of=as_of, season=season, week=resolved_week, view=view)
+        if pos == "DST" else None
+    )
+    market_alt = (
+        dst_market_board(conn, as_of=as_of, season=season, week=None, view=view)
+        if pos == "DST" and market is None else None
+    )
+
     fa_rows = [
         dict(r) for r in league_state.get_free_agents(conn, as_of=as_of, season=season, view=view)
         if canon_position(r["position"]) == pos
@@ -437,6 +635,11 @@ def rank_streamers(
     weather_available = False
     weather_readable = False
     scored: list[StreamRec] = []
+    # (display name, WeeklyLine) per scored candidate, kept index-aligned with
+    # ``scored`` and re-ordered with it: item 3.17's staleness banner has to say
+    # whether a RANKED row is among the stale ones, and it cannot re-derive the
+    # join from a StreamRec (a D/ST line is keyed on team, a kicker's on gsis).
+    ranked_lines: list[tuple[str, object]] = []
 
     for cand in fa_rows:
         name = cand.get("player") or cand.get("espn_player_id") or "?"
@@ -463,6 +666,36 @@ def rank_streamers(
             f"house projection {house_points:.1f} pts this week (week {resolved_week}), "
             f"priced through the house scoring engine.",
         ]
+
+        market_rank = market_ecr = market_label = None
+        if pos == "DST":
+            entry = market.by_team.get(team) if market else None
+            if entry is not None:
+                market_rank, market_ecr, market_label = entry
+                reasons.append(
+                    f"WEEKLY MARKET BOARD — THIS is what ranks the page: FantasyPros "
+                    f"lists {team} at {market_label or f'#{market_rank}'} for week "
+                    f"{resolved_week} (consensus {market_ecr:.2f}"
+                    + (f", rank {market_rank}" if market_rank is not None else "")
+                    + f"), off the {market.scrape_date} scrape of {market.size} "
+                    f"defenses. The matchup composite below is shown but does NOT set "
+                    f"this order. [{MARKET_LABEL}]"
+                )
+            elif market is not None:
+                reasons.append(
+                    f"WEEKLY MARKET BOARD: {team or 'this team'} is NOT on the week-"
+                    f"{resolved_week} FantasyPros D/ST board stored at this as-of "
+                    f"({market.scrape_date}, {market.size} defenses), so this row sits "
+                    f"BELOW every board row and is ordered on the matchup composite "
+                    f"alone. That is an absence of a market opinion, not a low one."
+                )
+            else:
+                reasons.append(
+                    f"WEEKLY MARKET BOARD: none stored for week {resolved_week} at this "
+                    f"as-of — this page falls back to the opponent-quality composite, "
+                    f"which is item 3.14's NO-BOARD FALLBACK and not the primary "
+                    f"ranker. Its measured rho is +0.1300 against the board's +0.2701."
+                )
 
         stream_score = house_points
         if pos == "DST":
@@ -535,7 +768,9 @@ def rank_streamers(
         reasons.append(
             f"stream score {stream_score:.1f} = matchup-adjusted expected value "
             f"(HYPOTHESIS — not house scoring; {house_points:.1f} house pts x labelled "
-            f"matchup multipliers)."
+            f"matchup multipliers)"
+            + (" — SHOWN ONLY: the weekly market board above sets this page's order."
+               if market_ecr is not None else ".")
         )
         acquisition = classify_acquisition(cand.get("roster_status"))
         reasons.append(_acq_reason(acquisition))
@@ -554,12 +789,30 @@ def rank_streamers(
             percent_owned=float(cand.get("percent_owned") or 0.0),
             startable_this_week=True,
             reasons=tuple(reasons),
+            market_ecr=market_ecr,
+            market_rank=market_rank,
+            market_label=market_label,
         ))
+        ranked_lines.append((str(name), line))
 
-    scored.sort(key=lambda r: (-r.stream_score, -r.house_points, r.player))
+    # THE ORDER (item 3.14). A row the weekly board covers is ranked by the board;
+    # a row it does not cover falls BELOW every board row and keeps the composite's
+    # order among its own kind. With no board at all every row takes the second
+    # branch, which is byte-identical to the pre-3.14 sort — the fallback is the old
+    # ranker, unchanged, not a re-implementation of it.
+    def _order(r: StreamRec):
+        return (
+            0 if r.market_ecr is not None else 1,
+            r.market_ecr if r.market_ecr is not None else 0.0,
+            -r.stream_score, -r.house_points, r.player,
+        )
+
+    order = sorted(range(len(scored)), key=lambda i: _order(scored[i]))
     ranked = tuple(
-        StreamRec(**{**r.__dict__, "rank": i}) for i, r in enumerate(scored, start=1)
+        StreamRec(**{**scored[i].__dict__, "rank": position})
+        for position, i in enumerate(order, start=1)
     )
+    ranked_lines = [ranked_lines[i] for i in order]
 
     if not live:
         notes.append(
@@ -570,6 +823,41 @@ def rank_streamers(
         notes.append(
             f"no streamable {pos} free agent could be priced at this as-of — every "
             "candidate is on bye, ruled out, or unprojected. Verify manually."
+        )
+    if pos == "DST" and market is None:
+        alt = ""
+        if market_alt is not None:
+            alt = (
+                f" The newest D/ST board stored at this as-of is the "
+                f"{market_alt.scrape_date} scrape, which ranks week "
+                f"{market_alt.week if market_alt.week is not None else '?'} — it is NOT "
+                f"served for week {resolved_week}: a board for another week is a "
+                f"season-long list wearing a weekly label."
+            )
+        else:
+            alt = (
+                " No D/ST board of any week is stored at this as-of (`ziggurat ingest "
+                "status` names the `fp_weekly_ecr` pull; it is captured daily and a "
+                "missed day is a LOST observation, not staleness)."
+            )
+        notes.append(
+            f"FALLBACK RANKER: no FantasyPros weekly D/ST board for week "
+            f"{resolved_week} is readable at this as-of, so this page is ordered by "
+            f"the opponent-quality composite — item 3.14's no-board fallback (rho "
+            f"+0.1300 vs the board's +0.2701), not its primary ranker." + alt
+        )
+    elif pos == "DST" and ranked:
+        # Only when something was actually ranked: "ranked on the market board"
+        # printed above an empty table is a claim about nothing.
+        missing = [r.player for r in ranked if r.market_ecr is None]
+        notes.append(
+            f"RANKED ON THE WEEKLY MARKET BOARD: FantasyPros' week-{resolved_week} "
+            f"D/ST consensus, {market.scrape_date} scrape, {market.size} defenses "
+            f"(item 3.14). The STREAM* column is the matchup composite and is shown "
+            f"for contrast only — it does not order this page."
+            + (f" {len(missing)} candidate(s) are absent from that board and sit below "
+               f"every board row: {', '.join(missing[:4])}"
+               f"{'...' if len(missing) > 4 else ''}." if missing else "")
         )
     if pos == "DST" and not odds_available:
         notes.append(
@@ -588,7 +876,10 @@ def rank_streamers(
             "fully known and correctly not applicable; this is NOT a data gap."
         )
 
-    freshness = tuple(_freshness_lines(lines, fa_rows, as_of=as_of, today=today, conn=conn, season=season))
+    freshness = tuple(_freshness_lines(
+        lines, fa_rows, as_of=as_of, today=today, conn=conn, season=season,
+        ranked_lines=ranked_lines,
+    ))
 
     return StreamBoard(
         position=pos,
@@ -601,6 +892,8 @@ def rank_streamers(
         odds_available=odds_available,
         weather_available=weather_available,
         weather_readable=weather_readable,
+        market=market,
+        market_alt=market_alt,
     )
 
 
@@ -617,9 +910,19 @@ def _acq_reason(acquisition: str) -> str:
 # ------------------------------------------------------------------- staleness
 
 
-def _freshness_lines(lines, fa_rows, *, as_of, today, conn, season) -> list[str]:
+def _freshness_lines(lines, fa_rows, *, as_of, today, conn, season,
+                     ranked_lines=()) -> list[str]:
     """Projection + league-state pull recency, plus item 3.1b's per-source
-    contract. A July projection pricing a November stream is Rule-1-invisible."""
+    contract. A July projection pricing a November stream is Rule-1-invisible.
+
+    ITEM 3.17 DELIVERABLE 3. The warning used to read "some projections on this
+    board are N days old" off the OLDEST pull anywhere in ``lines`` — which on the
+    live 2026-09-15 board was ONE orphan row of 3,229, and rendered as a blanket
+    "do not trust this page". A staleness banner that cannot be checked is a
+    banner the operator learns to skip, so it now states the COUNT and, decisively,
+    whether any RANKED candidate is among the stale rows: a stale bench body
+    nobody is ranking is not a reason to distrust the order.
+    """
     out: list[str] = []
     cutoff = normalize_as_of(as_of)
 
@@ -629,10 +932,35 @@ def _freshness_lines(lines, fa_rows, *, as_of, today, conn, season) -> list[str]
         newest = (cutoff - normalize_as_of(pulled[-1])).days
         out.append(f"projections: pulled {pulled[-1]} — {_plural(newest, 'day')} before {as_of}")
         if gap > STALE_BANNER_DAYS:
+            stale = [
+                line for line in lines.values()
+                if line.retrieved_as_of
+                and (cutoff - normalize_as_of(min(line.retrieved_as_of))).days
+                > STALE_BANNER_DAYS
+            ]
+            stale_ids = {id(line) for line in stale}
+            hit = [name for name, line in ranked_lines if id(line) in stale_ids]
             out.append(
-                f"  WARNING: some projections on this board are {gap} days old (oldest "
-                f"pull {pulled[0]}) — run `ziggurat ingest run` before trusting the rank."
+                f"  WARNING: {len(stale)} of {len(lines)} projection rows on this board "
+                f"carry a pull older than {STALE_BANNER_DAYS} days — the oldest is "
+                f"{gap} days old (pulled {pulled[0]})."
             )
+            if hit:
+                shown = ", ".join(hit[:4]) + ("..." if len(hit) > 4 else "")
+                out.append(
+                    f"  {len(hit)} of them IS a ranked candidate on this page ({shown}) "
+                    f"— this rank IS affected; run `ziggurat ingest run` before trusting "
+                    f"it." if len(hit) == 1 else
+                    f"  {len(hit)} of them ARE ranked candidates on this page ({shown}) "
+                    f"— this rank IS affected; run `ziggurat ingest run` before trusting "
+                    f"it."
+                )
+            else:
+                out.append(
+                    "  NO ranked candidate on this page is among them, so the ORDER "
+                    "above is not affected — this is a data-hygiene note, not a reason "
+                    "to distrust the rank. `ziggurat ingest run` clears it."
+                )
     else:
         out.append("projections: NONE readable at this as-of")
 
@@ -682,20 +1010,62 @@ def format_stream_board(board: StreamBoard, *, top: int | None = None,
     if degraded:
         out.append("! DEGRADED: " + "; ".join(degraded))
 
+    # ITEM 3.14: the three sentences the card MUST carry, above the table, before
+    # the operator has read a single name. They are the price of the ranking, and
+    # a price printed under the rows is a price nobody reads.
+    if board.position == "DST":
+        out.append("")
+        out.append("WHAT THIS RANKING IS (item 3.14 — all three, every time):")
+        out.extend(f"  * {sentence}" for sentence in DST_CARD_SENTENCES)
+        out.append(f"  * {DST_POSTURE_NOTE}")
+    if board.ranked:
+        out.append("")
+        out.append(f"  * {ONE_HORIZON_NOTE}")
+
     out.append("")
-    out.append(f"{'#':<3} {'PLAYER':<22} {'NFL':<4} {'OPP':<4} {'HOUSE':>7} "
-               f"{'STREAM*':>8} {'%OWN':>6}  ACQ")
-    out.append("  * STREAM = matchup-adjusted expected value (HYPOTHESIS — not house scoring)")
+    if board.position == "DST":
+        out.append(f"{'#':<3} {'PLAYER':<22} {'NFL':<4} {'OPP':<4} {'HOUSE':>7} "
+                   f"{'STREAM*':>8} {'MKT':>6} {'%OWN':>6}  ACQ")
+        if board.market is not None:
+            mkt_week = board.market.week if board.market.week is not None else board.week
+            out.append(
+                f"  MKT = FantasyPros week-{mkt_week} D/ST CONSENSUS, lower is better "
+                f"({board.market.scrape_date} scrape) — THIS orders the page (item 3.14)"
+            )
+            out.append(
+                "        the consensus is an average of many analysts, so it can put a "
+                "defense a place or two away from upstream's own printed DSTn label "
+                "(shown per row under --reasons); the average is what was measured"
+            )
+            out.append("  * STREAM = matchup-adjusted expected value (HYPOTHESIS — not "
+                       "house scoring); shown for contrast, it does NOT order the page")
+        else:
+            out.append("  MKT = FantasyPros weekly D/ST consensus rank — NONE stored for "
+                       "this week at this as-of (see the note below)")
+            out.append("  * STREAM = matchup-adjusted expected value (HYPOTHESIS — not "
+                       "house scoring); with no market board it orders the page (the "
+                       "item-3.14 FALLBACK)")
+    else:
+        out.append(f"{'#':<3} {'PLAYER':<22} {'NFL':<4} {'OPP':<4} {'HOUSE':>7} "
+                   f"{'STREAM*':>8} {'%OWN':>6}  ACQ")
+        out.append("  * STREAM = matchup-adjusted expected value (HYPOTHESIS — not house scoring)")
 
     rows = board.ranked if top is None else board.ranked[:top]
     if not rows:
         out.append("  (no streamable candidate could be priced this week)")
     for rec in rows:
-        out.append(
+        head = (
             f"{rec.rank:<3} {rec.player[:22]:<22} {(rec.team or '-'):<4} "
             f"{(rec.opponent or '-'):<4} {rec.house_points:>7.1f} {rec.stream_score:>8.1f} "
-            f"{rec.percent_owned:>6.1f}  {rec.acquisition}"
         )
+        if board.position == "DST":
+            # The CONSENSUS, not upstream's integer label — the consensus is what
+            # orders the page and what the measurement was taken on, and a column
+            # that is not monotone down its own ordering is a column a reader
+            # stops believing. The label rides in the row's reasons.
+            mkt = f"{rec.market_ecr:.2f}" if rec.market_ecr is not None else "-"
+            head += f"{mkt:>6} "
+        out.append(head + f"{rec.percent_owned:>6.1f}  {rec.acquisition}")
         if reasons:
             out.extend(f"      - {r}" for r in rec.reasons)
 

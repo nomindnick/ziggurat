@@ -447,6 +447,12 @@ def test_a_pull_with_the_authority_on_labels_from_the_page(db, board, monkeypatc
     _stub_schedule(db)
     monkeypatch.setattr(fp_weekly, "fetch_fp_weekly",
                         lambda **kw: FIXTURE.read_bytes())
+    # `resolve_page_week` USED to bind `fetch_week_page` as a default argument at
+    # def time, so this monkeypatch never reached it and the test made a LIVE
+    # request to FantasyPros on every suite run — silently passing while the real
+    # page happened to say week 1, and failing the morning it flipped to week 2
+    # (2026-09-15). `pull_fp_weekly` now passes the fetcher explicitly, so the
+    # patch below is what is actually read.
     monkeypatch.setattr(
         fp_weekly, "fetch_week_page",
         lambda **kw: 'x = 1; var ecrData = {"year": 2026, "week": 1, '
@@ -812,28 +818,65 @@ def _uses_fp_weekly(text: str) -> bool:
     )
 
 
-def test_no_core_module_imports_the_weekly_ecr_capture():
-    """WEEK-1 SCOPE FENCE (item 4.2b: capture only, no integration).
+#: The ONE core module item 3.14 (2026-09-15) authorised to read this capture.
+#: Week 1 is over; the fence is no longer "nobody", it is "this one, for this
+#: page". An allowlist of one is still a fence — the failure it exists to catch
+#: is the SECOND module reaching for the same too-useful number without a plan
+#: item and a measurement behind it.
+_WEEKLY_ECR_READERS = {"streaming.py"}
 
-    The first live Tuesday is trying to record an UNDISTURBED baseline of the
-    shipped decision path, and a same-week market rank is exactly the kind of
-    number that looks too useful to leave alone. Rule 2 rides along: `r2p_pts`
-    and `start_sit_grade` are FantasyPros' own projection and grade, so a core
-    module reaching for them would be pricing a decision in another scoring
-    system's currency."""
+
+def test_only_the_authorised_core_module_reads_the_weekly_ecr_capture():
+    """SCOPE FENCE, narrowed rather than deleted (item 4.2b -> item 3.14).
+
+    4.2b's fence said NO core module may read this table, because the first live
+    Tuesday was recording an undisturbed baseline of the shipped decision path and
+    a same-week market rank is exactly the kind of number that looks too useful to
+    leave alone. Week 1 is graded and item 3.14 spent a measurement to earn the
+    read (Spearman +0.2701 vs the composite's +0.1300 on 2021-23), so
+    `core/streaming.py` is allowed in — and nothing else is.
+
+    Rule 2 still rides along and is checked separately below: `r2p_pts` and
+    `start_sit_grade` are FantasyPros' own projection and letter grade, so a core
+    module reaching for THOSE would be pricing a decision in another scoring
+    system's currency, whatever the allowlist says."""
     core = Path(refresh.__file__).resolve().parents[2] / "core"
     offenders = [path.name for path in sorted(core.rglob("*.py"))
-                 if _uses_fp_weekly(path.read_text(encoding="utf-8"))]
+                 if _uses_fp_weekly(path.read_text(encoding="utf-8"))
+                 and path.name not in _WEEKLY_ECR_READERS]
     assert offenders == [], (
-        "item 4.2b is CAPTURE ONLY for Week 1; these core modules reach for the "
-        f"weekly-ECR capture: {offenders}"
+        "only `core/streaming.py` may read the weekly-ECR capture (item 3.14); "
+        f"these core modules also reach for it: {offenders}"
     )
+    # The allowlist is not a rubber stamp: the authorised module must ACTUALLY be
+    # the one reading it, or this test has quietly stopped fencing anything.
+    assert (core / "streaming.py").exists()
+    assert _uses_fp_weekly((core / "streaming.py").read_text(encoding="utf-8"))
     # Teeth, both directions: a prose mention must not trip it, an import or a
     # query must.
     assert not _uses_fp_weekly("the fp_weekly capture is deferred to 4.2c")
     assert not _uses_fp_weekly("# same-week ECR is captured, and nothing reads it")
     assert _uses_fp_weekly("from ziggurat.data.nfl import fp_weekly")
     assert _uses_fp_weekly("rows = conn.execute('SELECT * FROM fp_weekly_ecr')")
+
+
+def test_the_authorised_reader_never_touches_fantasypros_own_points():
+    """RULE 2, where the allowlist could have let it in. `r2p_pts` is
+    FantasyPros' projected points and `start_sit_grade` their letter grade — both
+    in FANTASYPROS' scoring, not the house's. `core/streaming.py` is allowed to
+    read this table for an ORDERING (a rank is scoring-system-free); it is not
+    allowed to read a number out of it and put it beside a house-scored one."""
+    core = Path(refresh.__file__).resolve().parents[2] / "core"
+    src = (core / "streaming.py").read_text(encoding="utf-8")
+    for banned in ("r2p_pts", "start_sit_grade", "player_owned_avg"):
+        assert banned not in src, (
+            f"core/streaming.py reads {banned!r} out of the weekly board — that is "
+            f"FantasyPros' own number in FantasyPros' scoring (Rule 2)."
+        )
+    # And it reads the D/ST page only: the rho and the paired margin were measured
+    # on `dst`, and a ranker swapped in on another position's evidence is the move
+    # Rule 6 exists to stop.
+    assert 'MARKET_PAGE = "dst"' in src
 
 
 def test_a_backfill_must_leave_the_capture_byte_identical(db, board):

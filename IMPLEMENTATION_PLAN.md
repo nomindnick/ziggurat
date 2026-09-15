@@ -4047,7 +4047,172 @@ pinned by test.
 dual-bracket house scoring **reorder** the public weekly list? Unmeasured by both
 explorer and verifier. Answer it before claiming anything proprietary here.
 **Update:**
-> _[To be completed]_
+> **Steps 1 and 2 BUILT & TESTED 2026-09-15; step 3 (the `game_odds`
+> `knowable_as_of` change) NOT STARTED and still gated on this** — it was out of
+> scope for the day and nothing here touches that fence. The open
+> `POSITION_CAPS` question is answered with a PRICE, not a constant change (see
+> "the rotation slot" below): `marginal.POSITION_CAPS` is byte-unchanged.
+>
+> **Step 1 — the weekly board is the D/ST ranker.** `core/streaming.py` reads
+> `fp_weekly_ecr` page `'dst'` through `get_fp_weekly_ecr` (`knowable_as_of =
+> scrape_date`, `historical` view, `view=` threaded) as the PRIMARY D/ST ranker;
+> the opponent-quality composite is now the explicit NO-BOARD FALLBACK and is
+> still computed and still printed, just no longer ordering. New
+> `streaming.dst_market_board()` / `MarketBoard`; `StreamRec` gains
+> `market_ecr` / `market_rank` / `market_label`; `StreamBoard` gains `market` and
+> `market_alt`. **The ordering key is `ecr`, not upstream's integer `rank`** —
+> `ecr` is what the rho and the paired margin were measured on, and on the live
+> 2026-09-14 board the two DISAGREE (TEN is labelled `DST11` at ecr 10.89, DET
+> `DST10` at 11.05), so the MKT column shows the consensus and the page says the
+> printed `DSTn` label can sit a place away from it. A board for another week is
+> NEVER served for this one (a week-1 board ranking week-2 defenses is a
+> season-long list wearing a weekly label); `market_alt` exists only so the
+> fallback can say what IS stored rather than implying nothing was captured.
+> Kickers are untouched — nothing comparable was measured on the `k` page, and a
+> ranker swapped in on another position's evidence is the move Rule 6 exists to
+> stop (`MARKET_PAGE = "dst"`, pinned by test).
+>
+> **THE PAIRED NUMBER THE STEP ASKED FOR, and it is the reason the card reads the
+> way it does.** Probe `E08c_fp_vs_hold.py` — `V_E08_hold_vs_churn.py` with ONE
+> MORE ARM, same construction constants (`WINDOW=6, MIN_PRIOR=3, FIRST_WEEK=4,
+> ROSTERED_N=10`), same incumbent rule, seasons 2021–23 asserted, read-only:
+> **FantasyPros-best-available vs HOLDING the drafted incumbent = +1.84 house
+> pts/wk, 95% CI [−0.47, +4.16], n = 38 paired weeks, sign p = 0.041 (24 W /
+> 11 L)** — n is 38 rather than 41 because the FP panel does not cover three of
+> the E08 weeks; requiring odds changes nothing (the odds-gated and FP-native
+> week sets are the same 38). **The half that does not flatter the change, and
+> which ships in the label:** head to head against the composite it REPLACES, on
+> those same 38 weeks, paired, FP is **−0.24 [−3.03, +2.40] (13 W / 13 L / 12
+> ties)** — indistinguishable. On the same set the shipped composite is +2.08
+> [−1.53, +5.71] and the implied total +2.29 [−0.05, +4.71] against holding. So
+> the justification for the swap is the **rho over 826 pool rows** (+0.2701 vs
+> +0.1300), not the 38-week top-one replay, which cannot see a difference this
+> small — and `MARKET_LABEL` says exactly that, quoted verbatim in every ranked
+> row. The plan's unpaired 8.88-vs-7.44 figure is superseded by the paired one.
+> Not carried over: the probe's own swap-fire rate reads 1.00 because the stream
+> POOL is defined as `std_rank > 10`, which excludes the incumbent by
+> construction — a different quantity from the card's 38-of-45, which is
+> `V_E08_hold_vs_churn`'s conditional-swap rate and is what the card quotes.
+>
+> **The three mandatory sentences are one constant, `streaming.DST_CARD_SENTENCES`,
+> imported by `waiver.py`** — two surfaces paraphrasing one disclosure is how
+> they start disagreeing about what a recommendation cost. They print ABOVE the
+> table on `ziggurat stream` and at the head of the STREAMING section on
+> `ziggurat waivers`. The qualitative-sweep #3 posture note ships beside them
+> (`DST_POSTURE_NOTE`, ρ = −0.4614, keyed on posture, never a "never"). No
+> sentence anywhere implies the market will confirm anything (pinned by a
+> banned-phrase test, item 4.1's instrument finding).
+>
+> **Step 2 — both horizons, disclosure only.** `SwapRow.season_long_delta`
+> (default `None` = NOT COMPUTED, never zero) is filled in by
+> `MarginalBoard.season_long_delta(row)` → `_SwapMatrix.season_long_delta`, which
+> re-values the SAME (drop, add) on `model_full` at the board's reporting depth.
+> It is a separate entry point from `value_after` on purpose: `value_after` RAISES
+> on a streamed row and that refusal is load-bearing (item 3.4b), so the
+> disclosure could not be a flag on it. Memoised on the shared `value_after`
+> cache — N shown rows cost N+1 valuations, pinned. `marginal.break_even_reacquisition`
+> is `1 − G/C`, `None` when there is nothing to break even on. `waiver.py`
+> computes it only for the rows the page will SHOW (`_with_season_long` inside the
+> existing `stream_sorted[:budget]` slice; the slice and the sort are untouched)
+> and prints it in the DEFAULT view — a one-week gain printed alone is the number
+> that reads as free. **Live, 2026-09-15:** "+3.2 this week, but −23.1 over the
+> rest of the season if you never get Rams D/ST back … you would need to get an
+> equally good D/ST back **86%** of the time for this to be worth it" (the other
+> two rows: 93% and 99%). A POSITIVE delta says so and is NOT warned about; an
+> uncomputed one prints UNKNOWN and never a zero. **No recommendation moves** —
+> pinned by a freeze test that reduces `_with_season_long` to the identity (i.e.
+> the pre-3.14 path) and compares every ordered `(kind, chain_rank, add, drop,
+> gain, gain_alone, kind)` tuple.
+>
+> **Two disclosures step 2 ships rather than hides.** (a) A `BOTH-HORIZONS NOTE`
+> prints ONCE at the head of the lane: the season-long half comes off the SAME
+> flat season-rate feed as the weekly half (item 3.2 — D/ST is the only position
+> with real week-to-week movement, ~12% CV), so it is a comparison of season
+> RATES and not a forecast of what the defense you drop will score. A break-even
+> percentage without that sentence is a confident-looking number a novice cannot
+> discount. (b) **Done-when (b) is met on `waivers` and only DISCLOSED on
+> `stream`** — a deliberate deferral, recorded rather than papered over.
+> `ziggurat stream` ranks free agents and holds neither the roster nor the priced
+> swap matrix; pricing a season-long swap there means building the whole marginal
+> board, turning a ~4 s quick scan into a ~24 s one for a number the operator
+> reaches two commands later. So `streaming.ONE_HORIZON_NOTE` states the gap,
+> quotes the measured magnitude (+3.2 this week / −23.1 over the rest / 86%
+> break-even, 2026-09-15) and names the command that closes it: *decide the SWAP
+> on `waivers`; decide WHICH defense here.* Closing it properly is a later item,
+> not a missing test.
+>
+> **Step 3 of THIS task (the `POSITION_CAPS` open question) — answered by pricing,
+> not by editing the constant.** The H-wk02-1 shape (keep the season-long D/ST,
+> rent a SECOND one into a bench slot) could not be printed at all, because
+> `POSITION_CAPS["DST"] == 1` filters the pair out of the swap matrix before
+> anything is priced — the operator hand-priced it in the Week-2 journal.
+> **Design decision, recorded because it is the whole point: this ships as a
+> DISCLOSURE, not a flag and not a "rotation slot" concept in the model.**
+> Relaxing the cap to RANK this move would put item 3.2's measured artefact (an
+> uncapped board makes a second defense the top add on 15 of 16 rosters, because
+> the feed is a flat season rate) back on every roster in order to price one
+> hypothesis — and the rental's own one-week number comes from that same flat
+> feed. So `waiver._rotation_slot_lines` prices the shape out of numbers the page
+> ALREADY holds — the streamed row's one-week gain and the drop board's
+> season-long body value — and refuses to rank it. It prints ONLY when our guard
+> is what forbids the move and the league does not (`position_caps["DST"] == 1`
+> AND `league_limits["DST"] >= 2`): a league cap of 1 is a RULE, and no settings
+> row at all means we do not KNOW it is legal, which item 3.8a settled is worse
+> than silence. **Live, 2026-09-15:** keep Rams D/ST, add Buccaneers D/ST for
+> **+3.2 this week**, pay with Woody Marks (RB, −5.7 over 16 wks — below
+> replacement, so "the price of this rental is NOT points: it is a roster slot
+> and the attention of re-deciding the slot every week"), with the chain's three
+> spent bodies disclosed. The positive-body branch converts the gap into weeks
+> instead and refuses to subtract the two horizons. **`POSITION_CAPS` is
+> byte-unchanged and a test asserts it**; H-wk02-1 keeps its Week-5 falsifying
+> trigger and the page says to settle it there, never by editing the constant.
+>
+> **Live verification (read-only copy of the live DB; `--no-freeze`).**
+> `ziggurat waivers --reasons --claim-budget 10` reproduces the chain EXACTLY —
+> #1 Kyler Murray ← Keaton Mitchell +10.6, #2 George Holani ← Chris Rodriguez Jr.
+> +0.6 (+0.8 alone), #3 Jalen Coker ← Josh Jacobs +5.6 (+5.4 alone), joint
+> **+16.8 over 16 wks** — and the same three streaming rows in the same order, at
+> **24.1 s** against the 24.0–24.4 s baseline. `ziggurat stream --reasons` today
+> correctly takes the FALLBACK (the week-2 board lands with the 07:22 timer and
+> the newest stored scrape ranks week 1) and says so in full; forced to
+> `--as-of 2026-09-14 --week 1`, where a real board IS stored, it ranks on the
+> market (Chargers 3.22, Titans 10.89, Lions 11.05 …) with the composite shown
+> and explicitly not ordering.
+>
+> **A consequence worth knowing before Wednesday:** `core/briefing.py` composes
+> its WAIVERS section from `format_waiver_plan(plan, reasons=False)`, so the three
+> card sentences, every BOTH HORIZONS line and the ROTATION SLOT block reach the
+> Wednesday briefing — and therefore the Obsidian mirror — with no change to
+> `push/` or `briefing.py`. The phone TEASER is unaffected (it carries counts, not
+> text). The briefing is longer by roughly a dozen lines.
+>
+> **The 4.2b Week-1 import fence was NARROWED, not deleted.**
+> `tests/test_nfl_fp_weekly.py` now allows exactly `core/streaming.py` to read
+> this capture (an allowlist of one is still a fence: the failure it exists to
+> catch is the SECOND module reaching for the same too-useful number without a
+> plan item behind it), and a second test pins that the authorised reader never
+> touches `r2p_pts` / `start_sit_grade` / `player_owned_avg` — FantasyPros' own
+> numbers in FantasyPros' scoring (Rule 2). A rank is scoring-system-free; a
+> points column is not.
+>
+> **One unrelated pre-existing defect surfaced in passing, because it turned the
+> suite red this morning:** `test_a_pull_with_the_authority_on_labels_from_the_page`
+> made a LIVE request to FantasyPros on every suite run — `resolve_page_week`
+> bound `fetch_week_page` as a DEFAULT ARGUMENT, so monkeypatching the module
+> attribute never reached it. It passed silently while the real page said week 1
+> and failed the morning it flipped to week 2. This branch first fixed it in the
+> TEST; main had already fixed it at the ROOT (`f6df326`, `pull_fp_weekly` now
+> passes the fetcher explicitly), so that commit is cherry-picked here and the
+> weaker test-side workaround is reverted — two fixes for one defect is one too
+> many, and the test-side one left the production late-binding in place.
+>
+> **Still open after this item:** step 3 (the `game_odds` fence, which inherits
+> item 4.6's retired done-when (b)); the genuinely proprietary question — does the
+> dual-bracket house scoring REORDER the public weekly list? — still unmeasured
+> (and now cheap to answer: both orderings are on one page, `MKT` against
+> `HOUSE`); the season-long half of done-when (b) on `ziggurat stream`; and the
+> grading re-run of `probes/E08_*.py` with a pre-stated practical floor.
+> Suite green (**3,143 passed, 16 skipped, 0 failed; 3,159 collected — the 12 skips above the usual 4 are the tests that need a live `db/ziggurat.sqlite`, which an isolated worktree does not have, NOT anything this item turned off**).
 
 ### 3.15 [Experiment] Is the close-band gate costing points on real rosters? (added 2026-09-15, from the E10 verification)
 **Why it exists.** `lineup_support.py:812-822` returns the greedy lineup untouched
@@ -4420,6 +4585,37 @@ carries an explicit workaround note for (4)).
 > the done-when's "the cadence text that points at any of them is updated in the same
 > change" is satisfied for (2) and (3), neither of which the cadence carries a
 > workaround for.
+>
+> **Deliverable 3 — the STREAM half — done 2026-09-15** (with item 3.14; the
+> `lineup` half is a separate change and this Update does not claim it).
+> Deliverables 1, 2 and 4 shipped in the two entries above (all merged the same day).
+>
+> **What was wrong, reproduced live before the fix:** the banner read the OLDEST
+> pull anywhere in `weekly_lines` and printed "some projections on this board are
+> 11 days old (oldest pull 2026-09-04)". On the live 2026-09-15 D/ST board that
+> was **1 orphan row of 3,229**, and it rendered as a blanket "do not trust this
+> page" — a warning that cannot be checked is a warning the operator learns to
+> skip, which is exactly how the one report where staleness matters gets ignored.
+>
+> **The fix, in `streaming._freshness_lines`:** it now names the COUNT of rows
+> whose oldest pull is past `STALE_BANNER_DAYS` out of the board's total, and —
+> the part that decides whether the page is trustworthy — whether any RANKED
+> candidate is among them. A stale row nobody is ranking cannot move an order, so
+> that branch says the order is NOT affected and calls itself a data-hygiene note;
+> the other branch NAMES the ranked players and says the rank IS affected. The
+> join is carried, not re-derived: `rank_streamers` builds a `(name, WeeklyLine)`
+> list index-aligned with the scored rows and re-orders it with them, because a
+> `StreamRec` cannot recover its own line (a D/ST line is keyed on team, a
+> kicker's on gsis id).
+>
+> **Live, 2026-09-15:** `WARNING: 1 of 3229 projection rows on this board carry a
+> pull older than 7 days — the oldest is 11 days old (pulled 2026-09-04). NO
+> ranked candidate on this page is among them, so the ORDER above is not affected
+> — this is a data-hygiene note, not a reason to distrust the rank.`
+>
+> Both branches are pinned (`test_the_projection_age_banner_counts_and_clears_an_unranked_orphan`,
+> `..._names_a_stale_RANKED_candidate`), and the old uncountable wording is
+> asserted GONE rather than merely replaced.
 
 ### 3.18 [Fix] The espn_id → gsis crosswalk keeps the wrong id for 2026 rookies (added 2026-09-15, from the Week-2 preflight)
 **Why it exists.** **Every** CLI run prints ~140 lines of
