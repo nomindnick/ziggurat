@@ -73,13 +73,13 @@ def _schedule_rows(db, season=2026, first="2026-09-10"):
     db.commit()
 
 
-def _land(db, source, day, season=2026):
+def _land(db, source, day, season=2026, status=refresh.STATUS_OK):
     """The run-log row a SUCCESSFUL pull leaves behind — the anchor the interval
     gate reads. Written by the simulation whenever ``decide`` says "pull"."""
     run_id = refresh.start_run(db, batch_id=f"sim-{day}", source=source, season=season,
                                scope=None, retrieved_as_of=day,
                                started_at=f"{day}T08:00:00+00:00")
-    refresh.finish_run(db, run_id, status=refresh.STATUS_OK,
+    refresh.finish_run(db, run_id, status=status,
                        finished_at=f"{day}T08:00:02+00:00", rows_written=19_000)
 
 
@@ -322,3 +322,26 @@ def test_a_tuesday_with_no_thursday_after_it_is_named(db):
     assert "vintage-thu" in report, "the report must name where to look"
     # snap_counts is still paired, so it must NOT be accused.
     assert "snap_counts" not in report.split("HALF A PAIR")[1].split("\n")[0]
+
+
+def test_a_partial_pull_is_a_vintage_too(db):
+    """Observed 2026-09-16: the Tuesday unit wrote ``weekly_stats`` as ``partial``
+    (1 of 1,118 rows dropped by the standing null-player_id fence — which is what
+    EVERY in-season weekly_stats pull looks like), and the footer printed
+    ``last Tue never`` for it. A partial pull anchors the interval gate, so it is
+    the copy every later read serves: it IS the vintage, and the half-pair alarm
+    must be able to fire for it.
+    """
+    _schedule_rows(db)
+    for source in VINTAGE_SOURCES:
+        _land(db, source, WEEK["thu"])
+    _land(db, "weekly_stats", "2026-10-13", status=refresh.STATUS_PARTIAL)
+    report = refresh.format_status(db, season=2026, today="2026-10-16")
+    pair = report.split("VINTAGE PAIR")[1]
+    assert "weekly_stats" in pair and "2026-10-13" in pair, pair
+    assert "never" not in pair.split("weekly_stats")[1].split("\n")[0], pair
+    assert "HALF A PAIR" in report
+    assert "weekly_stats" in report.split("HALF A PAIR")[1].split("\n")[0]
+    # A partial THURSDAY closes the pair just the same.
+    _land(db, "weekly_stats", "2026-10-15", status=refresh.STATUS_PARTIAL)
+    assert "HALF A PAIR" not in refresh.format_status(db, season=2026, today="2026-10-16")

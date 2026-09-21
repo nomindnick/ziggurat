@@ -2436,11 +2436,18 @@ def _vintage_lines(conn, *, season, today) -> list[str]:
     """
     seen: dict[str, dict[str, str]] = {}
     for source in VINTAGE_SOURCES:
+        # The SAME status set the interval gate anchors on (``_ANCHOR_STATUSES``):
+        # a ``partial`` pull is the copy every later read serves, so it IS the
+        # vintage. Reading ``ok`` alone made ``weekly_stats`` — ``partial`` on
+        # EVERY in-season pull by the standing null-player_id fence — print
+        # ``never`` for both weekdays all season, and the half-pair alarm below
+        # could never fire for the source it exists for (observed 2026-09-16).
+        placeholders = ", ".join("?" * len(_ANCHOR_STATUSES))
         rows = conn.execute(
             "SELECT retrieved_as_of, status FROM nfl_ingest_runs "
-            "WHERE source = ? AND season = ? AND status = ? "
+            f"WHERE source = ? AND season = ? AND status IN ({placeholders}) "
             "ORDER BY run_id DESC LIMIT 60",
-            (source, int(season), STATUS_OK),
+            (source, int(season), *_ANCHOR_STATUSES),
         ).fetchall()
         for row in rows:
             stamp = normalize_as_of(row["retrieved_as_of"])
