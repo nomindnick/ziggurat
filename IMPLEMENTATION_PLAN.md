@@ -6692,6 +6692,165 @@ now** (done above, and in CLAUDE.md's Monday step 5). The σ sweep is hours and 
 run any time. **The SIMULATOR BUILD is deferred behind the promotion gate** — and
 its own decision value to the operator is near zero: he cannot choose a seed, and
 the policy the bye implies is what the tools already do.
+**Amended 2026-09-21:** the simulator now has a SECOND consumer — item 5.1b
+(policy search over simulated seasons) — which is the reason to build it
+beyond the exchange rate; the promotion gate still comes first, because 5.1b's
+reward cannot be written down until the objective is.
+**Update:**
+> _[To be completed]_
+
+### 5.1b [Experiment] Policy search over a season simulator (added 2026-09-21, operator idea)
+**Origin:** the operator, reading about DeepMind's self-play (*The Infinity
+Machine*), asked whether the historical seasons plus agents playing simulated
+seasons against each other could learn how to play fantasy football in ways the
+raw-stats approach misses. The session's assessment, recorded here so the item
+is neither oversold nor dismissed: **the instinct is right and half of it is
+already in the repo; the other half runs into a wall the DeepMind story hides.**
+
+**Goal:** search over the in-season ROSTER-MANAGEMENT policy — streaming
+aggressiveness, bench composition, rental-vs-role preference, the hold horizon
+on an unpriceable player, claim-chain depth, season-level variance posture —
+by evaluating candidate policies on simulated seasons, with P(top-3) as the
+objective and P(title) carried beside it. **Not a policy network. Not gradient
+RL. A pre-registered search over a small, hand-legible parameter family**, each
+parameter a labelled hypothesis in the sense of Rule 6.
+
+**Done when:** the pre-registered search has run and EITHER (a) a setting beats
+the current hand policy on the simulator AND on the real-season replay under the
+pre-registered bar, and ships as knob values in the existing modules with both
+numbers in its reason text, OR (b) the verdict is written in the pre-registered
+words. Both are done. Also: the seam ledger (design step 3) has at least one
+entry the search actually hit — a search that hits none is suspected before the
+simulator is.
+
+**Why self-play worked for AlphaZero and why that does not transfer whole.** The
+Go simulator IS the game: every reward comes from inside the rules, so the agent
+can generate unlimited perfect data and anything it learns is true of Go. Here
+the reward comes from real NFL outcomes, and no simulator of ours contains them.
+Ten agents playing simulated seasons against each other learn about the
+SIMULATOR (and about the room model), never about football — and optimisation
+finds every seam the simulator has, because that is what optimisation does. This
+project has already watched that happen three times, and each is a warning about
+what a learned policy would have inherited as "insight":
+- item 3.2: an uncapped baseline made a SECOND D/ST the top add on 15 of 16
+  rosters, because the feed's D/ST line was the only one with weekly variance;
+- item 3.11: the week-by-week variant scored +0.043 against an objective that
+  "likes removed holes", and stopped removing them the moment holes were priced
+  at a waiver-corrected rate;
+- the edge program's standing lesson: an oracle that can see the graded player's
+  own substitutes will always condemn one.
+And the data wall: five seasons × seventeen weeks in one league structure is
+~85 graded season-weeks against millions of games for Go. Item 4.2 measured what
+that instrument can see — nothing under ~7 pp on 45 paired weeks — and a learned
+policy sits the same final exam, with two seasons of holdout.
+
+**What is ALREADY the AlphaZero-shaped half, and must not be rebuilt:** the draft
+engine. Items 2.2 → 2.3 → 3.11 are self-play in that shape — a calibrated
+opponent model, 20,000 simulated drafts per variant, candidate policies measured
+on held-out seeds, the winners composed into the shipped engine. It was done as
+MEASURED VARIANTS rather than gradient descent, which is the honest version when
+the opponent model is fit on ONE real prior draft: self-play cannot manufacture
+data about how nine real colleagues behave. The in-season half has never had the
+same treatment, and that is the whole of this item.
+
+**Why it is not on the Phase-4 stop list, and which stop-list entries constrain
+it.** The stop list closes *contextual role models / neural nets on the same
+inputs* — that is FORECASTING, and the third independent null says nothing
+obtainable improves the forecast. This item does not touch the forecast; it
+searches over what to DO given the forecast we have, which is the "execution"
+edge the 2026-09-13 program named as one of the three that remain. Four
+stop-list nulls are PRIORS the search must reproduce, i.e. sanity checks on the
+simulator rather than things to rediscover: acquire-now dominates wait (the
+dynamic bench planner); D/ST tail selection is zero; cross-roster covariance
+changes 0 of 20; live-score conditioning is +0.000. A winning policy whose gain
+comes from any of those is a simulator artifact and is rejected on that ground.
+
+**Design, in order.**
+1. **The season simulator — 5.1's deferred half, built once and shared.** State:
+   ten rosters, the free-agent pool, standings, week. Transitions: weekly
+   realised points drawn from the projection plus the MEASURED per-unit σ
+   (`lineup_support.DEFAULT_VARIANCE`, nflverse 2021–25 re-scored through
+   `scoring.py`; K σ is a pure hypothesis and says so); an injury process fit on
+   the backfilled 2021–25 `injuries` + `snap_counts` absences (weekly hazard by
+   position, duration distribution — a labelled fit, not a rule); byes and the
+   schedule from `schedules`; scoring through `scoring.py` only (Rule 2); the
+   bracket READ from `league_settings` exactly as 5.1 specifies, never
+   transcribed. Rivals: the in-season analogue of the 2.2 bot model — "4 of 9
+   made no transaction since the draft" is an OBSERVED prior (edge program), the
+   active ones chase last week's SCORERS (Lee & Liu on the `sleeper_ownership`
+   panel, cited in 5.2), and the room model's n is small and is printed with
+   every result. Reward: P(top-3) with P(title) beside it. The E16 bracket
+   simulator (`E16_bracket_sim.py`, 120,000 draws, the exchange rate) is the
+   seed of this and should be lifted, not re-derived.
+2. **The policy family — small and legible.** Six to eight knobs, every one a
+   number the operator can read as a sentence: the house-point gain a D/ST or K
+   stream must clear; the second-D/ST-slot rule (H-wk02-1 is its live instance);
+   RB-vs-WR bench mix; the depth of the claim chain actually queued and how
+   eagerly a free-agent grab is clicked; the hold horizon on an unpriceable
+   player (the Jacobs rule's "past Week 10" is a hand-set value of exactly this
+   knob); rental-vs-role weight on the candidates usage signal; and the
+   season-level σ preference by rank-relative-to-cut, which is 5.1's own σ sweep
+   run as a policy rather than a table. Search by grid or cross-entropy over that
+   family. No policy net; no function approximator that cannot be printed.
+3. **The seam ledger, written BEFORE the first run.** Every known way the
+   simulator differs from the season, so a winner can be checked against it:
+   the feed is a flat season rate (so any policy that "times" weeks is timing
+   nothing — the projection does not move week to week; D/ST alone varies, at
+   ~12%); no per-week dispersion in the feed (σ is a frozen prior); bench value
+   is priced only through the availability model; injuries are drawn
+   independently of usage; the room model's n; the kicker's 50+ FG zero (item
+   3.11) until repaired. Each ledger line names the policy shape that would
+   exploit it. The item is done only if the search hits at least one — that is
+   the calibration that the ledger is real.
+4. **Pre-registration, the 4.2 discipline verbatim:** grid, metric, null (random
+   policies from the same family, and the current hand policy as the control),
+   the family-wise bar, and the expected outcome frozen and sha256-pinned before
+   the first cell; results as dated amendments after; no second search on the
+   same runs under another metric.
+5. **The real-season replay gate.** The winning setting and the hand policy are
+   both replayed on the REAL 2021–2023 seasons through `backtest/` — the
+   roster-management decisions taken on real weekly stats under the real as-of
+   cuts (`base.latest_truth`, the game-date vintage caveat from C17 applies).
+   2024–25 stay locked; the unlock ledger applies. **A setting that wins in
+   simulation and loses on replay is a simulator finding, not a policy** — and
+   is the more valuable of the two outcomes, because it names a seam the ledger
+   missed.
+6. **Shipping shape.** Knob VALUES in the modules that already own them
+   (`streaming`, `marginal`/`waiver`, `lineup_support`), each with its simulation
+   number, its replay number and its n in the reason text, so the Tuesday page
+   can read them aloud. No new module enters the decision path; tools recommend,
+   the operator acts.
+
+**Expected outcome, stated now so the result is not talked into something
+else:** most knobs measure zero — that is the shape of every stop-list entry and
+the honest prior. The plausible positives are exactly the knobs no probe has
+swept: bench composition under a real injury process, the unpriceable-hold
+horizon, and the season-level σ posture — where the literature's own warning
+(5.1: trailing teams raise risk and it does not convert) means **"play timid"
+is a legitimate answer and a licence to stop entertaining upside ideas.** The
+whole in-season execution edge has been sized at roughly +1–2 house pts/wk; a
+search over how it is run is bounded by that, and at the recorded exchange rate
+(+2.21 pp title / +3.96 pp top-3 per house point per week) that bound is the
+number to quote to the operator, not the AlphaZero story.
+
+**Sequencing and cost.** Behind 5.1's promotion gate (the simulator's objective
+must be settled — top-3 from the playoffs vs the regular season — before the
+reward is written down); after the 4.2c grader and 4.2b Wave 2; and **not run
+before Week 5** for 5.2's own reason — the early weeks have no byes and few
+accumulated injuries, so the simulator would be fit on the one stretch of the
+season it has nothing to teach about. Build: the simulator is a few days of
+agent work on top of E16 and the measured priors; the search itself is cheap
+(hundreds of thousands of simulated seasons — E16 drew 120,000 brackets in
+minutes). Run as the usual verified workflows (recon → pre-register → build →
+search → adversarial audit), Opus throughout per the operator's standing
+preference; the audit's first lens is the seam ledger.
+
+**The sentence for the operator:** this cannot learn football the market does
+not know — three independent rounds and the literature say nothing obtainable
+leads the consensus. It CAN learn how to run this roster in this league under
+the variance we have measured, which is the one edge left that is ours to
+improve, and it is worth at most a point or two a week. That is still the
+difference between the 2 seed and the 3 seed.
 **Update:**
 > _[To be completed]_
 

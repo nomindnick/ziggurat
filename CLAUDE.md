@@ -1188,7 +1188,19 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   days; the program recommends about four. Plan items written 2026-09-15: 3.12
   (done), **3.13 / 3.14 / 3.15 / 3.16 / 3.17 / 3.18 / 3.19**, **4.6a**, **4.7**,
   plus amendments to 3.6, 3.8 wave B, 3.11, 4.2b Wave 2, 4.2c, 4.6, 5.1, 5.2 and
-  5.3. **Standing lessons this program paid for: an oracle that can see the
+  5.3.
+
+- **5.1b policy search over a season simulator — plan item written 2026-09-21
+  (operator idea, from DeepMind self-play).** NOT a policy net and NOT gradient
+  RL: a pre-registered search over six-to-eight legible roster-management knobs
+  (streaming threshold, second-D/ST rule, bench mix, chain depth, unpriceable
+  hold horizon, rental-vs-role, season-level σ posture), evaluated on the 5.1
+  season simulator and gated on a real 2021–23 replay. The draft engine
+  (2.2→2.3→3.11) already IS the self-play half; this is the in-season half it
+  never had. Bounded by the ~+1–2 pts/wk execution edge; a seam ledger is
+  written before the first run because optimisation finds simulator artifacts
+  (3.2's second defense, 3.11's removed holes). Behind 5.1's promotion gate;
+  not before Week 5. **Standing lessons this program paid for: an oracle that can see the
   graded player's own outcome inside its own predictor will always justify the
   feature, an oracle scored at two arbitrary strengths is not a ceiling (sweep
   it), and an oracle that can see the player's own SUBSTITUTES will always
