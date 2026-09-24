@@ -530,6 +530,25 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   player IS offered the slot (open his MOVE menu the first time one is on the
   roster), and what ESPN does when an occupant heals (needs a real occupant).
   The label, the renderer disclosure and the `ir-check` ask say exactly that.
+  **Corrected 2026-09-24:**
+  - **The 09-03 reading was void.** IR is never on the MOVE menu; it has its
+    own "Add to IR" button. That page listed exactly the one OUT player and
+    withheld a DAY_TO_DAY and 14 ACTIVE players.
+  - **Our first occupant (Reed, OUT) was accepted and held.** The league's
+    first occupant was earlier: team 8 has held one since 09-15, unnoticed
+    here. Three teams now use the slot.
+  - **OCCUPANCY is ESPN's documented rule** (Fan Support, "Players on Injured
+    Reserve (IR)", surfaced by the narrative-experiment Cowork report):
+    - a QUESTIONABLE/DOUBTFUL occupant may **stay**, and the roster stays
+      valid;
+    - only an occupant with no designation (or a suspension) makes the
+      roster invalid.
+    `check_legality` had this backwards — a Q occupant was the suite's
+    canonical ILLEGAL roster — and was fixed the same day. Entry
+    ({OUT, INJURY_RESERVE}) and occupancy (entry ∪ {Q, D}) are now separate
+    rules in `league/state.py`. Still not seen in this league: the INVALID
+    transition itself (an occupant who comes back healthy).
+  (DOUBTFUL has since appeared; that half of the next sentence is historical.)
   DOUBTFUL/PUP/NFI
   remain UNOBSERVED → INELIGIBLE, watched rather than confirmed: the report fires
   the first time a designation this league has never served appears.
@@ -1539,11 +1558,18 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    `ziggurat stream` is where that decision belongs. (0 is not "unlimited"
    here — at 0 the tool prices nothing and says so.) The roster-legality
    precheck runs FIRST and is the point:
-   ESPN blocks ALL transactions while a roster is illegal, and Tuesday's
-   league-wide status reset is exactly when an IR-slot occupant flips
-   Out → Questionable and breaks legality. On a refusal: relay the proposed
-   fix (usually a costless IR move) to the operator, re-sync after they apply
-   it, re-run.
+   ESPN blocks ALL transactions while a roster is illegal. An IR-slot
+   occupant who turns QUESTIONABLE or DOUBTFUL may STAY (ESPN's documented
+   rule; corrected 2026-09-24 — this step used to say the opposite). What
+   breaks legality is an occupant with NO designation (healthy again) or a
+   suspension, or an oversized active roster. With room on the bench, the
+   healed player's move costs nothing, but it must come FIRST: ESPN processes
+   nothing until it is made. On a full roster the tool refuses and proposes a
+   fix: either a costless swap that puts an OUT bench player into the freed IR
+   slot, or a drop. Relay it to the operator, re-sync after they apply it, and
+   re-run. Putting a player INTO IR uses the "Add to IR" button on the ESPN
+   website (observed 2026-09-24; the MOVE menu offered IR to nobody). How a
+   player is taken OFF IR has not been observed yet.
    **Every `ziggurat waivers` run is ARCHIVED (item 4.2b): the run captures a
    decision freeze.** The plan, the priced swap matrix, every evaluated
    candidate row, the pool as priced and the roster are frozen under the

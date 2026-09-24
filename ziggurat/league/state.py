@@ -132,7 +132,64 @@ _SETTINGS_JSON_COLUMNS = (
 #   * DOUBTFUL / PUP / NFI remain UNOBSERVED in this league and are treated as
 #     INELIGIBLE. They are not settled — they are watched (see
 #     OBSERVED_INJURY_STATUSES).
+# This is the ENTRY rule: who may be MOVED INTO the IR slot. Observed 2026-09-24
+# on the ESPN website: the "Add to IR" page listed exactly the one OUT player on
+# the roster and withheld a DAY_TO_DAY and fourteen ACTIVE players.
 IR_ELIGIBLE_STATUSES = frozenset({"OUT", "INJURY_RESERVE"})
+
+# The OCCUPANCY rule is WIDER than the entry rule, and it is ESPN's own words, not
+# an inference. ESPN Fan Support, "Players on Injured Reserve (IR)" (updated
+# 2026-08-18, fetched 2026-09-24):
+#   "If a player in the IR slot has their status updated from OUT or IR to
+#    QUESTIONABLE or DOUBTFUL, the user's roster is NOT invalid. Those players can
+#    remain in that IR slot, and the user can make claims/add players ..."
+#   "If a player goes from OUT to no longer having an injury designation, the
+#    user's roster becomes INVALID ..."
+#   "Suspended players (SSPD) are NOT eligible for IR on FFL."
+# Until 2026-09-24 this system treated a QUESTIONABLE occupant as the canonical
+# ILLEGAL roster (the "Tuesday reset" crux) — the reverse of ESPN's rule.
+IR_OCCUPANCY_OK_STATUSES = IR_ELIGIBLE_STATUSES | frozenset({"QUESTIONABLE", "DOUBTFUL"})
+# An occupant with one of these makes the roster INVALID: no designation at all
+# (ESPN serves "ACTIVE" or a blank) or a suspension. Every OTHER designation
+# (DAY_TO_DAY, PUP, NFI, anything new) is not covered by ESPN's page and is
+# classified UNKNOWN by the caller — never silently OK, never silently invalid.
+IR_OCCUPANCY_INVALID_STATUSES = frozenset({"ACTIVE", "", "SUSPENSION"})
+IR_RULES_SOURCE = (
+    "ESPN Fan Support, 'Players on Injured Reserve (IR)', updated 2026-08-18: an "
+    "OUT/IR player may be placed in the IR slot; an occupant who later becomes "
+    "QUESTIONABLE or DOUBTFUL may STAY (roster valid, claims allowed); an occupant "
+    "with no injury designation makes the roster INVALID until he leaves the slot; "
+    "suspended players are never eligible"
+)
+
+
+def ir_occupancy_verdict(injured, injury_status) -> str:
+    """ESPN's OCCUPANCY rule for a player ALREADY in the IR slot: ``OK`` / ``INVALID``
+    / ``UNKNOWN``. Flag-first like the entry rule: ESPN's own ``injured`` flag set
+    means OUT/INJURY_RESERVE, which may always stay. With the flag false (or not
+    captured) the designation decides — QUESTIONABLE/DOUBTFUL may stay (ESPN's
+    page), no designation or a suspension makes the roster INVALID, anything the
+    page does not cover is UNKNOWN. A suspension is checked FIRST (ESPN: never
+    eligible, whatever the flag says). A false flag beside an OUT/IR tag is the one
+    divergence this league has never shown — and a false flag does NOT mean "no
+    designation" (every QUESTIONABLE/DOUBTFUL row carries it), so it is UNKNOWN,
+    never a reason to force a drop. A blank tag with the flag NOT captured is
+    UNKNOWN (no evidence), not INVALID.
+    """
+    tok = str(injury_status or "").strip().upper()
+    if tok == "SUSPENSION":
+        return "INVALID"
+    if injured:
+        return "OK"
+    if injured is None and not tok:
+        return "UNKNOWN"
+    if tok in IR_ELIGIBLE_STATUSES:
+        return "OK" if injured is None else "UNKNOWN"
+    if tok in IR_OCCUPANCY_OK_STATUSES:
+        return "OK"
+    if tok in IR_OCCUPANCY_INVALID_STATUSES:
+        return "INVALID"
+    return "UNKNOWN"
 
 # Every injury designation this league had actually served as of the baseline day.
 # Measured 2026-09-02 across the whole 1,036-player universe. ``""`` is ESPN
@@ -1472,10 +1529,11 @@ class IRRuleReport:
        how the shipped rule treats it. Those three are the ones the rule has
        never been tested on.
     3. ``ir_occupants`` — every IR-slot occupant LEAGUE-WIDE, with the roster
-       entry's own ``injuryStatus`` and the holding team's transaction lock. Zero
-       have ever been observed (0 of 10 rosters, 2026-09-02), which is exactly why
-       the IR-SLOT mechanism is still UNVERIFIED. The first occupant whose
-       ``injured`` flag is 0 is the event that settles it.
+       entry's own ``injuryStatus`` and the holding team's transaction lock. None
+       existed on 2026-09-02; team 8 has held one since 2026-09-15 and the
+       operator's team since 2026-09-24. A false ``injured`` flag is NOT news by
+       itself (every QUESTIONABLE/DOUBTFUL occupant carries one and may stay — ESPN's
+       documented rule); an occupant who may NOT stay is (``ir_occupancy_verdict``).
 
     ``coverage`` is the fraction of ROSTERED rows carrying a non-NULL ``injured``.
     It is a per-row fraction, not a boolean about migration 014: a rostered player
@@ -1561,21 +1619,31 @@ class IRRuleReport:
                 + ")"
             )
             remedy("`ziggurat league ir-check`")
-        flagged = [o for o in self.ir_occupants if o.get("injured") == 0]
+        # Under ESPN's OCCUPANCY rule a false flag is NOT news by itself: every
+        # QUESTIONABLE/DOUBTFUL occupant carries one and may stay. Only an occupant
+        # who may NOT stay (no designation, suspended) or whose stay cannot be
+        # verified is — and that one is the transition the rule has not yet been
+        # seen on (a healed occupant making a roster INVALID).
+        flagged = [o for o in self.ir_occupants
+                   if ir_occupancy_verdict(o.get("injured"), o.get("injury_status")) != "OK"]
         if flagged:
             bits.append(
-                f"{len(flagged)} IR-slot occupant(s) whose ESPN `injured` flag is "
-                f"FALSE — the event that settles the IR-slot mechanism "
-                f"({', '.join(str(o['player']) for o in flagged)})"
+                f"{len(flagged)} IR-slot occupant(s) who may NOT stay under ESPN's IR "
+                f"rules, or whose stay cannot be verified — a roster holding one is "
+                f"INVALID until he leaves the slot ("
+                + ", ".join(f"team {o['team_id']} {o['player']} "
+                            f"[{o.get('injury_status') or 'no designation'}]"
+                            for o in flagged)
+                + ")"
             )
             remedy("`ziggurat league ir-check`")
-        unflagged_new = [o for o in self.new_occupants if o.get("injured") != 0]
-        if unflagged_new:
+        arrived = [o for o in self.new_occupants
+                   if ir_occupancy_verdict(o.get("injured"), o.get("injury_status")) == "OK"]
+        if arrived:
             bits.append(
-                f"{len(unflagged_new)} IR-slot occupant(s) appeared for the first time "
-                f"({', '.join(str(o['player'] or o['espn_player_id']) for o in unflagged_new)}) "
-                f"— this league had never used the slot, so what ESPN accepted there is "
-                f"the evidence the IR-slot mechanism has been waiting for"
+                f"{len(arrived)} IR-slot occupant(s) appeared for the first time "
+                f"({', '.join(str(o['player'] or o['espn_player_id']) for o in arrived)}) "
+                f"— accepted by ESPN, which is evidence about the slot's ENTRY rule"
             )
             remedy("`ziggurat league ir-check`")
         gap = self._coverage_gap()
@@ -1630,11 +1698,12 @@ def ir_rule_check(conn, *, as_of, season, own_team_id: int | None = None,
     above and invents no gate of its own.
 
     WHAT IT DOES AND DOES NOT SETTLE. It settles that ESPN's own ``injured``
-    boolean still marks exactly the ``IR_ELIGIBLE_STATUSES`` designations. It
-    does NOT settle what ESPN's IR SLOT accepts — no roster in this league has
-    used it — which is why ``ir_occupants`` is reported with an explicit zero
-    rather than as silence, and why ``core.waiver.IR_FIX_MODEL_LABEL`` still
-    carries the word UNVERIFIED.
+    boolean still marks exactly the ``IR_ELIGIBLE_STATUSES`` designations. What
+    ESPN's IR SLOT accepts is a separate question: ENTRY was observed 2026-09-24
+    (the "Add to IR" page offered exactly the OUT player; the first occupant
+    followed), and OCCUPANCY is ESPN's documented rule (``IR_RULES_SOURCE``) —
+    the invalid transition itself has not yet been seen in this league, which is
+    why ``ir_occupants`` is always reported, including as an explicit zero.
 
     ``own_team_id`` narrows the COVERAGE half of ``has_news`` to the reader's own
     roster. A flag hole on a rival's bench is real league-health information (and
@@ -1761,7 +1830,8 @@ def ir_rule_check(conn, *, as_of, season, own_team_id: int | None = None,
     has_news = bool(
         divergences
         or new_statuses
-        or any(o["injured"] == 0 for o in occupants)
+        or any(ir_occupancy_verdict(o["injured"], o["injury_status"]) != "OK"
+               for o in occupants)
         or new_occupants
         # The coverage half is gated on being repairable AND capable of deciding
         # something for THIS reader — see IRRuleReport._coverage_gap.
@@ -2009,9 +2079,9 @@ def format_ir_rule_report(report: IRRuleReport) -> str:
         out.append(
             f"  new designations: none — every injury tag on this snapshot is already "
             f"in the set this league has served before (the {IR_RULE_BASELINE_DATE} "
-            f"baseline, plus everything its own earlier snapshots hold). DOUBTFUL / "
-            f"PUP / NFI remain UNOBSERVED and are treated as IR-INELIGIBLE; this watch "
-            f"is what settles them, and it speaks ONCE, on the day one first appears."
+            f"baseline, plus everything its own earlier snapshots hold). A designation "
+            f"this league has never served (PUP / NFI so far) is treated as ineligible "
+            f"to ENTER IR; this watch speaks ONCE, on the day one first appears."
         )
 
     if report.ir_occupants:
@@ -2025,27 +2095,25 @@ def format_ir_rule_report(report: IRRuleReport) -> str:
                 f"ESPN injured={flag}  roster-entry status="
                 f"{o['entry_injury_status'] or '-'}  team locked="
                 f"{'yes' if o['team_transaction_locked'] else 'no'}"
+                f"  occupancy={ir_occupancy_verdict(o['injured'], o['injury_status'])}"
             )
+        out.append(f"    rule: {IR_RULES_SOURCE}.")
     else:
         out.append(
-            "  IR-slot occupants league-wide: 0 — no roster here has ever used the "
-            "slot, so what ESPN does with an occupant is UNTESTED in this league."
+            "  IR-slot occupants league-wide: 0 — no roster holds the slot on this "
+            "snapshot."
         )
-        # Naming the action is the whole point of a report built to settle a
-        # question. Waiting for an occupant is not the only way, and it is the
-        # slow one (audit fix). The negative half was observed 2026-09-03 on the
-        # ESPN WEBSITE (the operator has no app): a player's MOVE button lists
-        # only the moves ESPN accepts, and it offered IR to nobody on a roster
-        # with no OUT/IR player. The ask below is what is STILL open.
+        # The 2026-09-03 "observation" read IR's absence from the MOVE menu, which
+        # never lists IR at all, so it was void. The real checks came 2026-09-24
+        # (operator, ESPN website) and are stated here instead of re-asked.
         out.append(
-            "    observed 2026-09-03 (ESPN website): a player's MOVE button lists only "
-            "the moves ESPN accepts, and it offered IR to NOBODY on a roster with no "
-            "OUT/INJURY_RESERVE player — an ineligible body cannot be put on IR. "
-            "Still open, and you do NOT have to wait for an occupant: the first time "
-            "an OUT/INJURY_RESERVE player is on YOUR roster, open his MOVE menu and see "
-            "whether IR is offered (~30 s). Whether ESPN blocks transactions on an "
-            "oversized roster still needs a real occupant who heals. Record the answer "
-            "in IMPLEMENTATION_PLAN.md §3.8."
+            "    observed 2026-09-24 (ESPN website): IR is NOT on a player's MOVE menu; "
+            "it has its own \"Add to IR\" button, whose page lists only the players "
+            "ESPN will accept (it offered the one OUT player and withheld DAY_TO_DAY "
+            "and ACTIVE players), and the first occupant was accepted and held. "
+            f"Occupancy follows ESPN's documented rule — {IR_RULES_SOURCE}. Still "
+            "unobserved here: the INVALID transition (an occupant who returns with no "
+            "designation). Record it in IMPLEMENTATION_PLAN.md §3.8 when it happens."
         )
 
     # ALWAYS printed, including the pre-draft n=0 case: a suppressed coverage line

@@ -980,9 +980,10 @@ def test_ir_rule_check_is_silent_when_clean_and_speaks_on_a_new_designation(
 
 
 def test_ir_rule_check_reports_a_divergence_and_an_occupant(crosswalked_db, league_world):
-    """An IR occupant whose ESPN flag is FALSE is the event that settles the
-    IR-slot mechanism, and a flag that disagrees with the rule is the event the
-    cross-tab exists for. Both must be reported, never silence."""
+    """An IR occupant whose stay ESPN's rules cannot vouch for (here: flag FALSE
+    beside an OUT tag — the never-seen divergence) is reported, and a flag that
+    disagrees with the rule is the event the cross-tab exists for. Both must be
+    reported, never silence."""
     payload, pool = league_world(holdings={"1000": 4}, slots={"1000": 21})  # 21 = IR
     for entry in pool:
         entry["player"]["injured"] = False
@@ -997,7 +998,8 @@ def test_ir_rule_check_reports_a_divergence_and_an_occupant(crosswalked_db, leag
     assert occupant["lineup_slot"] == "IR" and occupant["injured"] == 0
     assert occupant["entry_injury_status"] == "NORMAL"
     assert occupant["team_transaction_locked"] == 0
-    assert "settles the IR-slot mechanism" in report.headline
+    assert "may NOT stay under ESPN's IR rules, or whose stay cannot be verified" \
+        in report.headline
     text = state.format_ir_rule_report(report)
     assert "DIVERGENCES" in text and "IR-slot occupants league-wide (1)" in text
 
@@ -1327,7 +1329,7 @@ def test_ir_check_names_the_app_check_that_settles_the_item_today(
     none: the sentence was unreachable by construction in exactly the state that
     keeps the question open.
 
-    Amended 2026-09-03: the operator ran the check on the WEBSITE (no app), and
+    Amended 2026-09-03 (and again 2026-09-24, below): the operator ran the check on the WEBSITE (no app), and
     the "refusal" turned out to be an ABSENT menu option — a player's MOVE button
     lists only the moves ESPN accepts, and it offered IR to nobody on a roster with
     no OUT/IR player. The report must now state that observation AND the half it
@@ -1340,9 +1342,15 @@ def test_ir_check_names_the_app_check_that_settles_the_item_today(
     text = state.format_ir_rule_report(
         state.ir_rule_check(crosswalked_db, as_of="2026-09-15", season=2026))
     assert "IR-slot occupants league-wide: 0" in text
-    assert "observed 2026-09-03" in text
-    assert "offered IR to NOBODY" in text
-    assert "open his MOVE menu" in text
+    # Amended 2026-09-24: the 09-03 reading was of the MOVE menu, which never
+    # lists IR — void as evidence. IR has its own "Add to IR" button; that page
+    # and the first real occupant answered ENTRY, and ESPN's own help page
+    # documents OCCUPANCY. The report states those, and re-asks nothing answered.
+    assert "observed 2026-09-24" in text
+    assert "Add to IR" in text
+    assert "offered IR to NOBODY" not in text
+    assert "open his MOVE menu" not in text
+    assert "QUESTIONABLE or DOUBTFUL may STAY" in text
     assert "dragging" not in text and "the ESPN app" not in text
     assert "IMPLEMENTATION_PLAN.md §3.8" in text
 
@@ -1705,3 +1713,23 @@ def test_no_manager_identifier_rides_along_with_the_join_key():
         assert "member" not in " ".join(str(k) for k in row)
         assert "{SOME-MEMBER-GUID}" not in " ".join(str(v) for v in row.values())
     assert "member_id" not in state._TRANSACTION_COLUMNS
+
+
+def test_a_questionable_ir_occupant_is_NOT_daily_news(crosswalked_db, league_world):
+    """ESPN's occupancy rule: a QUESTIONABLE/DOUBTFUL occupant may stay. His FALSE
+    `injured` flag is therefore not an alarm — the old headline fired "the event
+    that settles the IR-slot mechanism" every day such an occupant stayed, on every
+    team's roster (review 2026-09-24). A healthy occupant still IS news."""
+    payload, pool = league_world(holdings={"1000": 4}, slots={"1000": 21})  # 21 = IR
+    for entry in pool:
+        entry["player"]["injured"] = entry["player"]["injuryStatus"] in state.IR_ELIGIBLE_STATUSES
+        entry["player"]["droppable"] = True
+    pool[0]["player"]["injuryStatus"] = "QUESTIONABLE"
+    pool[0]["player"]["injured"] = False
+    _ingest(crosswalked_db, payload, pool, day="2026-09-15")
+    _ingest(crosswalked_db, payload, pool, day="2026-09-16")
+    report = state.ir_rule_check(crosswalked_db, as_of="2026-09-16", season=2026)
+    assert len(report.ir_occupants) == 1
+    assert "may NOT stay" not in report.headline
+    assert state.ir_occupancy_verdict(0, "QUESTIONABLE") == "OK"
+    assert state.ir_occupancy_verdict(0, "ACTIVE") == "INVALID"

@@ -408,7 +408,7 @@ def test_the_blocked_path_never_resolves_the_lazy_swap_matrix(db, marginal_world
     """A refusal must not cost more than the refusal. `MarginalBoard.swaps` is
     lazy and re-pricing it costs more than the whole rest of the scan; the
     blocked path plans no claims, so the collector takes the board and stops."""
-    _world(marginal_world, injury="QUESTIONABLE")   # 17 of 16 -> illegal
+    _world(marginal_world, injury="ACTIVE")   # 17 of 16 -> illegal
     collect = WaiverArtifacts()
     plan = _plan(db, collect=collect)
 

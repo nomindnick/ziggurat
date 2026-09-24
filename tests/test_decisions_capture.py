@@ -619,7 +619,7 @@ def test_a_blocked_roster_captures_the_refusal_and_never_prices_the_matrix(
     capture records the refusal — and must NOT resolve the lazy swap matrix to do
     it: an archive of a refusal that costs more than the refusal is a tax on the
     one page the operator needs fastest."""
-    _world(marginal_world, injury="QUESTIONABLE")   # the IR occupant resets out
+    _world(marginal_world, injury="ACTIVE")   # the IR occupant resets out
     art = _collect(db)
     assert art.plan.blocked is True
     result = _freeze(db, art, tmp_path, capture_id="cap-1")

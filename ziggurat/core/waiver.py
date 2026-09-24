@@ -20,10 +20,13 @@ precheck (``check_legality``). It prices NOTHING itself:
 
 THE ONE PIECE 3.4 OWNS — legality. ``active_players`` / ``build_board`` strip
 EVERY ``lineup_slot=='IR'`` row unconditionally, which is correct for pricing a
-legal roster but wrong for the precheck: an IR occupant whose ``injury_status``
-is no longer IR-eligible (Tuesday's league-wide reset flips OUT -> QUESTIONABLE)
-is forced by ESPN back onto the active roster, pushing it from 16 to 17 and
-BLOCKING every transaction until a drop restores 16. So ``check_legality``
+legal roster but wrong for the precheck: an IR occupant who may no longer STAY
+(ESPN's documented rule: he has NO injury designation again, or is suspended —
+NOT a QUESTIONABLE/DOUBTFUL occupant, who may stay) makes the roster INVALID and
+can only leave by a move to the bench, so he counts against the 16 active slots
+and a full roster needs a drop before ESPN processes anything. (Until 2026-09-24
+this paragraph said Tuesday's OUT -> QUESTIONABLE reset caused it — the reverse
+of ESPN's rule.) So ``check_legality``
 recounts IR itself from the RAW rows, independent of ``build_board`` (which
 RAISES ``WeekResolutionError`` on any state with ``scoring_period==0`` and no
 resolvable schedule — i.e. the live DB and every synthetic test state).
@@ -33,10 +36,14 @@ serves a per-player ``injured`` boolean, now ingested (migration 014), and it
 marks EXACTLY the OUT/INJURY_RESERVE designations this module treats as
 IR-eligible — 0 exceptions over the 1,036-player universe. That half is settled
 and is re-checked on every snapshot by ``state.ir_rule_check`` /
-``ziggurat league ir-check``. What is NOT settled is what ESPN's IR SLOT accepts:
-NO roster in this league has ever used the slot (0 of 10), so the mechanism
-behind ``IR_FIX_MODEL_LABEL`` is still UNVERIFIED and says so on every plan that
-rests on an IR occupant.
+``ziggurat league ir-check``. What ESPN's IR SLOT accepts is a second question
+with two halves (2026-09-24): ENTRY ({OUT, INJURY_RESERVE}) was observed on the
+ESPN website and the league's first occupants followed; OCCUPANCY is ESPN's own
+documented rule (``league_state.IR_RULES_SOURCE``) — a QUESTIONABLE or DOUBTFUL
+occupant may STAY, only an occupant with no designation (or a suspension) makes
+the roster invalid. Until that date this module treated a QUESTIONABLE occupant as
+the canonical illegal roster, the reverse of ESPN's rule. ``IR_FIX_MODEL_LABEL``
+says which parts are documented, which observed, and what is still unseen.
 
 (``eligibleSlots`` was the plan's assumed source of machine truth and is NOT one:
 slot 21 (IR) is listed for 1,036 of 1,036 players, alongside slot 20 (BE). It is
@@ -113,6 +120,9 @@ from ziggurat.league import state as league_state
 # ``sync.format_status`` needs the standing check (item 3.8a). Re-exported here so
 # ``waiver.IR_ELIGIBLE_STATUSES`` still resolves for every existing caller.
 IR_ELIGIBLE_STATUSES = league_state.IR_ELIGIBLE_STATUSES
+# Who may STAY once in the slot — wider than who may ENTER (ESPN's documented rule;
+# see ``league_state.IR_RULES_SOURCE``).
+IR_OCCUPANCY_OK_STATUSES = league_state.IR_OCCUPANCY_OK_STATUSES
 
 # THE SETTLED HALF (item 3.8a, measured 2026-09-02). ESPN's own per-player
 # ``injured`` boolean is ingested and it marks exactly this set. The words
@@ -123,10 +133,11 @@ IR_ELIGIBLE_LABEL = (
     "this system treats as IR-slot eligible — measured 2026-09-02 with 0 exceptions "
     "(n=1,036 across the whole player universe; n=160 rostered, where only one "
     "player carried it), and re-checked on EVERY snapshot by `ziggurat league "
-    "ir-check`. `ziggurat league status` says so only when it changes. DOUBTFUL / "
-    "PUP / NFI have never appeared in this league and remain treated as "
-    "INELIGIBLE — that is a watch, not a confirmation: the first one to appear is "
-    "reported with the flag ESPN gave it."
+    "ir-check`. `ziggurat league status` says so only when it changes. That set "
+    "is who may ENTER the IR slot; a player already IN it may stay at QUESTIONABLE "
+    "or DOUBTFUL (ESPN's documented rule). PUP / NFI have never appeared in this "
+    "league and are treated as ineligible to enter — a watch, not a confirmation: "
+    "the first one to appear is reported with the flag ESPN gave it."
 )
 
 # Acquisition kinds — the claims-vs-FCFS distinction, keyed ONLY on roster_status
@@ -136,40 +147,32 @@ KIND_WAIVER = ACQ_WAIVER            # roster_status 'WAIVERS': a queued, priorit
 KIND_FREE_AGENT = ACQ_FREE_AGENT    # roster_status 'FREEAGENT': first-come-first-served
 KIND_UNKNOWN = ACQ_UNKNOWN          # anything else (incl. a leaked 'ONTEAM'): verify, never silent FCFS
 
-# THE HALF THAT IS STILL UNVERIFIED (item 3.8a). The `injured` flag settles which
-# DESIGNATIONS we call IR-eligible; it says nothing about what ESPN's IR SLOT
-# actually accepts, or when ESPN blocks a transaction. Nothing in this league has
-# shown us either: 0 of 10 rosters have ever occupied the IR slot, every roster
-# entry reads injuryStatus NORMAL, and every team reads isTransactionLocked false.
-# ESPN's IR eligibility is additionally a league-level UI setting we have NOT
-# located anywhere in `settings`. So this stays a LABELLED HYPOTHESIS (Rule 6),
-# narrowed to exactly the mechanics, and it is printed only when a verdict rests
-# on an IR occupant.
-#
-# FIRST OBSERVATION, 2026-09-03 (operator, ESPN WEBSITE — there is no app on this
-# side): the roster page exposes moves ONLY through a per-player MOVE button that
-# lists the destinations ESPN will accept, and on a 16/16 roster with 0/1 IR and
-# no OUT/INJURY_RESERVE player (ten ACTIVE, five QUESTIONABLE, one DAY_TO_DAY),
-# NO player was offered IR — only starter<->bench swaps. So the eligibility gate
-# is enforced by ESPN on the way IN, and the "refusal" the old ask told the
-# operator to read is an ABSENT option, not a message. That settles the NEGATIVE
-# half of (b): an ineligible body cannot be put on IR. It does NOT settle the
-# positive half (that an OUT/IR player IS offered the slot — the roster carried
-# none to try), nor (a) or (c), which need a real occupant who heals.
+# THE IR-SLOT MECHANISM (item 3.8a; rewritten 2026-09-24). The `injured` flag
+# settles which DESIGNATIONS may enter; what the SLOT itself does was unverified
+# until three things landed on one day:
+#   * OBSERVED (operator, ESPN website): IR is not on the per-player MOVE menu — the
+#     2026-09-03 "nobody was offered IR" reading of that menu was therefore void —
+#     it has its own "Add to IR" button whose page listed exactly the one OUT
+#     player (a DAY_TO_DAY and fourteen ACTIVE players withheld); the first
+#     occupant (Reed, OUT) was accepted and held, 16/16 active + 1/1 IR, legal.
+#   * DOCUMENTED (ESPN Fan Support, updated 2026-08-18, surfaced by the
+#     narrative-experiment Cowork report and fetched by the session): a
+#     QUESTIONABLE/DOUBTFUL occupant may STAY and the roster stays valid; an
+#     occupant with NO designation makes the roster INVALID until the user moves
+#     him; suspended players are never eligible. So hypothesis (a) as first
+#     written — "ESPN forces an ineligible player onto your active roster" — was
+#     wrong in mechanism: ESPN does not move him, it refuses transactions until YOU
+#     do. The fix this module proposes is the same move either way.
+#   * STILL UNSEEN in this league: the INVALID transition itself.
 IR_FIX_MODEL_LABEL = (
-    "hypothesis: this IR-legality fix model assumes ESPN (a) forces an IR-ineligible "
-    "player onto your active roster, (b) accepts an IR-eligible bench body moved into "
-    "a freed IR slot, and (c) only blocks transactions when your ACTIVE roster is "
-    "oversized or your IR slot is over capacity. UNVERIFIED — no roster in this "
-    "league has ever used the IR slot (0 of 10 as of 2026-09-03) and ESPN's IR "
-    "eligibility is a league-level setting we have not found in `settings`. One "
-    "half is now observed (2026-09-03, ESPN website): a player's MOVE button lists "
-    "only the moves ESPN accepts, and it offered IR to NOBODY on a roster with no "
-    "OUT/INJURY_RESERVE player — so an ineligible body cannot be put on IR. Still "
-    "open: whether an OUT/IR player IS offered the slot (open his MOVE menu the "
-    "first time one is on your roster — ~30 s), and what ESPN does when an occupant "
-    "heals — (a) and (c) need the first real occupant, which `ziggurat league "
-    "ir-check` reports with ESPN's own flag."
+    "IR-slot rules this fix follows — ENTRY observed 2026-09-24 on the ESPN website "
+    "(the \"Add to IR\" button, not the MOVE menu, lists exactly the players ESPN "
+    "will accept; an OUT player was accepted and held). OCCUPANCY is ESPN's "
+    "documented rule, not yet seen here: a player already on IR may stay at "
+    "QUESTIONABLE or DOUBTFUL, but one with NO injury designation (or a suspension) "
+    "makes your roster INVALID — ESPN then processes no claim or add until you move "
+    "him to the bench, which needs an open active slot (a drop if you have none). "
+    "`ziggurat league ir-check` lists every occupant with ESPN's own flag."
 )
 
 # The staleness banner shouts past this many days between the data's pull date and
@@ -261,16 +264,17 @@ def _ir_eligible(row: Mapping) -> bool:
 
 
 def _ir_status(row: Mapping) -> str:
-    """Three-way IR-slot classification (item 3.4 audit F7; flag-first since 3.8a).
+    """Three-way IR-slot ENTRY classification (item 3.4 audit F7; flag-first since
+    3.8a): may this player be MOVED INTO the IR slot? Whether an occupant may STAY
+    is a different, wider rule — ``_ir_occupancy`` (ESPN's documented rule,
+    2026-09-24); ``check_legality`` uses that one.
 
     ELIGIBLE  — ESPN's own ``injured`` flag is set, or (when the flag was not
                 captured) ESPN lists him OUT / INJURY_RESERVE.
-    UNKNOWN   — no flag AND a blank injury_status: we CANNOT say he is ineligible,
-                so he does NOT re-count against the active cap; we surface a
-                verify note.
+    UNKNOWN   — no flag AND a blank injury_status: no evidence either way.
     INELIGIBLE — the flag is explicitly false, or (uncaptured) any other explicit
-                status (QUESTIONABLE, ACTIVE, ...): ESPN forces him onto the
-                active roster, so he DOES re-count.
+                status (QUESTIONABLE, ACTIVE, ...): ESPN will not offer him the
+                slot (the "Add to IR" page withholds him, observed 2026-09-24).
 
     ESPN'S OWN FLAG WINS WHEN WE HAVE IT. It is the same field the app reads, and
     on 2026-09-02 it agreed with the designation rule on all 1,036 players — but
@@ -289,6 +293,59 @@ def _ir_status(row: Mapping) -> str:
     if tok in IR_ELIGIBLE_STATUSES:
         return "ELIGIBLE"
     return "INELIGIBLE"
+
+
+def _ir_occupancy(row: Mapping) -> str:
+    """ESPN's OCCUPANCY rule for a row already in the IR slot: ``OK`` / ``INVALID``
+    / ``UNKNOWN`` (see ``league_state.ir_occupancy_verdict``). Wider than ENTRY
+    (``_ir_status``): a QUESTIONABLE/DOUBTFUL occupant may stay."""
+    return league_state.ir_occupancy_verdict(row.get("injured"), row.get("injury_status"))
+
+
+def _ir_occupant_reason(row: Mapping) -> str:
+    """How we decided whether this OCCUPANT may stay in the IR slot (Rule 6)."""
+    name = str(row.get("player") or row.get("espn_player_id") or "?")
+    tag = row.get("injury_status") or "blank"
+    verdict = _ir_occupancy(row)
+    if verdict == "INVALID":
+        return f"{name}: {_ir_ineligible_because_row(row)}."
+    if row.get("injured"):
+        return (f"{name}: ESPN's own `injured` flag reads TRUE (his injury tag is "
+                f"{tag}), so he may stay in your IR slot.")
+    if verdict == "OK" and str(tag).strip().upper() in IR_ELIGIBLE_STATUSES:
+        return (f"{name}: ESPN's `injured` flag was NOT captured for this player in "
+                f"this snapshot; his injury tag ({tag}) is an IR designation, so he may "
+                f"stay in your IR slot (tag PROXY — re-run `ziggurat league sync`).")
+    if verdict == "OK":
+        return (f"{name}: ESPN lists him {tag} — he could not be MOVED INTO IR today, "
+                f"but a player already in the slot may STAY at QUESTIONABLE or "
+                f"DOUBTFUL and your roster stays valid (ESPN's IR rules).")
+    return (f"{name}: {_ir_unknown_why(row)} — we did NOT count him against your "
+            f"active roster; confirm on the ESPN roster page.")
+
+
+def _ir_unknown_why(row: Mapping) -> str:
+    """Why an occupant's STAY cannot be verified — the three UNKNOWN cases say
+    different things, and a blank tag must never be quoted as a designation."""
+    tag = str(row.get("injury_status") or "").strip()
+    if row.get("injured") is None and not tag:
+        return ("his ESPN injury status is blank and the `injured` flag was not "
+                "captured, so there is no evidence either way")
+    if tag.upper() in IR_ELIGIBLE_STATUSES and row.get("injured") is not None \
+            and not row.get("injured"):
+        return (f"ESPN's own `injured` flag reads FALSE while his injury tag says "
+                f"{tag} — those two ESPN fields DISAGREE, which this league has never "
+                f"shown us, and a FALSE flag alone does not mean he is healthy (every "
+                f"QUESTIONABLE/DOUBTFUL player carries one)")
+    return (f"ESPN lists him {tag}, a designation ESPN's IR rules do not cover "
+            f"(they cover QUESTIONABLE/DOUBTFUL = may stay, no designation = invalid)")
+
+
+def _ir_ineligible_because_row(row: Mapping) -> str:
+    return _ir_ineligible_because(IRIneligible(
+        player=str(row.get("player") or "?"), position=row.get("position"),
+        espn_id=None, injury_status=row.get("injury_status"),
+        injured=row.get("injured")))
 
 
 def _ir_reason(row: Mapping) -> str:
@@ -311,26 +368,25 @@ def _ir_reason(row: Mapping) -> str:
 
 
 def _ir_ineligible_because(o: "IRIneligible") -> str:
-    """WHY this occupant is not IR-eligible, naming the signal that DECIDED it.
+    """WHY this occupant makes the roster INVALID, naming the signal that decided.
 
-    ``_ir_status`` is flag-first, so on the only rows where the flag changes an
-    answer — the divergence case — quoting the injury TAG contradicts the page's
-    own label three lines away. Say which field decided, and say plainly when the
-    two disagree: this league has never served that case, so it is not something
-    to state in passing (audit fix).
+    Under ESPN's occupancy rule only two things do that: NO injury designation (he
+    is healthy again) or a suspension. The flag/tag divergence (flag FALSE beside
+    an OUT/IR tag) is NOT one of them — it is UNKNOWN (``_ir_unknown_why``), because
+    a FALSE flag alone does not mean healthy.
     """
-    tag = o.injury_status or "no injury designation"
+    tok = str(o.injury_status or "").strip().upper()
+    if tok == "SUSPENSION":
+        return ("ESPN lists him SUSPENDED, and suspended players may not be in the IR "
+                "slot (ESPN's IR rules)")
+    healthy = ("he is healthy again, and ESPN's IR rules make your roster INVALID "
+               "while a healthy player sits in the IR slot")
     if o.injured is None:
-        return (f"ESPN lists him {tag}, not IR-eligible (his `injured` flag was not "
-                f"captured, so this is the injury-tag PROXY)")
-    tag_says_eligible = str(o.injury_status or "").strip().upper() in IR_ELIGIBLE_STATUSES
-    if not o.injured and tag_says_eligible:
-        return (f"ESPN's own `injured` flag reads FALSE for him even though his injury "
-                f"tag says {tag} — those two ESPN fields DISAGREE, which this league "
-                f"has never shown us before, and we follow the FLAG, so he is not "
-                f"IR-eligible")
-    return (f"ESPN's own `injured` flag reads FALSE for him (his injury tag says "
-            f"{tag}), so he is not IR-eligible")
+        return (f"ESPN lists him {o.injury_status or 'with no injury designation'} — "
+                f"{healthy} (ESPN's `injured` flag was NOT captured for this player, so "
+                f"this rests on the injury-tag PROXY)")
+    return (f"ESPN's own `injured` flag reads FALSE for him and his injury tag says "
+            f"{o.injury_status or 'nothing'} — {healthy}")
 
 
 # ------------------------------------------------------------------- output rows
@@ -338,8 +394,10 @@ def _ir_ineligible_because(o: "IRIneligible") -> str:
 
 @dataclass(frozen=True)
 class IRIneligible:
-    """An IR-slot occupant whose injury designation is not IR-eligible — the
-    reference that names the CAUSE of an illegal roster (the Tuesday-reset crux)."""
+    """An IR-slot occupant who may NOT stay there under ESPN's occupancy rule (no
+    injury designation, or suspended) — the reference that names the CAUSE of an
+    invalid roster. (Until 2026-09-24 a QUESTIONABLE occupant landed here; ESPN's
+    documented rule lets him stay.)"""
 
     player: str
     position: str | None
@@ -362,10 +420,11 @@ class IRIneligible:
 class LegalityVerdict:
     """Whether ESPN will process ANY transaction for this roster, and why not.
 
-    ``active_count`` recounts IR itself: non-IR players PLUS IR occupants who are
-    no longer IR-eligible (ESPN forces them back onto the active roster). Illegal
-    when that exceeds ``active_slots``, or more than ``ir_slots`` sit in IR, or any
-    IR occupant is IR-ineligible.
+    ``active_count`` recounts IR itself: non-IR players PLUS IR occupants who may no
+    longer stay (no injury designation, or suspended — ESPN's occupancy rule), since
+    the only fix for one is a move to the bench. Blocked when that exceeds
+    ``active_slots`` or more than ``ir_slots`` sit in IR; an invalid occupant on a
+    roster with room is a REQUIRED move that must come first (``ir_advisories``).
     """
 
     legal: bool
@@ -375,7 +434,7 @@ class LegalityVerdict:
     ir_slots: int
     ir_ineligible: tuple[IRIneligible, ...]
     ir_advisories: tuple[str, ...]   # required, NON-blocking roster moves (F1)
-    ir_unverified: tuple[str, ...]   # blank-status IR occupants we could not verify (F7)
+    ir_unverified: tuple[str, ...]   # IR occupants whose stay we could not verify (F7)
     violations: tuple[str, ...]
     reasons: tuple[str, ...]
     # Per-occupant: WHICH signal decided his eligibility — ESPN's own `injured`
@@ -660,14 +719,16 @@ def check_legality(
 
         active_count = |non-IR rows| + |IR occupants who are INELIGIBLE|
 
-    because an IR-ineligible occupant is forced by ESPN back onto the active
-    roster. The roster is BLOCKED iff ``active_count > active_slots`` OR
-    ``ir_count > ir_slots`` (item 3.4 audit F5). The ineligible occupant is
-    ALREADY folded into ``active_count``, so he is NOT ALSO an independent
-    illegality source — that made the old fix non-restorative (dropping bodies
-    could never clear it). An ineligible occupant on a NON-oversized roster is
-    LEGAL: ESPN simply benches him. He is tracked for the cause/reason text and
-    surfaced as a required (non-blocking) roster move.
+    because an occupant who may no longer STAY (ESPN's occupancy rule: no injury
+    designation, or suspended — NOT QUESTIONABLE/DOUBTFUL, who may stay) can only
+    leave by a move to the bench. The roster is BLOCKED iff ``active_count >
+    active_slots`` OR ``ir_count > ir_slots`` (item 3.4 audit F5). The invalid
+    occupant is ALREADY folded into ``active_count``, so he is NOT ALSO an
+    independent illegality source — that made the old fix non-restorative
+    (dropping bodies could never clear it). On a roster with room the move costs no
+    drop, so the verdict stays "legal" for PLANNING and the move is surfaced as a
+    REQUIRED roster move that must be made FIRST: ESPN marks the roster INVALID
+    and processes nothing until he is off the slot.
     """
     ir_rows = [r for r in roster_rows if _slot(r) == "IR"]
     non_ir = [r for r in roster_rows if _slot(r) != "IR"]
@@ -681,9 +742,9 @@ def check_legality(
             droppable=r.get("droppable"),
         )
         for r in ir_rows
-        if _ir_status(r) == "INELIGIBLE"
+        if _ir_occupancy(r) == "INVALID"
     )
-    unknown_rows = [r for r in ir_rows if _ir_status(r) == "UNKNOWN"]
+    unknown_rows = [r for r in ir_rows if _ir_occupancy(r) == "UNKNOWN"]
     active_count = len(non_ir) + len(ineligible)
     ir_count = len(ir_rows)
 
@@ -712,25 +773,36 @@ def check_legality(
 
     legal = not violations
 
-    # Required, NON-blocking roster moves: an ineligible occupant must leave the IR
-    # slot even when the roster is legal (ESPN will bench him) (F1).
+    # Required roster moves: an invalid occupant must leave the IR slot even when
+    # the roster has room — and FIRST, because ESPN processes nothing while the
+    # roster is invalid (F1; ESPN's documented rule since 2026-09-24).
     ir_advisories = tuple(
-        f"REQUIRED ROSTER MOVE: move {o.player} out of your IR slot to the bench — "
-        f"{_ir_ineligible_because(o)}, and ESPN will not let an IR-ineligible player "
-        f"stay on IR (he counts against your {structure.active_slots} active slots)"
+        f"REQUIRED ROSTER MOVE — DO THIS FIRST: move {o.player} out of your IR slot "
+        f"to the bench — {_ir_ineligible_because(o)}; ESPN processes no claim or add "
+        f"until he is off the IR slot (he counts against your "
+        f"{structure.active_slots} active slots)"
         for o in ineligible
     )
     # Blank-status IR occupants: UNKNOWN, not a proof of illegality (F7).
     ir_unverified = tuple(
-        f"could not verify IR eligibility for "
-        f"{str(r.get('player') or r.get('espn_player_id') or '?')} — his ESPN injury "
-        f"status is blank, so we did NOT count him against your active roster; confirm "
-        f"in the ESPN app that ESPN accepts him on IR"
+        f"could not verify that ESPN lets "
+        f"{str(r.get('player') or r.get('espn_player_id') or '?')} stay in your IR slot "
+        f"— {_ir_unknown_why(r)} — so we did NOT count him against your active "
+        f"roster; confirm on the ESPN roster page"
         for r in unknown_rows
     )
 
     reasons: list[str] = []
-    if legal:
+    if legal and ineligible:
+        # Room exists, so the move costs no drop — but ESPN marks the roster INVALID
+        # until it is made, so "ESPN will process claims" would be false here.
+        reasons.append(
+            f"roster INVALID until you make the REQUIRED ROSTER MOVE below (it needs no "
+            f"drop): after it, {active_count} of {structure.active_slots} active slots "
+            f"used — until then ESPN processes no claim or add. The claims below "
+            f"assume the move is made."
+        )
+    elif legal:
         reasons.append(
             f"roster legal: {active_count} of {structure.active_slots} active slots "
             f"used, {ir_count} of {structure.ir_slots} IR slot used — ESPN will "
@@ -744,7 +816,7 @@ def check_legality(
         reasons.extend(violations)
     # How each occupant's eligibility was decided — ESPN's own flag, or the proxy
     # (item 3.8a). Rule 6: a destructive instruction ships the evidence behind it.
-    ir_flag_notes = tuple(_ir_reason(r) for r in ir_rows)
+    ir_flag_notes = tuple(_ir_occupant_reason(r) for r in ir_rows)
 
     reasons.extend(ir_advisories)
     reasons.extend(ir_unverified)
@@ -796,7 +868,8 @@ def _zero_drop_reslot(
     Restorative by construction: it simulates the moves and only returns them when
     ``check_legality`` on the result is legal.
 
-    1. Bench every non-ELIGIBLE IR occupant (ESPN forces them off IR anyway).
+    1. Bench every IR occupant who may not STAY (occupancy INVALID, or UNKNOWN —
+       a fix is only proposed on a blocked roster, and it must be restorative).
     2. Bench any still-excess IR occupants (ir_count > ir_slots).
     3. Seat IR-eligible active bodies into freed IR slots while the active roster is
        oversized — each seating frees one active slot.
@@ -813,7 +886,7 @@ def _zero_drop_reslot(
         return str(r.get("player") or r.get("espn_player_id") or "?")
 
     for r in rows:
-        if _slot(r) == "IR" and _ir_status(r) != "ELIGIBLE":
+        if _slot(r) == "IR" and _ir_occupancy(r) != "OK":
             r["lineup_slot"] = "BE"
             benched.append(name(r))
     while sum(1 for r in rows if _slot(r) == "IR") > structure.ir_slots:
@@ -837,16 +910,17 @@ def _zero_drop_reslot(
 
 
 def _cause_phrase(verdict: LegalityVerdict) -> str:
-    """A one-line 'why you are over' naming the IR-ineligible occupant(s)."""
+    """A one-line 'why you are over' naming the occupant(s) who may not stay on IR."""
     if verdict.ir_ineligible:
         names = "; ".join(
-            f"{o.player} reset to {o.injury_status or 'no injury designation'} in your "
-            f"IR slot (no longer IR-eligible)"
+            f"{o.player} is in your IR slot with "
+            f"{o.injury_status or 'no injury designation'} (may no longer stay on IR)"
             for o in verdict.ir_ineligible
         )
         return (
             f"your active roster is {verdict.active_count} of {verdict.active_slots} "
-            f"because {names}, so ESPN counts him on your active roster"
+            f"because {names}, so he counts against your active roster until he is "
+            f"moved to the bench"
         )
     return (
         f"your active roster is {verdict.active_count} of {verdict.active_slots}"
@@ -1690,7 +1764,7 @@ def build_waiver_plan(
     ``view`` threaded into every accessor.
 
     1. Fetch the RAW roster (IR rows included) via ``get_player_state``.
-    2. ``check_legality`` FIRST. If illegal: reslot IR-ineligible occupants
+    2. ``check_legality`` FIRST. If illegal: reslot occupants who may not stay on IR
        IR->BE, price ONE ``build_board`` scan to name the forced drop (guarding
        ``WeekResolutionError`` so a missing week window does not crash), and
        RETURN ``blocked`` with ``claims=()`` — the done-when.
@@ -1941,9 +2015,9 @@ def build_waiver_plan(
                 )
             else:
                 notes.append(
-                    f"you may instead DROP {o.player} himself (the IR-ineligible "
-                    f"occupant) — dropping him also frees the active slot he now "
-                    f"counts against."
+                    f"you may instead DROP {o.player} himself (the occupant who may "
+                    f"no longer stay on IR) — dropping him also frees the active slot "
+                    f"he now counts against."
                 )
         if verdict.ir_count > roster_structure.ir_slots and ir_move_fix == ():
             droppable_names = [o.player for o in verdict.ir_ineligible if o.droppable != 0]
@@ -2609,10 +2683,9 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
             return []
         out = [f"  NOTE: {note}" for note in v.ir_flag_notes]
         out.append(
-            "  NOTE: what ESPN's IR SLOT itself accepts, and exactly when ESPN blocks "
-            "a transaction, is UNVERIFIED — no roster in this league has ever used the "
-            "IR slot. Confirm on the ESPN roster page (each player's MOVE button lists "
-            "only the moves ESPN accepts) before you drop or bench anyone."
+            f"  NOTE: {IR_FIX_MODEL_LABEL} Before you drop or bench anyone, check the "
+            "ESPN roster page: the \"Add to IR\" button lists who may enter the slot "
+            "(the MOVE button did not offer IR to anyone, observed 2026-09-24)."
         )
         return out
 

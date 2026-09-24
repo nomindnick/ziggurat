@@ -156,7 +156,10 @@ def build_briefing(
                 source=source, view=view, today=today, history=history,
             )
             n_claims = len(plan.claims)
-            legal = not plan.blocked
+            # An occupant who may no longer stay on IR makes ESPN's roster INVALID
+            # even when there is room to bench him (ESPN's documented rule), so the
+            # teaser must not read "legal" while the page says "DO THIS FIRST".
+            legal = not plan.blocked and not plan.legality.ir_advisories
             sections.append(BriefingSection(
                 "WAIVERS", waiver.format_waiver_plan(plan, reasons=False)))
         except (league_state.OwnTeamUnresolved, marginal.WeekResolutionError) as exc:

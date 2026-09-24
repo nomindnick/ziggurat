@@ -3061,6 +3061,82 @@ does not change the verdict, because the leading factor is measured at zero.
 > is on your roster"), the word UNVERIFIED stays, and the `ir-check` pin
 > (`test_ir_check_names_the_app_check_that_settles_the_item_today`) now asserts
 > the observation is printed and the app-drag wording is gone.
+> **Second observation, 2026-09-24 — and a CORRECTION to the first (operator,
+> ESPN website).** Jayden Reed (ESPN `OUT`, `injured`=1) was on the roster. **The
+> MOVE button does NOT carry IR at all**: it offered Reed a starting-lineup slot and
+> nothing else. IR has its OWN control. An "Add to IR" button opens a separate
+> page, and on that page **Reed was the only player listed**. The same roster also
+> held Josh Jacobs (DAY_TO_DAY, `injured`=0) and fourteen ACTIVE players; none of
+> them was listed. Two consequences:
+> (1) **the 2026-09-03 "negative half" is VOID as evidence.** It read IR's absence
+> from a menu that never lists IR, so it said nothing about eligibility.
+> (2) **today's page is the real observation, and it covers BOTH halves of (b) on
+> the way in.** ESPN's own IR picker offers exactly the set `IR_ELIGIBLE_STATUSES`
+> predicts. It offered an OUT player and withheld a DAY_TO_DAY player and 14 ACTIVE
+> ones. That is n=1 eligible and n=15 ineligible on one roster, and nothing was
+> clicked, so "offered" is not yet "accepted and held". (a) and (c) are still open:
+> they need a real occupant who heals.
+> **Operator-facing text was wrong (corrected the same day; see the fix note
+> below):**
+> `waiver.IR_FIX_MODEL_LABEL`, the plan-renderer IR note (`waiver.py` ~2614), the
+> `ir-check` ask (`league/state.py` ~2037), its pin at
+> `tests/test_league_state.py:1345`, and CLAUDE.md's 3.8 paragraph all still say
+> "open his MOVE menu". They should name the "Add to IR" button and retire the
+> 09-03 negative-half sentence.
+> **Third observation, 2026-09-24 09:30 PT — OUR first occupant.** (Not the
+> league's first: team 8 has held A.J. Brown, INJURY_RESERVE, in its IR slot
+> since 2026-09-15. Nothing here noticed, because `ir-check` only headlines news.)
+> On the
+> session's recommendation, the operator moved Reed (OUT) to IR and added DK
+> Metcalf into the freed active slot. The sync shows:
+> - a LINEUP transaction at 09:30:20;
+> - Reed at `lineup_slot` IR;
+> - the Metcalf ADD at 09:30:32;
+> - `waivers` reads "16 of 16 active, 1 of 1 IR — legal".
+> **(b) is now OBSERVED: ESPN accepted an OUT player and held him in the IR
+> slot.** The league now has three occupants (teams 4, 8, 10), so the "0 of 10
+> ever used" sentences are stale.
+> **(a)/(c) now have a DOCUMENTED answer, which our model contradicts.** Source:
+> ESPN Fan Support, "Players on Injured Reserve (IR)", updated 2026-08-18,
+> fetched 09-24. It was surfaced by the narrative-experiment Cowork report and
+> verified by the session:
+> - "If a player in the IR slot has their status updated from OUT or IR to
+>   QUESTIONABLE or DOUBTFUL, the user's roster is NOT invalid … can make
+>   claims/add players";
+> - "If a player goes from OUT to no longer having an injury designation, the
+>   user's roster becomes INVALID";
+> - "Suspended players (SSPD) are NOT eligible".
+> So **`check_legality` is wrong for occupancy**: it counts a Q/D occupant as
+> INELIGIBLE and would print a false BLOCKED plus a "REQUIRED ROSTER MOVE". And
+> **(a) is wrong as worded**: ESPN does not force the player back onto the
+> active roster. The roster goes INVALID, and the user fixes it.
+> The fix needs two separate rules:
+> - ENTRY: {OUT, INJURY_RESERVE}, which is unchanged;
+> - OCCUPANCY: entry ∪ {QUESTIONABLE, DOUBTFUL}. Invalid only at no
+>   designation; DAY_TO_DAY is undocumented.
+> This is doc-sourced, not yet observed.
+> **Fixed 2026-09-24, same day (operator-approved).**
+> - `league/state.py` now holds the two rules: ENTRY (`IR_ELIGIBLE_STATUSES`)
+>   and OCCUPANCY (`IR_OCCUPANCY_OK_STATUSES` / `ir_occupancy_verdict`, verdict
+>   OK / INVALID / UNKNOWN, with suspension checked first).
+> - `waiver.check_legality` now judges occupants by occupancy, not entry.
+> - A healthy occupant on a roster with room is reported as "roster INVALID
+>   until you make the REQUIRED ROSTER MOVE below". The briefing teaser reads it
+>   as not legal.
+> - A false flag beside an OUT/IR tag is now UNKNOWN (a false flag does not mean
+>   healthy). It used to force a drop.
+> - `ir-check`'s headline no longer alarms on a Q/D occupant.
+> - Label, disclosure, CLI help, SPEC §7 and the CLAUDE.md Tuesday step were
+>   rewritten.
+> - A 50-tool-call Opus adversarial review found 4 major issues and roughly 10
+>   minor ones; all were fixed. Among them: a daily false `IR RULE CHECK` alarm
+>   for every Q/D occupant league-wide, a legal page that contradicted its own
+>   REQUIRED line, and the destructive divergence case.
+> - New tests pin Q/D may stay, a healthy occupant is invalid, SUSPENSION with
+>   the flag set is invalid, DAY_TO_DAY is UNKNOWN, the zero-drop fix benches
+>   only the healthy occupant, and a Q occupant is not daily news.
+> Still unobserved in this league: the INVALID transition itself (a healed
+> occupant).
 > *DOUBTFUL / PUP / NFI remain **UNOBSERVED** and remain treated as INELIGIBLE.*
 > They are not settled; they are WATCHED. `ir_rule_check` carries an
 > unobserved-status baseline (the seven designations this league had served by

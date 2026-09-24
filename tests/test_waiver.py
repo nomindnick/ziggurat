@@ -82,7 +82,7 @@ _POOL_SPECS = [
 ]
 
 
-def _world(marginal_world, injury="QUESTIONABLE"):
+def _world(marginal_world, injury="ACTIVE"):
     specs = _active_specs() + [_ir_spec(injury)] + _POOL_SPECS
     marginal_world(specs, retrieved=PULL)
 
@@ -125,13 +125,48 @@ def test_an_ir_out_occupant_does_not_count_active():
     assert v.ir_ineligible == ()
 
 
-def test_an_ir_questionable_occupant_re_counts_active_and_is_illegal():
+def test_an_ir_questionable_or_doubtful_occupant_may_STAY_per_espns_rules():
+    """ESPN Fan Support, "Players on Injured Reserve (IR)" (updated 2026-08-18):
+    an occupant whose status moves from OUT/IR to QUESTIONABLE or DOUBTFUL keeps
+    the roster VALID. Until 2026-09-24 this was the suite's canonical ILLEGAL
+    roster — the reverse of ESPN's rule, and it would have told the operator to
+    drop a player on the first Tuesday Reed (the league's first real occupant)
+    turned Questionable. CATCHES: reverting occupancy to the entry set."""
+    for tag in ("QUESTIONABLE", "DOUBTFUL"):
+        rows = [_row(eid=str(i)) for i in range(16)] + [
+            _row(slot="IR", injury=tag, eid="ir", name="Reset Guy")]
+        v = check_legality(rows)
+        assert v.legal is True, tag
+        assert v.active_count == 16 and v.ir_ineligible == () and v.ir_advisories == ()
+        assert any("may STAY" in n for n in v.ir_flag_notes), tag
+
+
+def test_a_HEALTHY_ir_occupant_re_counts_active_and_is_illegal():
+    """ESPN: an occupant with NO injury designation makes the roster INVALID."""
+    for tag in ("ACTIVE", "", None):
+        rows = [_row(eid=str(i)) for i in range(16)] + [
+            _row(slot="IR", injury=tag, eid="ir", name="Reset Guy")]
+        rows[-1]["injured"] = 0
+        v = check_legality(rows)
+        assert v.legal is False, tag
+        assert v.active_count == 17
+        assert [o.player for o in v.ir_ineligible] == ["Reset Guy"]
+
+
+def test_a_suspended_ir_occupant_is_invalid_and_an_undocumented_tag_is_UNKNOWN():
+    """SSPD is never IR-eligible (ESPN). DAY_TO_DAY is not covered by ESPN's page:
+    UNKNOWN — not counted, not silently OK, and a verify note says so."""
     rows = [_row(eid=str(i)) for i in range(16)] + [
-        _row(slot="IR", injury="QUESTIONABLE", eid="ir", name="Reset Guy")]
+        _row(slot="IR", injury="SUSPENSION", eid="ir", name="Banned Guy")]
     v = check_legality(rows)
-    assert v.legal is False
-    assert v.active_count == 17
-    assert [o.player for o in v.ir_ineligible] == ["Reset Guy"]
+    assert v.legal is False and [o.player for o in v.ir_ineligible] == ["Banned Guy"]
+    assert "SUSPENDED" in " | ".join(v.violations)
+
+    rows = [_row(eid=str(i)) for i in range(16)] + [
+        _row(slot="IR", injury="DAY_TO_DAY", eid="ir", name="Dtd Guy")]
+    v = check_legality(rows)
+    assert v.legal is True and v.active_count == 16 and v.ir_ineligible == ()
+    assert len(v.ir_unverified) == 1 and "DAY_TO_DAY" in v.ir_unverified[0]
 
 
 def test_two_ir_occupants_is_illegal_even_when_active_is_small():
@@ -186,9 +221,9 @@ def test_nothing_is_visible_before_the_snapshot_was_knowable(db, marginal_world)
 
 
 def test_an_illegal_roster_refuses_claims_and_proposes_the_fix(db, marginal_world):
-    """DONE-WHEN: 16 active + 1 IR occupant flipped to QUESTIONABLE -> 17 of 16 ->
+    """DONE-WHEN: 16 active + 1 IR occupant back to NO designation (healthy) -> 17 of 16 ->
     the plan refuses to plan claims and proposes the forced drop."""
-    _world(marginal_world, injury="QUESTIONABLE")
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
 
     assert plan.blocked is True
@@ -220,13 +255,13 @@ def test_the_flipped_ir_player_is_visible_on_the_drop_board(db, marginal_world):
     """Regression guard: build_board strips every IR row, so without reslotting the
     ineligible occupant IR->BE he is invisible to the very drop board that must
     decide the forced drop."""
-    _world(marginal_world, injury="QUESTIONABLE")
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
     assert "IR Guy" in [d.player for d in plan.drop_board]
 
 
 def test_the_forced_drop_is_the_lowest_marginal_active_player(db, marginal_world):
-    _world(marginal_world, injury="QUESTIONABLE")
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
     # drop_board is ascending (lowest = most droppable); the forced drop is its head
     assert plan.drop_board != ()
@@ -271,20 +306,20 @@ def test_a_waivers_claim_says_it_is_queued_not_a_click(db, marginal_world):
 # --------------------------------------------------- QUESTIONABLE dual semantics
 
 
-def test_questionable_breaks_legality_in_ir_but_is_a_normal_body_elsewhere():
-    """Same status, two questions: QUESTIONABLE is IR-INELIGIBLE for legality (it
-    breaks the roster) but a QUESTIONABLE player in a normal slot is just a
-    rostered body (availability treats him as expected-to-play). The two must not
-    collapse into one set."""
-    on_bench = [_row(eid=str(i)) for i in range(15)] + [
-        _row(slot="BE", injury="QUESTIONABLE", eid="q", name="Q Body")]
+def test_questionable_may_not_ENTER_ir_but_may_STAY_in_it():
+    """Same status, two questions (ESPN's rules, 2026-09-24): a QUESTIONABLE player
+    cannot be MOVED INTO the IR slot (the "Add to IR" page withholds him), but an
+    occupant who BECOMES questionable may stay. The two rules must not collapse
+    into one set — collapsing them the other way is the bug this replaced."""
+    q = _row(slot="BE", injury="QUESTIONABLE", eid="q", name="Q Body")
+    q["injured"] = 0
+    assert waiver._ir_status(q) == "INELIGIBLE"           # may not enter
+    assert waiver._ir_occupancy(dict(q, lineup_slot="IR")) == "OK"   # may stay
+    on_bench = [_row(eid=str(i)) for i in range(15)] + [q]
     assert check_legality(on_bench).legal is True         # 16 active, legal
-
-    in_ir = [_row(eid=str(i)) for i in range(16)] + [
-        _row(slot="IR", injury="QUESTIONABLE", eid="q", name="Q Body")]
+    in_ir = [_row(eid=str(i)) for i in range(16)] + [dict(q, lineup_slot="IR")]
     v = check_legality(in_ir)
-    assert v.legal is False                               # 17 active, illegal
-    assert [o.player for o in v.ir_ineligible] == ["Q Body"]
+    assert v.legal is True and v.active_count == 16       # 16 active + 1 IR, legal
 
 
 # ---------------------------------------------------------- Rule 6 (reasons)
@@ -308,9 +343,15 @@ def test_ir_eligibility_is_a_labelled_hypothesis():
     assert "UNVERIFIED" not in IR_ELIGIBLE_LABEL
     assert "post-draft" not in IR_ELIGIBLE_LABEL
     assert "measured 2026-09-02" in IR_ELIGIBLE_LABEL
-    # the MECHANISM half still is unverified, and says what settles it
-    assert "UNVERIFIED" in waiver.IR_FIX_MODEL_LABEL
-    assert "IR slot" in waiver.IR_FIX_MODEL_LABEL
+    # the MECHANISM half: since 2026-09-24 it says which part was OBSERVED (entry),
+    # which is ESPN's DOCUMENTED rule (occupancy) and what is still unseen — and it
+    # names the website control, never the MOVE menu (which never lists IR)
+    lab = waiver.IR_FIX_MODEL_LABEL
+    assert "ENTRY observed 2026-09-24" in lab
+    assert "OCCUPANCY is ESPN's documented rule, not yet seen here" in lab
+    assert "QUESTIONABLE or DOUBTFUL" in lab and "INVALID" in lab
+    assert '"Add to IR" button' in lab
+    assert "UNVERIFIED" not in lab
     # and the verdict discloses HOW this occupant was decided (Rule 6)
     assert any("injury tag" in r for r in v.ir_flag_notes)
 
@@ -359,7 +400,7 @@ def test_waiver_priority_is_reported_from_team_state(db, marginal_world):
 
 
 def test_format_puts_the_legality_block_first_when_blocked(db, marginal_world):
-    _world(marginal_world, injury="QUESTIONABLE")
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
     text = waiver.format_waiver_plan(plan, reasons=True)
     assert "ROSTER ILLEGAL" in text
@@ -373,22 +414,23 @@ def test_format_puts_the_legality_block_first_when_blocked(db, marginal_world):
 def test_check_legality_is_pure_iff_active_or_ir_over_capacity():
     """F5: an ineligible IR occupant is folded into active_count and is NOT an
     independent illegality source — the roster blocks ONLY on active>16 or ir>1."""
-    # 16 active + 1 ineligible IR = 17 -> blocked on the ACTIVE count.
+    # 16 active + 1 healthy IR occupant = 17 -> blocked on the ACTIVE count.
     over = [_row(eid=str(i)) for i in range(16)] + [
-        _row(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy")]
+        _row(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy")]
     assert check_legality(over).legal is False
-    # 15 active + 1 ineligible IR = 16 -> LEGAL (ESPN benches him), advisory only.
+    # 15 active + 1 healthy IR occupant = 16 -> legal for PLANNING; the move to the
+    # bench costs no drop but must come FIRST (ESPN processes nothing until then).
     ok = [_row(eid=str(i)) for i in range(15)] + [
-        _row(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy")]
+        _row(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy")]
     v = check_legality(ok)
     assert v.legal is True and v.active_count == 16
-    assert any("REQUIRED ROSTER MOVE" in a for a in v.ir_advisories)
+    assert any("REQUIRED ROSTER MOVE — DO THIS FIRST" in a for a in v.ir_advisories)
 
 
 def test_the_forced_drop_fix_is_restorative(db, marginal_world):
     """F5: re-running check_legality on the roster produced by APPLYING the proposed
     forced drop returns legal — the fix terminates (it used to loop forever)."""
-    _world(marginal_world, injury="QUESTIONABLE")
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
     assert plan.blocked and plan.forced_drop is not None
     rows = [dict(r) for r in waiver.league_state.get_player_state(
@@ -397,7 +439,7 @@ def test_the_forced_drop_fix_is_restorative(db, marginal_world):
     assert check_legality(after).legal is True   # RESTORATIVE / TERMINATES
 
 
-def _world_with_eligible_body(marginal_world, injury="QUESTIONABLE"):
+def _world_with_eligible_body(marginal_world, injury="ACTIVE"):
     """The crux PLUS an IR-eligible active body (OUT) that could fill a freed IR
     slot — the zero-drop move scenario (F1)."""
     specs = _active_specs()
@@ -409,16 +451,16 @@ def _world_with_eligible_body(marginal_world, injury="QUESTIONABLE"):
 def test_a_zero_drop_ir_move_is_the_primary_fix_when_an_eligible_body_exists(db, marginal_world):
     """F1: when an IR-eligible active body can be moved into the freed IR slot, the
     zero-drop move is the PRIMARY fix and the drop is demoted to an alternative."""
-    _world_with_eligible_body(db and marginal_world, injury="QUESTIONABLE")
+    _world_with_eligible_body(db and marginal_world, injury="ACTIVE")
     plan = _plan(db)
     assert plan.blocked is True
     assert plan.ir_move_fix, "the costless IR move must be surfaced"
     move_blob = " ".join(plan.ir_move_fix)
     assert "NO drop" in move_blob and "Lead Runner" in move_blob and "IR Guy" in move_blob
-    # it is disclosed as a labelled hypothesis — and since item 3.8a the label is
-    # narrowed to the IR-SLOT MECHANICS, which is the half still unverified
-    assert any("UNVERIFIED" in line for line in plan.ir_move_fix)
-    assert any("no roster in this league has ever used the IR slot" in line
+    # it carries the IR-slot rules it follows — since 2026-09-24 ENTRY is observed
+    # and OCCUPANCY is ESPN's documented rule, and the label says which is which
+    assert any("ENTRY observed 2026-09-24" in line for line in plan.ir_move_fix)
+    assert any("OCCUPANCY is ESPN's documented rule" in line
                for line in plan.ir_move_fix)
     # the DESTINATION's "(IR-eligible)" ships its per-player evidence — which field
     # decided it (ESPN's own flag, or the injury-tag proxy when the flag was not
@@ -435,7 +477,7 @@ def test_a_zero_drop_ir_move_is_the_primary_fix_when_an_eligible_body_exists(db,
 
 def test_the_zero_drop_move_actually_restores_legality(db, marginal_world):
     """F1/F5: applying the surfaced IR move yields a legal roster (restorative)."""
-    _world_with_eligible_body(db and marginal_world, injury="QUESTIONABLE")
+    _world_with_eligible_body(db and marginal_world, injury="ACTIVE")
     rows = [dict(r) for r in waiver.league_state.get_player_state(
         db, as_of=PULL, season=SEASON, on_team_id=TEAM, view="historical")]
     for r in rows:                       # apply: Lead Runner -> IR, IR Guy -> bench
@@ -449,7 +491,7 @@ def test_the_zero_drop_move_actually_restores_legality(db, marginal_world):
 def test_an_ineligible_occupant_on_a_legal_roster_is_not_blocked(db, marginal_world):
     """F1: 15 active + 1 ineligible IR = 16 -> NOT blocked; a required move advisory,
     never a forced drop."""
-    specs = _active_specs()[:15] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs = _active_specs()[:15] + [_ir_spec("ACTIVE")] + _POOL_SPECS
     marginal_world(specs, retrieved=PULL)
     plan = _plan(db)
     assert plan.blocked is False
@@ -490,12 +532,14 @@ def test_the_ir_unverified_disclosure_shows_in_the_default_blocked_view(db, marg
     `ziggurat waivers` view), under a destructive forced drop.
 
     Item 3.8a split it: the still-UNVERIFIED half is the IR SLOT MECHANISM, and a
-    per-occupant line now says WHICH signal decided his eligibility."""
-    _world(marginal_world, injury="QUESTIONABLE")
+    per-occupant line now says WHICH signal decided his eligibility. Since
+    2026-09-24 that mechanism is part observed, part ESPN-documented, and the
+    disclosure says which."""
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
     text = waiver.format_waiver_plan(plan, reasons=False)
-    assert "UNVERIFIED" in text
-    assert "what ESPN's IR SLOT itself accepts" in text
+    assert "IR-slot rules this fix follows" in text
+    assert "not yet seen here" in text and '"Add to IR" button' in text
     # the flag was not captured for this synthetic row, so the PROXY path is
     # disclosed per player rather than as a blanket sentence
     assert "flag was NOT captured for this player" in text
@@ -508,8 +552,8 @@ def test_the_ir_unverified_disclosure_shows_on_the_legal_path(db, marginal_world
     _world(marginal_world, injury="OUT")
     plan = _plan(db)
     text = waiver.format_waiver_plan(plan, reasons=False)
-    assert "UNVERIFIED" in text
-    assert "what ESPN's IR SLOT itself accepts" in text
+    assert "IR-slot rules this fix follows" in text
+    assert "not yet seen here" in text
 
 
 def test_a_blank_status_ir_occupant_is_unknown_not_illegal():
@@ -522,7 +566,8 @@ def test_a_blank_status_ir_occupant_is_unknown_not_illegal():
     assert v.legal is True                       # not counted against active
     assert v.active_count == 16
     assert v.ir_ineligible == ()
-    assert any("could not verify IR eligibility for Blank Guy" in r for r in v.reasons)
+    assert any("could not verify that ESPN lets Blank Guy stay in your IR slot" in r
+               for r in v.reasons)
     assert not any("ACTIVE/none" in r for r in v.reasons)   # no misleading conflation
 
 
@@ -667,7 +712,7 @@ def test_a_candidate_load_failure_is_disclosed_not_silent(db, marginal_world):
 def test_illegal_path_reports_the_window_that_priced_the_drop(db, marginal_world):
     """F11: on the illegal path plan.weeks is the window that priced the forced drop
     (from build_board), not the empty raw arg."""
-    specs = _active_specs() + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs = _active_specs() + [_ir_spec("ACTIVE")] + _POOL_SPECS
     marginal_world(specs, retrieved=PULL, scoring_period=10)
     plan = build_waiver_plan(db, as_of=PULL, season=SEASON, own_team_id=TEAM,
                              weeks=None, pool_limit=None)
@@ -781,7 +826,7 @@ def test_a_legal_roster_with_no_positive_add_says_hold(db, marginal_world):
 def test_the_week_resolution_error_blocked_path_degrades_to_a_note(db, marginal_world):
     """F16: an illegal roster whose week window cannot resolve degrades to the
     note-only fix (no crash)."""
-    specs = _active_specs() + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs = _active_specs() + [_ir_spec("ACTIVE")] + _POOL_SPECS
     marginal_world(specs, retrieved=PULL)              # scoring_period defaults to 0
     plan = build_waiver_plan(db, as_of=PULL, season=SEASON, own_team_id=TEAM,
                              weeks=None, pool_limit=None)
@@ -1763,12 +1808,11 @@ def test_espn_own_flag_decides_ir_eligibility_and_the_reason_names_it():
     assert not any("was NOT captured" in n for n in v.ir_flag_notes)
 
 
-def test_the_espn_flag_overrides_a_stale_looking_tag_and_makes_the_roster_illegal():
-    """The Tuesday-reset crux, decided by ESPN's own flag: an IR occupant whose
-    flag reads FALSE is forced onto the active roster even if his tag still looks
-    plausible. 17 active bodies on a 16-slot roster blocks EVERY transaction."""
+def test_a_healthy_occupant_flagged_false_makes_the_roster_illegal():
+    """ESPN's invalid case, decided by ESPN's own flag: flag FALSE and no injury
+    designation. 17 active bodies on a 16-slot roster blocks EVERY transaction."""
     rows = [_row38(eid=str(i)) for i in range(16)] + [
-        _row38(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy", injured=0)]
+        _row38(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy", injured=0)]
     v = check_legality(rows)
     assert v.legal is False
     assert v.active_count == 17
@@ -1823,7 +1867,7 @@ def test_the_forced_drop_skips_an_undroppable_player(db, marginal_world):
     instruction the operator cannot work around: obeying a drop ESPN refuses
     leaves the roster illegal and every claim blocked.
     """
-    specs = _active_specs() + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs = _active_specs() + [_ir_spec("ACTIVE")] + _POOL_SPECS
     marginal_world(specs, retrieved=PULL)
     baseline = _plan(db)
     assert baseline.blocked is True and baseline.forced_drop is not None
@@ -1834,7 +1878,7 @@ def test_the_forced_drop_skips_an_undroppable_player(db, marginal_world):
     db.execute("DELETE FROM projections")
     db.execute("DELETE FROM players")
     db.commit()
-    specs2 = [dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs2 = [dict(s) for s in _active_specs()] + [_ir_spec("ACTIVE")] + _POOL_SPECS
     for s in specs2:
         if s["name"] == named:
             s["droppable"] = 0
@@ -1912,21 +1956,26 @@ def test_the_espn_flag_BEATS_the_tag_when_the_two_DISAGREE():
 
     CATCHES: reverting ``_ir_status`` to the designation proxy.
     """
-    # flag TRUE over an IR-INELIGIBLE tag: the proxy would call him ineligible and
-    # make this roster illegal at 17 active. ESPN's own flag says he may sit on IR.
+    # flag TRUE over a HEALTHY tag: the proxy would call him invalid and make this
+    # roster illegal at 17 active. ESPN's own flag says he may sit on IR. (Until
+    # 2026-09-24 this pair used QUESTIONABLE, which ESPN's occupancy rule now
+    # passes on the tag alone — so it no longer discriminated flag-first.)
     rows = [_row38(eid=str(i)) for i in range(16)] + [
-        _row38(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy", injured=1)]
+        _row38(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy", injured=1)]
     v = check_legality(rows)
     assert v.legal is True and v.active_count == 16 and v.ir_ineligible == ()
-    assert "reads TRUE, so we treat him as IR-ELIGIBLE" in " | ".join(v.ir_flag_notes)
+    assert "flag reads TRUE (his injury tag is ACTIVE), so he may stay" in \
+        " | ".join(v.ir_flag_notes)
 
-    # flag FALSE over an IR-ELIGIBLE tag: the proxy would pass an ILLEGAL roster
-    # as legal — every transaction blocked in the app with no explanation here.
+    # flag FALSE over an OUT tag: under ESPN's OCCUPANCY rule a false flag does
+    # NOT mean healthy (every QUESTIONABLE/DOUBTFUL occupant carries one), so the
+    # never-seen divergence is UNKNOWN — not counted, disclosed, never a forced
+    # drop (it used to print BLOCKED + a drop on a 16/16 roster; review 2026-09-24).
     rows = [_row38(eid=str(i)) for i in range(16)] + [
         _row38(slot="IR", injury="OUT", eid="ir", name="IR Guy", injured=0)]
     v = check_legality(rows)
-    assert v.legal is False and v.active_count == 17
-    assert [o.player for o in v.ir_ineligible] == ["IR Guy"]
+    assert v.legal is True and v.active_count == 16 and v.ir_ineligible == ()
+    assert len(v.ir_unverified) == 1 and "DISAGREE" in v.ir_unverified[0]
 
 
 def test_a_flagged_player_with_a_blank_tag_is_eligible_not_unknown():
@@ -1949,18 +1998,22 @@ def test_the_violation_and_the_required_move_name_the_signal_that_DECIDED():
     CATCHES: rebuilding either sentence from ``o.injury_status`` alone.
     """
     rows = [_row38(eid=str(i)) for i in range(16)] + [
-        _row38(slot="IR", injury="OUT", eid="ir", name="IR Guy", injured=0)]
+        _row38(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy", injured=0)]
     v = check_legality(rows)
     blob = " | ".join(v.violations + v.ir_advisories)
     assert "`injured` flag reads FALSE" in blob
-    assert "DISAGREE" in blob
-    assert "ESPN lists him OUT, not IR-eligible" not in blob
+    assert "healthy again" in blob
+    # the divergence (flag FALSE beside OUT) is disclosed where it lands — UNKNOWN
+    div = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="OUT", eid="ir", name="IR Guy", injured=0)]
+    dv = check_legality(div)
+    assert dv.violations == () and "DISAGREE" in " | ".join(dv.ir_unverified)
 
     # the PROXY path keeps the tag wording — there the tag really did decide
     proxy = [_row38(eid=str(i)) for i in range(16)] + [
-        _row38(slot="IR", injury="QUESTIONABLE", eid="ir", name="IR Guy")]
+        _row38(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy")]
     pblob = " | ".join(check_legality(proxy).ir_advisories)
-    assert "ESPN lists him QUESTIONABLE" in pblob and "PROXY" in pblob
+    assert "ESPN lists him ACTIVE" in pblob and "PROXY" in pblob
 
 
 def test_a_blocked_page_renders_every_note_it_holds(db, marginal_world):
@@ -1972,7 +2025,7 @@ def test_a_blocked_page_renders_every_note_it_holds(db, marginal_world):
 
     CATCHES: re-introducing an early return above the loop.
     """
-    _world(marginal_world, injury="QUESTIONABLE")
+    _world(marginal_world, injury="ACTIVE")
     plan = _plan(db)
     assert plan.blocked is True and plan.notes
     text = waiver.format_waiver_plan(plan)
@@ -1989,7 +2042,7 @@ def test_an_all_undroppable_roster_is_refused_WITH_a_reason(db, marginal_world):
 
     CATCHES: a page that names neither a fix nor the reason it cannot.
     """
-    specs = [dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs = [dict(s) for s in _active_specs()] + [_ir_spec("ACTIVE")] + _POOL_SPECS
     for s in specs:
         s["droppable"] = 0
     marginal_world(specs, retrieved=PULL)
@@ -2016,7 +2069,7 @@ def test_no_blocked_note_tells_you_to_drop_an_undroppable_player(db, marginal_wo
     The assertion is an INVARIANT over the whole notes list, not a string match on
     one sentence, so a sixth path added later is caught too.
     """
-    specs = [dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")] + _POOL_SPECS
+    specs = [dict(s) for s in _active_specs()] + [_ir_spec("ACTIVE")] + _POOL_SPECS
     for s in specs:
         if s["name"] == "IR Guy":
             s["droppable"] = 0
@@ -2038,7 +2091,7 @@ def test_no_blocked_note_tells_you_to_drop_an_undroppable_player(db, marginal_wo
     db.execute("DELETE FROM projections")
     db.execute("DELETE FROM players")
     db.commit()
-    marginal_world([dict(s) for s in _active_specs()] + [_ir_spec("QUESTIONABLE")]
+    marginal_world([dict(s) for s in _active_specs()] + [_ir_spec("ACTIVE")]
                    + _POOL_SPECS, retrieved=PULL)
     plan2 = _plan(db)
     assert any("you may instead DROP IR Guy himself" in n for n in plan2.notes)
@@ -2438,3 +2491,43 @@ def test_the_rotation_slot_reconciles_itself_with_the_drop_boards_own_sentence(
     assert "a second DST is never considered as an add" in text   # marginal.py's
     assert "This does NOT contradict the drop board below" in text
     assert "This block is a PRICE, not a ranking." in text
+
+
+# ======================= ESPN IR occupancy rule (2026-09-24, review findings) =====
+
+
+def test_a_flagged_SUSPENSION_occupant_is_invalid_and_the_note_does_not_say_may_stay():
+    """SSPD is never IR-eligible (ESPN), whatever the flag says — the suspension is
+    checked before the flag, in the verdict AND in the per-occupant note."""
+    rows = [_row38(eid=str(i)) for i in range(16)] + [
+        _row38(slot="IR", injury="SUSPENSION", eid="ir", name="Banned Guy", injured=1)]
+    v = check_legality(rows)
+    assert v.legal is False and [o.player for o in v.ir_ineligible] == ["Banned Guy"]
+    assert not any("may stay" in n for n in v.ir_flag_notes)
+
+
+def test_a_healthy_occupant_with_room_says_INVALID_first_not_legal():
+    """15 active + a healthy occupant: the move costs no drop, but ESPN marks the
+    roster INVALID until it is made — the header must not say "ESPN will process
+    claims and adds" above a line saying it processes nothing (review finding)."""
+    rows = [_row(eid=str(i)) for i in range(15)] + [
+        _row(slot="IR", injury="ACTIVE", eid="ir", name="IR Guy")]
+    v = check_legality(rows)
+    assert v.legal is True                        # plannable once the move is made
+    assert v.reasons[0].startswith("roster INVALID until you make the REQUIRED ROSTER MOVE")
+    assert "ESPN will process claims and adds" not in v.reasons[0]
+
+
+def test_the_zero_drop_fix_benches_only_the_occupant_who_may_not_stay():
+    """15 active + IR {QUESTIONABLE, healthy}: the IR slot is over capacity. The
+    restorative zero-drop fix benches ONLY the healthy one (the Q occupant may
+    stay). CATCHES reverting step 1 to the ENTRY rule, which benches both, finds no
+    fix and falls through to a forced drop."""
+    rows = [_row38(eid=str(i)) for i in range(15)] + [
+        _row38(slot="IR", injury="QUESTIONABLE", eid="q", name="Q Guy", injured=0),
+        _row38(slot="IR", injury="ACTIVE", eid="h", name="Healthy Guy", injured=0)]
+    assert check_legality(rows).legal is False
+    fix = waiver._zero_drop_reslot(rows, waiver.DEFAULT_ROSTER)
+    assert fix is not None
+    benched, moved_to_ir, _ = fix
+    assert benched == ["Healthy Guy"] and moved_to_ir == []

@@ -333,7 +333,8 @@ def waivers(
     forced drop) FIRST, then queued waiver claims and first-come grabs ranked with
     their drops, plus the drop board (item 3.4).
 
-    If the roster is illegal (an IR occupant reset out of IR-eligibility), the plan
+    If the roster is illegal (an oversized active roster, or an IR occupant who may no
+    longer stay on IR under ESPN's rules — healthy again or suspended), the plan
     refuses to plan claims and proposes the fix. All legality, claim/drop and
     ordering logic lives in ``core/waiver.py``; this command parses, calls, and
     prints (rule 3).
