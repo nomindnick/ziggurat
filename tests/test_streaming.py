@@ -835,3 +835,78 @@ def test_a_midweek_pull_reaches_the_stream_the_day_it_was_pulled(db, marginal_wo
     blob = " ".join(r for rec in wednesday.ranked for r in rec.reasons)
     assert "Line as of the 2026-09-16 pull" in blob
     assert "closing line" not in blob
+
+
+# ============================ item 4.7: the units this page is quoted in =======
+#
+# Part 3: the HOUSE column says how far one real week wanders from it. Part 4: the
+# page carries the PROJECTED / REALISED legend, and the D/ST card's backtest
+# figures say they are REALISED. Presentation only — the order never moves.
+
+
+def test_the_house_column_says_what_it_is_and_how_far_a_week_wanders(db, marginal_world):
+    """DONE-WHEN (c), stream half. Each board prints the legend, and one HOUSE line
+    above the rows: PROJECTED, with item 3.5's measured swing at the top row's own
+    projection and that prior's label — never a literal."""
+    from ziggurat.core import units
+    from ziggurat.core.lineup_support import DEFAULT_VARIANCE
+
+    _basic_world(marginal_world, db)
+    for pos, unit in (("DST", "D/ST"), ("K", "kicker")):
+        board = rank_streamers(db, as_of=PULL, season=SEASON, position=pos, week=WEEK)
+        assert board.ranked and board.scale is not None, pos
+        top = board.ranked[0]
+        assert board.scale.sigma == pytest.approx(DEFAULT_VARIANCE.sigma(pos, top.house_points))
+        text = format_stream_board(board)
+        line = "  " + units.house_scale_sentence(unit, board.scale)
+        assert line in text.splitlines(), pos
+        assert text.index(line) < text.index(top.player)
+        assert units.UNITS_LEGEND in text
+        if pos == "DST":
+            assert DEFAULT_VARIANCE.label in board.scale.provenance
+            assert f"top row's {top.house_points:.1f}-pt projection" in board.scale.basis
+
+
+def test_a_kickers_swing_never_rides_under_a_measured_label(db, marginal_world):
+    """The kicker figure is the one number in item 3.5's model that was never
+    fitted. Quoting it under 'measured 2021-2025' would retire a caveat by
+    formatting."""
+    _basic_world(marginal_world, db)
+    k = rank_streamers(db, as_of=PULL, season=SEASON, position="K", week=WEEK).scale
+    assert "NOT YET FITTED" in k.provenance
+    assert "measured 2021-2025" not in k.provenance
+
+
+def test_the_house_scale_is_silent_on_an_empty_board(db, marginal_world):
+    """A scale attached to zero rows qualifies nothing (the one-horizon precedent)."""
+    _basic_world(marginal_world, db)
+    board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=99)
+    assert board.ranked == () and board.scale is None
+    assert "HOUSE = " not in format_stream_board(board)
+
+
+def test_the_house_scale_never_touches_the_order(db, marginal_world, monkeypatch):
+    """PRESENTATION ONLY. The board with its scale switched off is the same board:
+    same rows, same ranks, same reasons, same market ordering."""
+    from dataclasses import replace
+
+    _two_dst_world(marginal_world, db)
+    _fp_dst(db, team="PIT", rank=1, ecr=2.10)
+    _fp_dst(db, team="MIA", rank=9, ecr=11.40)
+    db.commit()
+    measured = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    monkeypatch.setattr(streaming, "_house_scale", lambda position, ranked: None)
+    bare = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=WEEK)
+    assert measured.scale is not None and bare.scale is None
+    assert replace(measured, scale=None) == bare
+
+
+def test_the_realised_backtest_figures_say_they_are_realised():
+    """PART 4. The D/ST card and the market label quote backtests on actual 2021-23
+    scores on a page whose every other points number is a projection; the one-horizon
+    note's -23.1 is the reverse case, a PROJECTED board measurement."""
+    first, _, third = streaming.DST_CARD_SENTENCES
+    assert "+1.84 REALISED house pts/wk" in first and "backtested on actual scores" in first
+    assert "0 to +0.4 pts/wk (REALISED" in third
+    assert "+1.84 REALISED house pts/wk" in streaming.MARKET_LABEL
+    assert "PROJECTION board" in streaming.ONE_HORIZON_NOTE

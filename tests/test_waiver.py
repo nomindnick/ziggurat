@@ -2531,3 +2531,136 @@ def test_the_zero_drop_fix_benches_only_the_occupant_who_may_not_stay():
     assert fix is not None
     benched, moved_to_ir, _ = fix
     assert benched == ["Healthy Guy"] and moved_to_ir == []
+
+
+# ============================ item 4.7: the units this page is quoted in =======
+#
+# Part 3: the chain total (the number Tuesday step 4 reads aloud) and the streaming
+# lane print their scale, per week before a one-week swing is set against them.
+# Part 4: the page carries the PROJECTED / REALISED legend. Presentation only.
+
+
+def test_the_chain_total_prints_its_scale_per_week_directly_beneath_it(db, marginal_world):
+    """DONE-WHEN (c), waiver half. The line under 'IF EVERY CLAIM AND GRAB LISTED
+    WINS' divides the season total down to a per-week figure BEFORE setting it
+    against your team's one-week swing, and cites the prior that swing came from.
+    The headline line itself is untouched (CLAUDE.md quotes it; tests pin it)."""
+    from ziggurat.core import units
+    from ziggurat.core.lineup_support import DEFAULT_VARIANCE
+
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    assert plan.chain_gain > 0 and plan.team_scale is not None
+    lines = waiver.format_waiver_plan(plan, reasons=False).splitlines()
+    i = next(i for i, ln in enumerate(lines)
+             if ln.startswith("IF EVERY CLAIM AND GRAB LISTED WINS:"))
+    n = len(plan.weeks)
+    assert n > 1
+    assert lines[i + 1] == "  " + units.season_gain_sentence(
+        plan.chain_gain, n, plan.team_scale)
+    assert f"{units.signed(plan.chain_gain / n)} pts/wk" in lines[i + 1]
+    assert f"+/-{plan.team_scale.sigma:.1f} pts" in lines[i + 1]
+    assert "PROJECTED" in lines[i + 1]
+    assert DEFAULT_VARIANCE.label in lines[i + 1] and DEFAULT_VARIANCE.source in lines[i + 1]
+    # the legend precedes the first number it qualifies
+    assert units.UNITS_LEGEND in lines[:i]
+
+
+def test_waivers_and_lineup_quote_the_same_team_swing(db, marginal_world):
+    """ONE number for "how much your team's week swings", whichever page says it.
+    With no matchup row the lineup card seats its greedy lineup — the same seat the
+    waiver page takes — so the two must agree."""
+    from ziggurat.core import lineup_support
+
+    _chain_world(marginal_world)
+    plan = _chain_plan(db)
+    rec = lineup_support.build_lineup(
+        db, as_of=PULL, season=SEASON, own_team_id=TEAM, week=plan.weeks[0])
+    assert rec.opponent_total is None and rec.posture == "NEUTRAL"
+    assert plan.team_scale.sigma == pytest.approx(rec.own_sigma, rel=1e-12)
+
+
+def test_the_scale_is_display_only_and_moves_nothing(db, marginal_world, monkeypatch):
+    """PRESENTATION ONLY (item 4.7). The plan with the swing measured and the plan
+    with it switched off are the SAME plan in every other field: the same claims,
+    grabs, streaming rows, gains, chain order, refusals and drop board."""
+    _chain_world(marginal_world)
+    measured = _chain_plan(db)
+    monkeypatch.setattr(waiver, "_team_week_scale", lambda board: None)
+    bare = _chain_plan(db)
+    assert measured.team_scale is not None and bare.team_scale is None
+    assert replace(measured, team_scale=None) == bare
+    assert [(r.add, r.drop, r.gain, r.gain_alone, r.chain_rank) for r in _all_recs(measured)] \
+        == [(r.add, r.drop, r.gain, r.gain_alone, r.chain_rank) for r in _all_recs(bare)]
+
+
+def test_the_streaming_lane_prints_its_one_week_scale(db, marginal_world):
+    """The lane's gains are ONE week each, so no per-week conversion — and with no
+    chain line above it, this sentence must carry the prior's bracket itself."""
+    from ziggurat.core import units
+    from ziggurat.core.lineup_support import DEFAULT_VARIANCE
+
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert plan.streaming and not plan.claims and not plan.fcfs_grabs
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    largest = max(r.gain for r in plan.streaming)
+    line = "  * " + units.week_gain_sentence(largest, plan.team_scale, cite=True)
+    assert line in text.splitlines()
+    assert DEFAULT_VARIANCE.label in line
+    assert text.index(line) < text.index(waiver._claim_line(plan.streaming[0]))
+
+
+def test_the_lane_points_back_when_the_chain_already_cited_the_prior(db, marginal_world):
+    """Both lanes on one page: the prior's bracket prints ONCE (on the chain line)
+    and the lane sentence points back at it rather than repeating 150 characters."""
+    from ziggurat.core import units
+    from ziggurat.core.lineup_support import DEFAULT_VARIANCE
+
+    _chain_world(marginal_world)
+    chain_plan = _chain_plan(db)
+    assert chain_plan.claims or chain_plan.fcfs_grabs
+    streamed = waiver.ClaimRec(
+        add="Stream Defense", add_position="DST", add_espn_id="-1", kind=KIND_WAIVER,
+        gain=1.3, drop="Oscar D/ST", drop_position="DST", startable_this_week=True,
+        horizon=1, drop_unpriceable=False, waiver_rank=None, reasons=())
+    both = replace(chain_plan, streaming=(streamed,))
+    text = waiver.format_waiver_plan(both, reasons=False)
+    assert "  * " + units.week_gain_sentence(1.3, both.team_scale, cite=False) \
+        in text.splitlines()
+    assert "the largest here is +1.3 pts" in text
+    assert text.count(DEFAULT_VARIANCE.label) == 1
+
+
+def test_every_waiver_page_carries_the_units_legend(db, marginal_world):
+    """PART 4. Legal and blocked pages alike say which kind of number they print —
+    the blocked page names a forced drop priced in projected points too."""
+    from ziggurat.core import units
+
+    _world(marginal_world, injury="OUT")
+    legal = _plan(db)
+    assert not legal.blocked
+    assert units.UNITS_LEGEND in waiver.format_waiver_plan(legal)
+
+
+def test_the_blocked_page_carries_the_units_legend(db, marginal_world):
+    from ziggurat.core import units
+
+    _world(marginal_world, injury="ACTIVE")
+    blocked = _plan(db)
+    assert blocked.blocked
+    text = waiver.format_waiver_plan(blocked)
+    assert units.UNITS_LEGEND in text
+    assert text.index("ROSTER ILLEGAL") < text.index(units.UNITS_LEGEND)
+
+
+def test_the_dst_card_on_this_page_marks_its_backtest_figures_realised(db, marginal_world):
+    """PART 4. The streaming lane prints item 3.14's REALISED backtest (+1.84 over
+    38 paired weeks) directly above PROJECTED one-week gains; each says which it is."""
+    _stream_world(marginal_world)
+    plan = _plan(db, claim_budget=10)
+    assert any(r.drop_position == "DST" for r in plan.streaming)
+    text = waiver.format_waiver_plan(plan)
+    assert "+1.84 REALISED house pts/wk" in text
+    assert "0 to +0.4 pts/wk (REALISED" in text
+    assert "PROJECTED change to ONE week's score" in text

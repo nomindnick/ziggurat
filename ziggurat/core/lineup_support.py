@@ -72,7 +72,7 @@ from datetime import datetime, time, timedelta
 from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ziggurat.core import streaming
+from ziggurat.core import streaming, units
 from ziggurat.core.lineup import (
     FLEX_LABEL,
     LineupFill,
@@ -366,6 +366,17 @@ class LineupRecommendation:
     locks_first: tuple[str, ...] = ()
     # item 3.13 — the LOCKED arm of the not-seated taxonomy.
     locked_notes: tuple[str, ...] = ()
+    # --- item 4.7 part 3: the scale of the margin line (DISPLAY ONLY) ----------
+    # The standard deviations the win probability ALREADY used: ``own_sigma`` is
+    # sqrt(var) of the seated lineup, ``opp_sigma`` the opponent's (None when no
+    # opponent was priced), ``opp_sigma_basis`` where his came from. Read back from
+    # the computation, never re-derived, so the sentence cannot drift from the
+    # number it explains. No seat, order or probability depends on them.
+    own_sigma: float | None = None
+    opp_sigma: float | None = None
+    margin_sigma: float | None = None   # sqrt(var_own + var_opp): the win prob's denominator
+    opp_sigma_basis: str = ""
+    sigma_provenance: str = ""
 
 
 # ------------------------------------------------------------- internal seat row
@@ -512,6 +523,25 @@ def win_probability(mu_own: float, mu_opp: float, var_own: float, var_opp: float
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
+def _starters_variance(
+    starters: Sequence[tuple[str, float, str | None]], rho: float
+) -> float:
+    """Var of a seated lineup's weekly total from ``(position, sigma, team)`` rows:
+    Σ sigma^2 plus the QB<->own-pass-catcher correlation term (rho>0 only for that
+    one pairing). THE one copy of this arithmetic — the win probability
+    (``_lineup_stats``) and every page that quotes a team-week swing
+    (``lineup_sigma``, item 4.7) read it, so the two can never disagree."""
+    var = sum(sigma ** 2 for _pos, sigma, _team in starters)
+    if rho:
+        for i, (qpos, qsigma, qteam) in enumerate(starters):
+            if qpos != "QB" or qteam is None:
+                continue
+            for j, (pos, sigma, team) in enumerate(starters):
+                if j != i and pos in ("WR", "TE") and team == qteam:
+                    var += 2.0 * rho * qsigma * sigma
+    return var
+
+
 def _lineup_stats(
     seated: Iterable[str], seats: Mapping[str, _Seat], variance: VarianceModel
 ) -> tuple[float, float]:
@@ -519,18 +549,46 @@ def _lineup_stats(
     QB<->own-pass-catcher correlation term (rho>0 only for that one pairing)."""
     seated = list(seated)
     mu = sum(seats[k].points for k in seated)
-    var = sum(seats[k].sigma ** 2 for k in seated)
-    rho = variance.correlation_qb_passcatcher
-    if rho:
-        qbs = [k for k in seated if seats[k].position == "QB"]
-        for qb in qbs:
-            qteam = seats[qb].team
-            if qteam is None:
-                continue
-            for k in seated:
-                if k != qb and seats[k].position in ("WR", "TE") and seats[k].team == qteam:
-                    var += 2.0 * rho * seats[qb].sigma * seats[k].sigma
+    var = _starters_variance(
+        [(seats[k].position, seats[k].sigma, seats[k].team) for k in seated],
+        variance.correlation_qb_passcatcher,
+    )
     return mu, var
+
+
+def lineup_sigma(
+    starters: Iterable[tuple[str, float, str | None]],
+    *,
+    variance: VarianceModel = DEFAULT_VARIANCE,
+) -> float:
+    """One standard deviation of a seated lineup's weekly house-point total.
+
+    ``starters`` is ``(position, projected points, NFL team)`` per SEATED player.
+    Each player's sigma is ``variance.sigma(position, points)`` — exactly what the
+    lineup card prices a seat with — combined by ``_starters_variance``, the same
+    arithmetic behind the card's win probability. Item 4.7 part 3 quotes this as
+    "a normal week-to-week swing in your team's score" on ``ziggurat waivers``;
+    it is a dispersion prior, never a scoring number (Rule 2).
+    """
+    rows = []
+    for position, points, team in starters:
+        pos = canon_position(position) or position
+        rows.append((pos, variance.sigma(pos, points), team))
+    return math.sqrt(max(_starters_variance(rows, variance.correlation_qb_passcatcher), 0.0))
+
+
+def sigma_provenance(
+    variance: VarianceModel = DEFAULT_VARIANCE, *, position: str | None = None
+) -> str:
+    """The bracket every quoted swing carries: the prior's label and source (Rule 6).
+
+    A KICKER's swing is the one figure in this model that was never measured, so
+    it must not ride under a label that says "measured 2021-2025"."""
+    if (canon_position(position) or position) == "K":
+        return (f"[hypothesis NOT YET FITTED: item 3.5's flat kicker weekly swing — "
+                f"FG columns landed in migration 013 and the fit is a recorded "
+                f"follow-up; {variance.source}]")
+    return f"[{variance.label}; {variance.source}]"
 
 
 # ------------------------------------------------------------------- seating
@@ -987,6 +1045,7 @@ def build_lineup(
     greedy = _greedy_fill(seats, roster_structure, pins=pins)
     mu_greedy, var_greedy = _lineup_stats(greedy.starters, seats, variance)
 
+    var_final: float | None = None
     if mu_opp is None:
         # No opponent to price against: fall back to the greedy best-projected
         # lineup, NEUTRAL, and say so (Rule 6). Playoff weeks land here.
@@ -1022,6 +1081,24 @@ def build_lineup(
                                            pinned=pinned_keys)
     if lock_note:
         notes.append(lock_note)
+
+    # --- item 4.7 part 3: the scale of the margin line (DISPLAY ONLY) --------
+    # Read back from the variances the win probability used; nothing below this
+    # block reads them, and the seated set is fixed above. The relabel is
+    # points-neutral, so the starters behind ``var_final`` are the starters shown.
+    if var_final is None:
+        _mu_shown, var_final = _lineup_stats(final.starters, seats, variance)
+    own_sigma = math.sqrt(max(var_final, 0.0))
+    opp_sigma = margin_sigma = None
+    opp_sigma_basis = ""
+    if mu_opp is not None:
+        opp_sigma = math.sqrt(max(opp_var, 0.0))
+        margin_sigma = math.sqrt(max(var_final + opp_var, 1e-9))
+        opp_sigma_basis = (
+            "his all-healthy projected starting lineup" if opp_source == "computed"
+            else "a flat league-typical figure, because --opponent-total supplied his "
+                 "total and not his lineup"
+        )
 
     # --- final sanity gate (belt-and-suspenders) -----------------------------
     bye_keys = {k for k, s in seats.items() if s.on_bye}
@@ -1079,6 +1156,11 @@ def build_lineup(
         team_id=own_team_id,
         locks_first=_locks_first(final, seats, now=now_et),
         locked_notes=locked_notes,
+        own_sigma=own_sigma,
+        opp_sigma=opp_sigma,
+        margin_sigma=margin_sigma,
+        opp_sigma_basis=opp_sigma_basis,
+        sigma_provenance=sigma_provenance(variance),
     )
 
 
@@ -1569,6 +1651,17 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
     out.append(
         f"{rec.posture}  —  you {rec.own_projected_total:.1f}  vs  opp {opp}  "
         f"(margin {rec.margin:+.1f}, win prob {100 * rec.win_prob:.0f}%)")
+    # Item 4.7: the scale of the line above and the kind of number it is, beside it.
+    if rec.own_sigma is not None:
+        own = units.WeeklyScale(
+            sigma=rec.own_sigma,
+            basis="the seated starters' weekly swings combined",
+            provenance=rec.sigma_provenance,
+        )
+        out.append("  " + units.matchup_sentence(
+            own=own, opp_sigma=rec.opp_sigma, opp_basis=rec.opp_sigma_basis,
+            margin_sigma=rec.margin_sigma))
+    out.append(f"  {units.UNITS_LEGEND}")
     out.append("")
 
     out.append(f"{'SLOT':<5} {'PLAYER':<22} {'POS':<4} {'PROJ':>6} {'FLOOR':>6} "

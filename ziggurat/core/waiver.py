@@ -82,6 +82,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
+from ziggurat.core import units
 from ziggurat.core.candidates import (
     CandidateBoard,
     EpisodeHistory,
@@ -90,6 +91,8 @@ from ziggurat.core.candidates import (
     build_candidates,
     episode_legend,
 )
+from ziggurat.core.lineup import fill_lineup
+from ziggurat.core.lineup_support import lineup_sigma, sigma_provenance
 from ziggurat.core.marginal import (
     ACQ_FREE_AGENT,
     ACQ_UNKNOWN,
@@ -581,6 +584,12 @@ class WaiverPlan:
     # The IR ground-truth report for this as_of (item 3.8a). Always computed;
     # its note is added to ``notes`` ONLY when it has news.
     ir_rule: league_state.IRRuleReport | None = None
+    # Item 4.7 part 3: the team-week swing every gain on this page is set against —
+    # your projected starting lineup for the first window week, combined with the
+    # lineup card's own arithmetic. DISPLAY ONLY: computed after the chain is
+    # chosen, read by nothing but the formatter, and not written to the decision
+    # archive (``decisions/capture.py`` writes an explicit field list).
+    team_scale: units.WeeklyScale | None = None
 
     @property
     def blocked(self) -> bool:
@@ -2188,11 +2197,48 @@ def build_waiver_plan(
         position_caps=board.position_caps,
         league_limits=board.league_limits,
         ir_rule=ir_rule,
+        team_scale=_team_week_scale(board),
     )
     if collect is not None:
         collect.plan = plan
         _capture_vintages(collect, conn, as_of=as_of, season=season, view=view)
     return plan
+
+
+def _team_week_scale(board: MarginalBoard) -> units.WeeklyScale | None:
+    """The swing in your team's weekly score that every gain here is set against
+    (item 4.7 part 3). DISPLAY ONLY — it reads the board after the chain is chosen
+    and nothing reads it back.
+
+    Your projected starting lineup for the FIRST window week — the week the
+    streaming lane decides and the week ``ziggurat lineup`` seats — seated by the
+    shared seater on the board's own points and availability (byes and hard-outs
+    excluded, exactly as the board prices them), then combined with
+    ``lineup_support.lineup_sigma``: the lineup card's own arithmetic. A roster
+    player with no forecast that week is left out rather than seated at 0.0, the
+    same discipline the lineup card applies. None when no lineup can be seated.
+    """
+    if not board.weeks:
+        return None
+    week = board.weeks[0]
+    model = board.model
+    keys = [k for k in board.roster_keys
+            if model.available(k, week) and model.points(k, week) != 0.0]
+    if not keys:
+        return None
+    fill = fill_lineup(keys, model.positions, {k: model.points(k, week) for k in keys},
+                       roster=model.rs)
+    # Slot order, not the ``starters`` frozenset: a set's order is PYTHONHASHSEED's.
+    starters = [(model.positions[k], model.points(k, week), model.entries[k].team)
+                for _label, k in fill.slots if k is not None]
+    if not starters:
+        return None
+    return units.WeeklyScale(
+        sigma=lineup_sigma(starters),
+        basis=(f"your projected week-{week} starting lineup, combined the way "
+               f"`ziggurat lineup` combines it for its win prob"),
+        provenance=sigma_provenance(),
+    )
 
 
 def _chain_notes(chain: _ChainResult, *, claim_budget: int, weeks: int) -> list[str]:
@@ -2733,6 +2779,8 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
             for note in plan.notes:
                 out.append(f"! {note}")
         out.append("")
+        # Item 4.7 part 4: the forced drop above is a projected number too.
+        out.append(f"  {units.UNITS_LEGEND}")
         out.append("  No claims are planned until the roster is legal.")
         if reasons:
             out.append("")
@@ -2752,10 +2800,15 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
     for note in plan.notes:
         out.append(f"! {note}")
 
+    # --- item 4.7 part 4: which KIND of number follows, before the first one ---
+    out.append("")
+    out.append(units.UNITS_LEGEND)
+
     # --- the chain header (item 3.4b) — DEFAULT view, not behind --reasons ----
     # The joint number and the refused reversals are the whole point of the item:
     # a novice reading three claims each worth "+5" will queue all three, and the
     # only place the tool can say "these three are worth +1.2 together" is here.
+    scale_cited = False
     if plan.claims or plan.fcfs_grabs:
         span = _weeks_phrase(len(plan.weeks)) if plan.weeks else "the window"
         out.append("")
@@ -2765,6 +2818,13 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
             f"lines landed, and their gains add up to this total; the 'alone' number "
             f"is what a claim is worth if those do not land)"
         )
+        # Item 4.7 part 3: the scale of the number the cadence reads aloud, per
+        # week BEFORE it meets a one-week swing. A different line, deliberately:
+        # the one above is quoted by CLAUDE.md and pinned by tests.
+        if plan.weeks:
+            out.append("  " + units.season_gain_sentence(
+                plan.chain_gain, len(plan.weeks), plan.team_scale))
+            scale_cited = plan.team_scale is not None
     out.append("")
 
     # --- waiver claims --------------------------------------------------------
@@ -2865,6 +2925,10 @@ def format_waiver_plan(plan: WaiverPlan, *, reasons: bool = False) -> str:
             # start disagreeing about what the number cost.
             for sentence in DST_CARD_SENTENCES:
                 out.append(f"  * {sentence}")
+        # Item 4.7 part 3: one week each, so no per-week conversion — and the
+        # prior's bracket only if the chain line above did not already print it.
+        out.append("  * " + units.week_gain_sentence(
+            max(r.gain for r in plan.streaming), plan.team_scale, cite=not scale_cited))
         for rec in plan.streaming:
             out.append(_claim_line(rec))
             # BOTH horizons, in the DEFAULT view (item 3.14 step 2): a one-week gain

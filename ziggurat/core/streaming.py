@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from statistics import mean, pstdev
 from types import MappingProxyType
 
-from ziggurat.core import scoring
+from ziggurat.core import scoring, units
 from ziggurat.core.marginal import (
     ACQ_FREE_AGENT,
     ACQ_WAIVER,
@@ -123,7 +123,7 @@ MARKET_LABEL = (
     "composite. Spearman vs REALISED house points, 2021-23 waiver pool (826 rows, "
     "42 weeks): FantasyPros +0.2701, the shipped composite +0.1300, the closing "
     "implied total +0.3372. Against HOLDING a drafted incumbent the board is worth "
-    "+1.84 house pts/wk, 95% CI [-0.47, +4.16], n=38 paired weeks, sign p=0.041 "
+    "+1.84 REALISED house pts/wk, 95% CI [-0.47, +4.16], n=38 paired weeks, sign p=0.041 "
     "(24 W / 11 L) — the interval CROSSES ZERO. Head to head against the composite "
     "it replaces, that same replay is -0.24 [-3.03, +2.40] (13 W / 13 L / 12 ties), "
     "i.e. INDISTINGUISHABLE: the reason to prefer the board is the rho over 826 "
@@ -135,17 +135,22 @@ MARKET_LABEL = (
 #: streams (Rule 6). They are a tuple so `waiver.py` prints the identical text —
 #: two surfaces paraphrasing one disclosure is how they start disagreeing.
 #: Never say the market will confirm anything (item 4.1's instrument finding).
+#: Both points figures are REALISED (item 4.7 part 4): backtests on actual 2021-23
+#: scores (probe E08c's paired margin; E08's top-one realised residual), printed on
+#: pages whose every other points number is a projection — so each says which kind
+#: it is.
 DST_CARD_SENTENCES = (
     "THE ALTERNATIVE IS HOLDING, and the interval CROSSES ZERO. Streaming this "
-    "board beat holding a drafted incumbent by +1.84 house pts/wk over 38 paired "
-    "weeks (2021-23), 95% CI [-0.47, +4.16]. That is a lead we cannot yet "
-    "distinguish from zero — not a settled edge.",
+    "board beat holding a drafted incumbent by +1.84 REALISED house pts/wk over 38 "
+    "paired weeks (2021-23, backtested on actual scores), 95% CI [-0.47, +4.16]. "
+    "That is a lead we cannot yet distinguish from zero — not a settled edge.",
     "ACTING ON THIS MEANS A D/ST SWAP IN ROUGHLY 8 WEEKS OUT OF 10 (38 of 45 "
     "measured decision weeks fired a swap). The attention cost is real, it is "
     "weekly, and it is the honest price of the number above.",
     "THIS IS TABLE STAKES, NOT A PRIVATE EDGE: a colleague reading FantasyPros "
     "gets most of it free. Our own private share — what the house scoring and the "
-    "matchup work add on top of the public board — is 0 to +0.4 pts/wk.",
+    "matchup work add on top of the public board — is 0 to +0.4 pts/wk (REALISED, "
+    "a 2021-23 backtest).",
 )
 
 #: Item 3.14 step 2 asks that no streamed row is ever SHOWN without the
@@ -159,8 +164,8 @@ DST_CARD_SENTENCES = (
 ONE_HORIZON_NOTE = (
     "ONE HORIZON ONLY: this page ranks THIS WEEK. It does NOT price what dropping "
     "the player you currently hold costs you over the rest of the season, and that "
-    "cost can dwarf the weekly gain — measured on the live 2026-09-15 board, a "
-    "streamed row worth +3.2 house pts this week cost -23.1 over the remaining "
+    "cost can dwarf the weekly gain — measured on the live 2026-09-15 PROJECTION "
+    "board, a streamed row worth +3.2 house pts this week cost -23.1 over the remaining "
     "weeks, an 86% break-even on getting an equally good D/ST back. Both horizons, "
     "and that break-even, are printed per row on `ziggurat waivers`, which knows "
     "your roster. Decide the SWAP there; decide WHICH defense here."
@@ -467,6 +472,8 @@ class StreamBoard:
     # problems and only the second one is about to fix itself.
     market: MarketBoard | None = None
     market_alt: MarketBoard | None = None
+    # --- item 4.7 part 3: how far one week of the top row wanders (DISPLAY ONLY)
+    scale: units.WeeklyScale | None = None
 
     @property
     def ranked_on_market(self) -> bool:
@@ -907,6 +914,35 @@ def rank_streamers(
         weather_readable=weather_readable,
         market=market,
         market_alt=market_alt,
+        scale=_house_scale(pos, ranked),
+    )
+
+
+def _house_scale(position: str, ranked: Sequence[StreamRec]) -> units.WeeklyScale | None:
+    """How far one week of the TOP row wanders from its HOUSE number (item 4.7).
+
+    DISPLAY ONLY — read after the order is fixed, never fed back into it. Item 3.5's
+    measured per-player prior, evaluated at the top row's own projection and said
+    to be (the D/ST fit's slope is 0.15 per projected point, so rows a few points
+    apart differ by about half a point of swing); a kicker gets the flat figure that
+    has NOT been fitted, and says so. None when nothing was ranked: a scale attached
+    to zero rows qualifies nothing.
+    """
+    if not ranked:
+        return None
+    # Lazy by necessity: ``lineup_support`` imports THIS module (its streaming-
+    # upgrade note), so importing it at the top would be a cycle.
+    from ziggurat.core.lineup_support import DEFAULT_VARIANCE, sigma_provenance
+
+    top = ranked[0]
+    if position == "K":
+        basis = "one flat figure for every kicker"
+    else:
+        basis = f"the prior read at the top row's {top.house_points:.1f}-pt projection"
+    return units.WeeklyScale(
+        sigma=DEFAULT_VARIANCE.sigma(position, top.house_points),
+        basis=basis,
+        provenance=sigma_provenance(DEFAULT_VARIANCE, position=position),
     )
 
 
@@ -1009,6 +1045,9 @@ def format_stream_board(board: StreamBoard, *, top: int | None = None,
         f"streaming {label} — season {board.season}, week {board.week}, as of {board.as_of}",
     ]
     out.extend(board.freshness)
+    # Item 4.7 part 4: this page prints REALISED backtest figures (the D/ST card)
+    # beside PROJECTED columns, so it says which is the default reading.
+    out.append(units.UNITS_LEGEND)
 
     degraded: list[str] = []
     if board.position == "DST" and not board.odds_available:
@@ -1062,6 +1101,10 @@ def format_stream_board(board: StreamBoard, *, top: int | None = None,
         out.append(f"{'#':<3} {'PLAYER':<22} {'NFL':<4} {'OPP':<4} {'HOUSE':>7} "
                    f"{'STREAM*':>8} {'%OWN':>6}  ACQ")
         out.append("  * STREAM = matchup-adjusted expected value (HYPOTHESIS — not house scoring)")
+    # Item 4.7 part 3: the HOUSE column's unit and how far one week wanders from it.
+    if board.scale is not None:
+        unit = "D/ST" if board.position == "DST" else "kicker"
+        out.append("  " + units.house_scale_sentence(unit, board.scale))
 
     rows = board.ranked if top is None else board.ranked[:top]
     if not rows:

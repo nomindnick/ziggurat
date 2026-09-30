@@ -686,3 +686,126 @@ def test_week_resolution_raises_when_it_cannot_be_derived(db, marginal_world):
     marginal_world(_contest_specs(), retrieved=PULL)
     with pytest.raises(WeekResolutionError):
         build_lineup(db, as_of="2026-06-01", season=SEASON, own_team_id=TEAM, week=None)
+
+
+# ============================ item 4.7: the units the card is quoted in =======
+#
+# The margin line now carries its scale (part 3) and the card carries the
+# PROJECTED / REALISED legend (part 4). Presentation only: the tests below pin
+# that the sentence quotes EXACTLY the swings the win probability already used,
+# and that factoring the variance arithmetic out for the other pages moved no bit.
+
+
+def _pre_47_lineup_stats(seated, seats, variance):
+    """``_lineup_stats`` as it stood before item 4.7 factored its variance out into
+    ``_starters_variance`` — copied VERBATIM, so the refactor is pinned to
+    bit-identity rather than to an approximation of it."""
+    seated = list(seated)
+    mu = sum(seats[k].points for k in seated)
+    var = sum(seats[k].sigma ** 2 for k in seated)
+    rho = variance.correlation_qb_passcatcher
+    if rho:
+        qbs = [k for k in seated if seats[k].position == "QB"]
+        for qb in qbs:
+            qteam = seats[qb].team
+            if qteam is None:
+                continue
+            for k in seated:
+                if k != qb and seats[k].position in ("WR", "TE") and seats[k].team == qteam:
+                    var += 2.0 * rho * seats[qb].sigma * seats[k].sigma
+    return mu, var
+
+
+def test_the_win_prob_variance_did_not_move_a_bit_when_it_was_shared():
+    """PRESENTATION ONLY. The win probability's variance now comes from the same
+    helper the waiver page's team swing reads. Two QBs (one with no team), a WR and
+    a TE stacked on one QB's team, and bystanders, in many seat orders: the new
+    arithmetic must equal the pre-4.7 function EXACTLY, not approximately."""
+    import itertools
+
+    seats = {
+        "qb": _seat("qb", "QB", "KC", 21.0),
+        "qb2": _seat("qb2", "QB", None, 9.0),
+        "wr": _seat("wr", "WR", "KC", 16.0),
+        "te": _seat("te", "TE", "KC", 9.0),
+        "wr2": _seat("wr2", "WR", None, 7.0),
+        "rb": _seat("rb", "RB", "SF", 14.0),
+        "dst": _seat("dst", "DST", "GB", 6.0),
+        "k": _seat("k", "K", "MIN", 8.0),
+    }
+    keys = list(seats)
+    orders = list(itertools.islice(itertools.permutations(keys), 0, None, 997))
+    assert len(orders) > 30
+    for order in orders:
+        assert lineup_support._lineup_stats(order, seats, DEFAULT_VARIANCE) \
+            == _pre_47_lineup_stats(order, seats, DEFAULT_VARIANCE)
+    # and the stack term genuinely fired, so the comparison is not vacuous
+    _mu, var = lineup_support._lineup_stats(keys, seats, DEFAULT_VARIANCE)
+    assert var > sum(s.sigma ** 2 for s in seats.values())
+
+
+def test_lineup_sigma_is_the_win_probs_own_arithmetic():
+    """The public helper the waiver page quotes is the square root of the SAME
+    variance the card's win probability uses, from (position, points, team) alone."""
+    seats = {k: _seat(k, pos, team, pts) for k, pos, team, pts in (
+        ("qb", "QB", "KC", 21.0), ("wr", "WR", "KC", 16.0), ("rb", "RB", "SF", 14.0),
+        ("te", "TE", "JAX", 9.0), ("dst", "DST", "GB", 6.0), ("k", "K", "MIN", 8.0))}
+    _mu, var = lineup_support._lineup_stats(list(seats), seats, DEFAULT_VARIANCE)
+    sigma = lineup_support.lineup_sigma(
+        [(s.position, s.points, s.team) for s in seats.values()])
+    assert sigma == pytest.approx(var ** 0.5, rel=1e-12)
+
+
+def test_the_margin_line_quotes_the_swings_its_win_prob_used(db, marginal_world):
+    """DONE-WHEN (c), lineup half. The SCALE line sits directly under the margin /
+    win-prob line and quotes the three swings that produced that win prob — proven
+    by recomputing P(win) from the quoted numbers alone."""
+    from ziggurat.core import units
+
+    marginal_world(_opp_specs(), retrieved=PULL)
+    _matchup(db, week=WEEK, home_team_id=TEAM, away_team_id=5)
+    db.commit()
+    rec = _build(db, opponent_total=None)
+    assert rec.opponent_total is not None and rec.opp_sigma is not None
+    assert rec.margin_sigma ** 2 == pytest.approx(rec.own_sigma ** 2 + rec.opp_sigma ** 2)
+    assert win_probability(rec.own_projected_total, rec.opponent_total,
+                           rec.own_sigma ** 2, rec.opp_sigma ** 2) \
+        == pytest.approx(rec.win_prob, rel=1e-9)
+    # his swing is his own seated lineup's, not the flat fallback
+    opp = lineup_support._opponent_lineup(
+        db, as_of=PULL, season=SEASON, week=WEEK, opp_team_id=5, source="sleeper_rotowire",
+        byes=lineup_support.bye_map(db, as_of=PULL, season=SEASON, source="sleeper_rotowire"),
+        variance=DEFAULT_VARIANCE, structure=lineup_support.DEFAULT_ROSTER, view="historical")
+    assert rec.opp_sigma == pytest.approx(opp[1] ** 0.5)
+
+    lines = format_lineup_recommendation(rec).splitlines()
+    head = next(i for i, ln in enumerate(lines) if ln.startswith(rec.posture + "  —"))
+    scale = lines[head + 1]
+    assert scale.startswith("  SCALE: the PROJECTED margin swings")
+    for s in (rec.margin_sigma, rec.own_sigma, rec.opp_sigma):
+        assert f"+/-{s:.1f}" in scale
+    assert "all-healthy" in scale
+    assert DEFAULT_VARIANCE.label in scale and DEFAULT_VARIANCE.source in scale
+    assert lines[head + 2] == f"  {units.UNITS_LEGEND}"
+
+
+def test_an_override_opponent_is_quoted_at_the_flat_figure_and_says_why(db, marginal_world):
+    """``--opponent-total`` supplies his TOTAL, not his lineup, so the win prob uses
+    the labelled flat fallback — and the sentence names that, not a lineup."""
+    marginal_world(_contest_specs(), retrieved=PULL)
+    rec = _build(db, opponent_total=120.0)
+    assert rec.opp_sigma == pytest.approx(DEFAULT_VARIANCE.opp_flat_sigma)
+    assert "--opponent-total" in format_lineup_recommendation(rec)
+
+
+def test_with_no_opponent_the_card_quotes_only_your_own_swing(db, marginal_world):
+    marginal_world(_opp_specs(), retrieved=PULL)
+    _matchup(db, week=WEEK, home_team_id=TEAM, away_team_id=5)   # week 3 only
+    db.commit()
+    rec = _build(db, week=15, opponent_total=None)
+    assert rec.opponent_total is None
+    assert rec.opp_sigma is None and rec.margin_sigma is None and rec.own_sigma > 0
+    text = format_lineup_recommendation(rec)
+    scale = next(ln for ln in text.splitlines() if ln.startswith("  SCALE:"))
+    assert f"+/-{rec.own_sigma:.1f} pts" in scale and "no opponent" in scale
+    assert "margin swings" not in scale
