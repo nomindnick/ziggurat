@@ -6851,6 +6851,69 @@ weeks of the decision-freeze archive and written down with intervals; (b) a
 deploy / narrow / retire decision on the shrinkage factor is recorded against the
 pre-stated floor; (c) the dispersion sentence and the PROJECTED/REALISED labels
 are live on `waivers`, `stream` and `lineup` and pinned by test.
+**Pre-registration (written 2026-09-30, committed BEFORE any regression is run;
+the commit that adds this block is the freeze, and nothing below is edited
+afterwards — results go in the Update block as dated amendments).**
+
+- **Question:** is the week-level spread of our house projections too wide?
+  Measured as the slope `b` of realised house points on projected house points
+  (`realised = a + b·projected`), per position. `b < 1` means every quoted
+  DIFFERENCE between two players is too wide by a factor of about `1/b`.
+- **Decision points:** the Tuesday 18:30 PT TIMER capture of each graded week,
+  one per week:
+  - week 1: `20260908T183009-d81bf0a2` (as_of 2026-09-08);
+  - week 2: `20260915T183009-f6d82bf9` (09-15);
+  - week 3: `20260922T183009-527a11ed` (09-22).
+
+  Week 4 joins only after its Monday game is final, and only as a sensitivity.
+  The decision below uses weeks 1–3.
+- **Projected:** `valuation.weekly_lines(as_of=<capture as_of>, weeks=[w])`,
+  default `historical` view, source `sleeper_rotowire`, i.e. house points
+  priced through `scoring.py` exactly as the tool priced them that Tuesday.
+- **Realised:** house points for week `w` from `weekly_stats` (skill),
+  `team_defense` (D/ST, both bracket systems) and the persisted kicking
+  columns (K), all through `scoring.py`, read under `base.latest_truth` at
+  as_of 2026-09-30.
+  - A projected player whose team played but who has no stat row scores
+    **0.0**: he did not play, and that is what starting him returned.
+  - Byes are excluded (no projection).
+- **Population:**
+  - **PRIMARY:** every player in the ESPN universe (`league_player_state` at
+    the capture's as_of) with a week-`w` projection **≥ 1.0** house point.
+  - **SECONDARY (reported, not decided on):** the capture's own
+    scanned free-agent pool plus our roster, i.e. the rows the tool actually
+    quoted.
+  - Selecting on the projection does not bias the slope of `realised` on
+    `projected`.
+- **Positions:** QB, RB, WR, TE, K, D/ST, each fitted separately. Weeks 1–3
+  are pooled.
+- **Interval:** 95% player-clustered bootstrap (resample players with all
+  their weeks), B = 2,000, fixed seed, percentile interval.
+- **The practical floor is `b = 0.90`.** Below it, a shrinkage factor would
+  move a typical quoted gain by more than 10%. At or above it, the rounding
+  of a printed number moves more than the correction would.
+- **Decision rule, per position:**
+  - **DEPLOY** (a labelled hypothesis multiplier on DIFFERENCES shown on the
+    board — never a `scoring.py` change): the 95% upper bound of `b` is
+    **< 0.90**.
+  - **RETIRE** ("the units are right"): the 95% interval **contains 1.0 AND**
+    `b̂ ≥ 0.90`.
+  - **NARROW** (keep the dispersion sentence, re-measure at ≥7 graded weeks,
+    ~Week 8): every other outcome. This includes a slope significantly ABOVE
+    1, which is reported, not acted on.
+- **Stated expectation, so a surprise is visible:** the literature's 12-season
+  FFA slopes are QB 0.67, TE 0.72, RB 0.79, WR 0.85. There is no prior for K or
+  D/ST. Three weeks is a small sample, so NARROW is the likeliest outcome at
+  most positions.
+- **Sensitivity only (reported, never decided on):**
+  - weeks 2–3 alone, because Week-1 scoring is systematically suppressed
+    (literature hint 8);
+  - the SECONDARY population;
+  - week 4 once final.
+- **Out of scope:** season-SUM calibration (the chain quotes 14-week sums;
+  their slope can differ from the weekly one); the ECR-panel cross-check.
+- **Independent of the result:** part 3 (the dispersion sentence) and part 4
+  (PROJECTED / REALISED labels) ship either way (Rule 6).
 **Update:**
 > _[To be completed]_
 
