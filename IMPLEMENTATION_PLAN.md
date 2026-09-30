@@ -4290,6 +4290,125 @@ explorer and verifier. Answer it before claiming anything proprietary here.
 > grading re-run of `probes/E08_*.py` with a pre-stated practical floor.
 > Suite green (**3,143 passed, 16 skipped, 0 failed; 3,159 collected — the 12 skips above the usual 4 are the tests that need a live `db/ziggurat.sqlite`, which an isolated worktree does not have, NOT anything this item turned off**).
 
+### 3.14b [Fix] The weekly board's WEEK comes from its own rows — DONE 2026-09-30 (from the wk3/wk4 journals)
+**Why it exists.** Three Tuesdays in four, `fp_weekly_ecr` filed the PREVIOUS
+week's board under the NEXT week's number:
+- The week label was decided per PULL, from the FantasyPros page (operator
+  decision D2(b), `ZIGGURAT_FP_WEEK_PAGE=1`), with the schedule as fallback.
+- The page flips on Monday night. DynastyProcess rewrites the CSV on no fixed
+  clock: commits on 09-27 07:32Z, 09-27 18:03Z, 09-28 08:09Z and 09-28 20:23Z,
+  then nothing until 09-30 07:53Z.
+- So the Tuesday pull read "week 4" off the page and stamped it on the Monday
+  scrape. **100% of that file's opponents were week 3's, on every page.**
+
+Three consequences, each observed:
+1. `ziggurat stream` printed a week-3 market rank (Vikings DST5, earned at TB)
+   beside a week-4 opponent. The D/ST decision on 09-29 had to be made off a
+   hand read of the live page.
+2. Because `nfl_week` sits outside the resolution key, the re-pull RELABELLED
+   rows already stored. Every read at as-of ≥ 09-29 saw the 09-28 scrape as
+   week 4.
+3. The per-page floor then REFUSED genuine pages of the next week, because it
+   compared them against the mislabelled baseline. Those pages are perishable,
+   so each refusal is a lost capture. **Ten page captures were lost in two
+   weeks** (`nfl_ingest_runs`, `partial` rows):
+   - 09-22 19:34 PT: rb, te, wr, qb, against the 09-21 week-2 file labelled 3;
+   - 09-23: te, wr;
+   - 09-24: te, wr;
+   - 09-30: te and wr, 51 rows against 112.
+
+**What shipped.**
+- **Label precedence** (`fp_weekly.infer_week_from_opponents`, per page,
+  `week_basis = 'opponents'`): the rows' own (team, opponent) pairs are matched
+  against `schedules` and beat both pull-time authorities whenever they are
+  decisive. Decisive means ≥8 recognisable pairs, ≥80% matching one week, and
+  the runner-up week ≤50%; all three thresholds are labelled.
+- **Thin pages:** a page too thin to decide borrows its FILE's verdict (one
+  scrape).
+- **Mixed pages:** a page with enough rows whose content is MIXED keeps the
+  pull-time label, and the run log names it.
+- **Overrides are logged:** an override is stated on the run log ("OVERRODE
+  the pull-time label (fantasypros_page said 4)").
+- **Stable across re-pulls:** a re-pull of the same file carries the same label
+  on every pull, which closes the relabel hole. The module docstring had
+  recorded this as its "one hole" and judged it not worth fixing.
+- **Ordering:** the content pass runs BEFORE the per-page floor, so the floor
+  compares against the right week. The floor itself is unchanged.
+- **Stored damage:** `ziggurat ingest fp-weekly-labels [--repair]`
+  (`audit_stored_week_labels` / `repair_stored_week_labels`).
+  - The audit is read-only. It reports only captures whose content PROVES the
+    stored label wrong.
+  - The repair rewrites `nfl_week`/`week_basis` IN PLACE on exactly those
+    captures, in one transaction, with no market value touched.
+  - In place because the wrong label was a derivation bug, not an observation.
+    A corrected row appended under a later `retrieved_as_of` would leave every
+    historical as-of read (i.e. every D/ST backtest) reading the bug.
+- **No migration:** `week_basis` has no CHECK constraint.
+
+**Live audit, 2026-09-30:** exactly 12 captures, all two known Tuesday
+mislabels.
+- The 09-21 scrape pulled 09-22, labelled 3: week 2 on every page, 32/32 …
+  194/194.
+- The 09-28 scrape pulled 09-29, labelled 4: week 3 on every page, 32/32 …
+  173/173.
+- No false positive on any other stored capture.
+
+**Tests:** 18 new tests in `tests/test_nfl_fp_weekly.py`, on a schedule whose
+weeks 3 and 4 pair the same sixteen teams differently. Every pre-existing label
+test is unchanged: their stub schedule pairs only BUF–MIA, so content is never
+decisive there and the old chain answers exactly as before. Each of the
+following mutations is killed by at least one test:
+- the content pass disabled;
+- the fence run BEFORE the content pass;
+- the runner-up rule removed;
+- `_CONTENT_MIN_ROWS = 0`;
+- the season-snapshot schedule read removed;
+- team aliases removed;
+- the provisional-note suppression removed;
+- the thin-page contradiction guard removed.
+
+**Review round (one Opus reviewer, same day), 6 confirmed defects, all fixed
+before merge:**
+1. **The code fix alone does not stop the refusal.** The floor's baseline is
+   the STORED label, so `ziggurat ingest fp-weekly-labels --repair` must run
+   before the next daily pull. It was run at merge time (see below).
+2. **The fence-after-content ordering was pinned by nothing.** A fence-first
+   mutation passed every test. It is now pinned by
+   `test_the_content_pass_runs_BEFORE_the_fence`: a Monday pull whose file is
+   already next week's.
+3. **The override note stated a false cause** ("the file is older than the
+   page") for schedule-labelled and unlabelled captures, and in the NEWER
+   direction. The cause is now stated per basis and direction, and the
+   override leads the note so `ingest status`'s 220-character cut keeps it.
+4. **A thin page borrowed its file's week even when its own rows contradicted
+   it**, and the note misreported its own count. A thin page now borrows only
+   when ≥80% of its own recognisable rows agree.
+5. **This entry understated the damage:** ten lost captures, not two.
+6. **The "did NOT decide" note omitted the runner-up rule.**
+
+Also fixed from the weaker list:
+- `schedule_pairs` reads the season's NEWEST snapshot. nflverse encodes the
+  week in `game_id`, so a per-id read would keep a moved game's ghost.
+- A file the rows cannot check at all (no schedule, or drifted team codes)
+  now SAYS the relabel guarantee lapsed, instead of going quiet.
+- The dry-run scope line no longer claims the schedule decides.
+- The repair output notes that frozen decision archives keep the OLD label by
+  design.
+
+**Not changed, deliberately.**
+- D2(b) stays ON, as a fallback only. The first draft of this entry said the page
+  was still needed for pre-opener captures; the review showed the content decides
+  the 09-04 fixture too (week 1, 36/36) once a schedule is ingested. The page now
+  answers only where the rows cannot (no schedule ingested, or a thin/mixed
+  file).
+- A hypothetical file mixing two weeks' pages (never observed) would have the
+  vanished-page arm report the other week's pages as absent. Recorded, not
+  built.
+- `stream` needs no change: `dst_market_board` already refuses to serve one
+  week's board for another. With the label right, a Tuesday morning holding
+  only last week's file now reads "no week-N board" and falls back with its own
+  disclosure, instead of printing a stale rank as current.
+
 ### 3.15 [Experiment] Is the close-band gate costing points on real rosters? (added 2026-09-15, from the E10 verification)
 **Why it exists.** `lineup_support.py:812-822` returns the greedy lineup untouched
 whenever `|margin| < close_band` (`max(5.0, 0.3·√(var_own+var_opp))`, ≈9.98 house

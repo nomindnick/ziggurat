@@ -40,6 +40,15 @@ decided it — ``'schedules'``, ``'fantasypros_page'`` (opt-in, DEFAULT OFF), or
 ``'unknown'`` with a NULL week. See :func:`infer_weekly_board_week` for the rule
 and its one known soft day.
 
+**AND THE ROWS OUTRANK ALL OF THEM (2026-09-30, item 3.14b).** Both of those
+authorities describe the moment of the PULL; only the rows describe the FILE.
+Three Tuesdays in four the page had flipped to week N+1 while upstream had not
+rewritten Monday's week-N file, and the pull filed week N's board as N+1
+(100% of its opponents were week N's). ``'opponents'`` —
+:func:`infer_week_from_opponents` — now labels every page whose (team,
+opponent) pairs decide a week, BEFORE the per-page floor runs, and the older
+chain answers only where the content cannot.
+
 RULE 2. ``r2p_pts`` and ``start_sit_grade`` are FantasyPros' OWN projected points
 and their own start/sit letter grade, in THEIR scoring. They are stored because
 they are what the market was saying — never as a points input. House points come
@@ -97,6 +106,11 @@ re-breaks:
   by construction has not changed. Judged not worth a second baseline path, which
   would be more machinery than the corner is worth — but it is a hole, not an
   absence of one.
+  **CLOSED 2026-09-30 (item 3.14b), and it was not a corner.** It happened on
+  three Tuesdays in four. The label also RELABELLED the stored rows, and the
+  mislabelled baseline then refused the next genuine week's thin pages. The
+  label now comes from the rows' own opponents whenever they decide it, so one
+  file carries one week on every pull.
 
 WHAT IS NOT STORED, AND WHY THERE IS NO RAW MIRROR. ``ff_opportunity`` keeps a
 lossless parquet mirror of every capture because it stores 25 of 159 columns and
@@ -429,6 +443,318 @@ def infer_weekly_board_week(
         f"the scrape is later than the season's last REG gameday ({bounds[weeks[-1]][1]})"
         + ask
     )
+
+
+# ------------------------------------------------------ the content authority
+
+#: THE CONTENT AUTHORITY (2026-09-30). Every row names the opponent its player
+#: faces, so a page can be matched against the schedule directly. That answers the
+#: question the label exists for — WHICH WEEK DO THESE ROWS RANK — from the rows
+#: themselves, instead of from the clock (``infer_weekly_board_week``) or from a
+#: page read at pull time (``resolve_page_week``).
+#:
+#: WHY IT OUTRANKS BOTH (measured, three times in four in-season weeks). The file
+#: and the page are two different moments. DynastyProcess rewrites the CSV on no
+#: fixed clock (commits 09-27 07:32Z, 09-27 18:03Z, 09-28 08:09Z, 09-28 20:23Z,
+#: then nothing until 09-30 07:53Z), while the FantasyPros page flips to the next
+#: week on Monday night. So a Tuesday pull read "week 4" off the page and filed
+#: the MONDAY scrape under it. On every page, 100% of that scrape's
+#: opponents were week 3's and 0% were week 4's. Two consequences followed.
+#: ``ziggurat stream`` printed a week-3 market rank beside a week-4 opponent. And
+#: the per-page floor compared the genuine week-4 file (09-30) against that
+#: mislabelled baseline, refusing its TE and WR pages. Because ``nfl_week`` was
+#: decided per pull, a re-pull of the same ``scrape_date`` also RELABELLED rows
+#: already stored. A label derived from the rows is the same on every pull of the
+#: same file, so that hole closes as well.
+#:
+#: THE THRESHOLDS, labelled. A board ranks one week, so a genuine page matches it
+#: almost completely. The misses are free agents FantasyPros still lists under a
+#: team whose game they will not play in. A WRONG week matches only the rematches
+#: it shares with the right one (at most a few of 16 games). Hence: at least
+#: ``_CONTENT_MIN_ROWS`` rows with a recognisable (team, opponent) pair, at least
+#: ``_CONTENT_MIN_SHARE`` of them matching the best week, and the runner-up week
+#: matching no more than ``_CONTENT_MAX_RUNNER_UP``. Anything short of that is NOT
+#: decisive, and the provisional label (page, then schedule) stands and says so.
+_CONTENT_MIN_ROWS = 8
+_CONTENT_MIN_SHARE = 0.80
+_CONTENT_MAX_RUNNER_UP = 0.50
+
+#: The ``week_basis`` value the content authority writes. No migration needed:
+#: migration 016 declares the column ``TEXT NOT NULL`` with no CHECK.
+CONTENT_BASIS = "opponents"
+
+
+def _norm_team(value) -> str | None:
+    if value is None:
+        return None
+    token = str(value).strip().upper()
+    if not token or token in {"NAN", "NONE", "BYE"}:
+        return None
+    return base.TEAM_ALIASES.get(token, token)
+
+
+def schedule_pairs(conn, season: int) -> dict[int, frozenset[tuple[str, str]]]:
+    """``week -> {(team, opponent), ...}`` for one season's REG games, both directions.
+
+    RULE 1, stated: no ``as_of``, for the reason ``week_bounds`` gives. The
+    calendar is the CLOCK a board is labelled against, not a decision input.
+    Gating it would mean a board could not be told which week it ranks until the
+    games had been played.
+
+    THE SEASON'S NEWEST SCHEDULE SNAPSHOT, not the newest row per ``game_id``.
+    nflverse encodes the week IN the ``game_id`` (``2026_04_MIA_MIN``), so a game
+    the league moves gets a NEW id, and a per-id newest-row read would keep a
+    ghost of the old id in the old week. The whole-season file is re-pulled in
+    full every time, so its newest snapshot is complete by construction.
+    """
+    rows = conn.execute(
+        "SELECT week, home_team, away_team FROM schedules "
+        "WHERE season = ? AND game_type = 'REG' "
+        "AND retrieved_as_of = (SELECT MAX(retrieved_as_of) FROM schedules "
+        "                       WHERE season = ? AND game_type = 'REG')",
+        (int(season), int(season)),
+    ).fetchall()
+    out: dict[int, set[tuple[str, str]]] = {}
+    for r in rows:
+        home, away = _norm_team(r["home_team"]), _norm_team(r["away_team"])
+        if home is None or away is None or r["week"] is None:
+            continue
+        pairs = out.setdefault(int(r["week"]), set())
+        pairs.add((home, away))
+        pairs.add((away, home))
+    return {week: frozenset(p) for week, p in out.items()}
+
+
+def infer_week_from_opponents(rows, pairs) -> dict:
+    """Which week's schedule do these rows' (team, opponent) pairs belong to?
+
+    PURE. ``rows`` carry ``team`` and ``player_opponent_id``; ``pairs`` is
+    :func:`schedule_pairs`. Returns a dict with ``week`` (None unless DECISIVE,
+    see the thresholds above), ``matched`` / ``considered`` (the best week's
+    count over the rows with a recognisable pair), ``runner_up`` /
+    ``runner_up_matched``, and ``best`` (the best week even when not decisive, so
+    a note can say what the rows leaned toward).
+
+    A bye or a blank opponent is not evidence either way and is left out of
+    ``considered``. So is a team code the schedule has never heard of.
+    """
+    known = {team for week_pairs in pairs.values() for pair in week_pairs for team in pair}
+    seen = []
+    for row in rows:
+        team = _norm_team(row.get("team"))
+        opponent = _norm_team(row.get("player_opponent_id"))
+        if team in known and opponent in known:
+            seen.append((team, opponent))
+    considered = len(seen)
+    verdict = {"week": None, "best": None, "matched": 0, "considered": considered,
+               "runner_up": None, "runner_up_matched": 0, "pairs": tuple(seen)}
+    if not considered or not pairs:
+        return verdict
+    ranked = sorted(
+        ((sum(1 for pair in seen if pair in week_pairs), week)
+         for week, week_pairs in pairs.items()),
+        key=lambda item: (-item[0], item[1]),
+    )
+    best_n, best_week = ranked[0]
+    runner_n, runner_week = ranked[1] if len(ranked) > 1 else (0, None)
+    verdict.update(best=best_week, matched=best_n, runner_up=runner_week,
+                   runner_up_matched=runner_n)
+    if (considered >= _CONTENT_MIN_ROWS
+            and best_n >= _CONTENT_MIN_SHARE * considered
+            and runner_n <= _CONTENT_MAX_RUNNER_UP * considered):
+        verdict["week"] = best_week
+    return verdict
+
+
+def _content_labels(conn, kept) -> dict[tuple[int, str, str], dict]:
+    """``(season, scrape_date, page) -> verdict`` for every page in a capture.
+
+    A page decides for itself when it has enough rows. A page too THIN to decide
+    (fewer than ``_CONTENT_MIN_ROWS`` recognisable pairs) borrows the verdict of
+    its whole FILE (every page sharing its ``scrape_date``), because the pages of
+    one file are one scrape — BUT ONLY IF ITS OWN ROWS DO NOT CONTRADICT IT: at
+    least ``_CONTENT_MIN_SHARE`` of its recognisable pairs (if it has any) must be
+    games of the file's week. A page with enough rows that still is not decisive
+    does NOT borrow. Its own content is mixed, and papering over that with its
+    siblings' answer would be the same over-claim this authority exists to end.
+    The verdict dict gains ``scope``: ``'page'``, ``'file'``, or ``'undecided'``.
+    """
+    pairs_by_season: dict[int, dict] = {}
+    pages: dict[tuple[int, str, str], list[dict]] = {}
+    files: dict[tuple[int, str], list[dict]] = {}
+    for row in kept:
+        season = int(row["season"])
+        pages.setdefault((season, str(row["scrape_date"]), str(row["page"])), []).append(row)
+        files.setdefault((season, str(row["scrape_date"])), []).append(row)
+    for season in {key[0] for key in pages}:
+        pairs_by_season[season] = schedule_pairs(conn, season)
+    file_verdicts = {
+        key: infer_week_from_opponents(file_rows, pairs_by_season[key[0]])
+        for key, file_rows in files.items()
+    }
+    out: dict[tuple[int, str, str], dict] = {}
+    for key, page_rows in pages.items():
+        season, scrape, _page = key
+        verdict = infer_week_from_opponents(page_rows, pairs_by_season[season])
+        if verdict["week"] is not None:
+            verdict["scope"] = "page"
+        elif verdict["considered"] < _CONTENT_MIN_ROWS:
+            file_verdict = file_verdicts[(season, scrape)]
+            file_week = file_verdict["week"]
+            own = verdict["pairs"]
+            agree = (sum(1 for pair in own if pair in pairs_by_season[season][file_week])
+                     if file_week is not None else 0)
+            if file_week is not None and agree >= _CONTENT_MIN_SHARE * len(own):
+                verdict = dict(file_verdict, scope="file", page_matched=agree,
+                               page_considered=len(own))
+            else:
+                verdict["scope"] = "undecided"
+        else:
+            verdict["scope"] = "undecided"
+        out[key] = verdict
+    return out
+
+
+def _override_cause(basis: str, old, week: int) -> str:
+    """One clause saying WHAT the content overrode and, only where it is known, WHY.
+
+    Stated per basis and direction rather than as one stock sentence. The first
+    draft of this note said "the file is older than the page it was labelled
+    from" for every override, including a schedule-labelled Monday board that
+    was NEWER than its calendar week and a pre-opener board no page was read for
+    (item 3.14b review).
+    """
+    if basis == "fantasypros_page" and old is not None:
+        direction = "OLDER" if week < int(old) else "NEWER"
+        return (f"the FantasyPros page's week {old} — this file is {direction} than the "
+                "page it was labelled from")
+    if basis == "schedules" and old is not None:
+        return (f"the schedule-clock week {old} — the rows rank a different week than "
+                "the scrape date's calendar week")
+    if basis == "unknown":
+        return "an unlabelled week (the pull-time rules could not say)"
+    return f"{basis}={old!r}"
+
+
+def _content_phrase(page: str, verdict: dict) -> str:
+    if verdict.get("scope") == "file":
+        return (f"{page} (via the whole file: {verdict['matched']}/{verdict['considered']}; "
+                f"its own rows {verdict.get('page_matched', 0)}/"
+                f"{verdict.get('page_considered', 0)} agree but are too few to decide)")
+    return f"{page} {verdict['matched']}/{verdict['considered']}"
+
+
+def audit_stored_week_labels(conn, *, season: int) -> list[dict]:
+    """Stored captures whose ``nfl_week`` disagrees with their own rows' opponents.
+
+    READ-ONLY. One dict per ``(scrape_date, page, retrieved_as_of)`` capture whose
+    content is DECISIVE for a week other than the stored one, with ``stored_week``
+    / ``stored_basis`` / ``content_week`` / ``matched`` / ``considered`` /
+    ``scope``. A capture whose content is not decisive is never reported: this
+    names what the rows PROVE is wrong, not what they fail to confirm.
+
+    Why this exists: before 2026-09-30 the label came from the pull-time page, so
+    the 09-22 and 09-29 Tuesday pulls filed Monday scrapes under the NEXT week.
+    ``select_as_of`` resolves the newest retrieval per key, so those relabels also
+    rewrote what every later read saw for the earlier retrieval's key.
+    """
+    captures = conn.execute(
+        "SELECT DISTINCT scrape_date, retrieved_as_of FROM fp_weekly_ecr "
+        "WHERE season = ? ORDER BY scrape_date, retrieved_as_of",
+        (int(season),),
+    ).fetchall()
+    out: list[dict] = []
+    for capture in captures:
+        rows = [
+            dict(r) for r in conn.execute(
+                "SELECT page, team, player_opponent_id, nfl_week, week_basis, season, "
+                "scrape_date FROM fp_weekly_ecr WHERE season = ? AND scrape_date = ? "
+                "AND retrieved_as_of = ?",
+                (int(season), capture["scrape_date"], capture["retrieved_as_of"]),
+            )
+        ]
+        verdicts = _content_labels(conn, rows)
+        stored: dict[str, set] = {}
+        for row in rows:
+            stored.setdefault(str(row["page"]), set()).add(
+                (row["nfl_week"], row["week_basis"]))
+        for (_season, scrape, page), verdict in sorted(verdicts.items()):
+            if verdict["week"] is None:
+                continue
+            labels = stored.get(page, set())
+            if all(week == verdict["week"] for week, _basis in labels):
+                continue
+            out.append({
+                "season": int(season),
+                "scrape_date": scrape,
+                "retrieved_as_of": capture["retrieved_as_of"],
+                "page": page,
+                "stored_week": sorted({w for w, _ in labels},
+                                      key=lambda w: -1 if w is None else w),
+                "stored_basis": sorted({b for _, b in labels}),
+                "content_week": verdict["week"],
+                "matched": verdict["matched"],
+                "considered": verdict["considered"],
+                "scope": verdict["scope"],
+            })
+    return out
+
+
+def format_label_audit(mismatches, *, season: int, repaired: int | None = None) -> str:
+    """The ``ziggurat ingest fp-weekly-labels`` report (Rule 3: logic lives here)."""
+    lines = [f"fp_weekly_ecr week labels — season {season}"]
+    if not mismatches:
+        lines.append("  every stored capture whose opponents decide a week carries that week.")
+        return "\n".join(lines)
+    lines.append(
+        f"  {len(mismatches)} stored page capture(s) are labelled a week their own "
+        "opponents contradict:")
+    lines.append("  SCRAPE      RETRIEVED   PAGE     STORED        ROWS SAY   MATCHED")
+    for m in mismatches:
+        stored = ",".join("?" if w is None else str(w) for w in m["stored_week"])
+        basis = ",".join(m["stored_basis"])
+        lines.append(
+            f"  {m['scrape_date']:<11} {m['retrieved_as_of']:<11} {m['page']:<8} "
+            f"{stored + ' (' + basis + ')':<13} week {m['content_week']:<4} "
+            f"{m['matched']}/{m['considered']}"
+            + (" (whole file)" if m["scope"] == "file" else ""))
+    if repaired is None:
+        lines.append(
+            "  Nothing changed. `--repair` rewrites ONLY nfl_week/week_basis on exactly "
+            "these captures, in place, in one transaction. Back up db/ziggurat.sqlite first.")
+    else:
+        lines.append(f"  REPAIRED: {repaired} row(s) relabelled in place (week_basis = "
+                     f"{CONTENT_BASIS!r}). No market value was touched. Frozen decision "
+                     "archives keep the OLD label — that is by design, not corruption.")
+    return "\n".join(lines)
+
+
+def repair_stored_week_labels(conn, mismatches) -> int:
+    """Rewrite ``nfl_week`` / ``week_basis`` on the captures ``mismatches`` names.
+
+    Takes the output of :func:`audit_stored_week_labels` so the caller can print
+    what will change before anything does. ONE transaction. Touches only the two
+    label columns, and only on the exact ``(season, scrape_date, page,
+    retrieved_as_of)`` captures listed. No market value is changed and no row is
+    added or removed. Returns the number of rows rewritten.
+
+    IN PLACE, deliberately, and not a new versioned capture. The wrong label was a
+    DERIVATION bug, not an observation. A corrected row appended under a later
+    ``retrieved_as_of`` would fix reads from today on, and would leave every
+    historical as-of read, i.e. every backtest of the D/ST board, reading the bug.
+    Take a database backup first. The CLI command that calls this says so.
+    """
+    changed = 0
+    with conn:
+        for m in mismatches:
+            cursor = conn.execute(
+                "UPDATE fp_weekly_ecr SET nfl_week = ?, week_basis = ? "
+                "WHERE season = ? AND scrape_date = ? AND page = ? AND retrieved_as_of = ?",
+                (int(m["content_week"]), CONTENT_BASIS, int(m["season"]),
+                 m["scrape_date"], m["page"], m["retrieved_as_of"]),
+            )
+            changed += cursor.rowcount
+    return changed
 
 
 # --------------------------------------------------- the opt-in page authority
@@ -794,11 +1120,18 @@ def _vanished_page_sentences(conn, by_page, *, season: int) -> list[str]:
 def ingest_fp_weekly(conn, df, *, retrieved_as_of: str, page_week=None) -> int:
     """Persist one weekly board, stamping ``knowable_as_of`` with its scrape date.
 
-    ``page_week`` is the optional ``(week, last_updated_ts)`` from the FantasyPros
-    page authority (operator decision D2(b), DEFAULT OFF — see
-    :func:`week_page_enabled`). When given it WINS over the schedule-derived week
-    and ``week_basis`` records ``'fantasypros_page'``; when absent the schedule
-    decides and may answer ``'unknown'``.
+    THE WEEK LABEL, in precedence order (2026-09-30):
+
+    1. **The rows' own opponents** (:func:`infer_week_from_opponents`, per page,
+       ``week_basis = 'opponents'``) whenever they are decisive. This beats both
+       of the other authorities, because both describe the PULL and only this one
+       describes the FILE (see ``_CONTENT_MIN_ROWS`` for the measurement).
+    2. ``page_week``, the optional ``(week, last_updated_ts)`` from the
+       FantasyPros page authority (operator decision D2(b), DEFAULT OFF — see
+       :func:`week_page_enabled`), recorded as ``'fantasypros_page'``.
+    3. The schedule-derived week, which may answer ``'unknown'``.
+
+    When (1) overrides (2) or (3), the run log names the override.
 
     The write is ONE transaction: a failure part-way rolls the whole capture back
     rather than leaving a half-written board that a later read would resolve
@@ -922,6 +1255,37 @@ def ingest_fp_weekly(conn, df, *, retrieved_as_of: str, page_week=None) -> int:
             f"{sorted(LEAGUE_PAGES)} pages."
         )
 
+    # THE CONTENT AUTHORITY, BEFORE THE FENCE. The floor compares a page against
+    # the stored capture OF THE SAME WEEK, so the week has to be right before
+    # that comparison means anything. Measured 2026-09-30: the genuine week-4
+    # TE and WR pages were refused against a week-3 file stored as week 4.
+    content_notes: dict[tuple[int, str, int], list[str]] = {}
+    override_notes: dict[tuple[int, str, int], set[tuple[str, int | None]]] = {}
+    undecided: dict[tuple[int, str], list[str]] = {}
+    blind: dict[tuple[int, str], list[str]] = {}
+    for (season, scrape, page), verdict in sorted(_content_labels(conn, kept).items()):
+        page_rows = [r for r in kept if int(r["season"]) == season
+                     and r["scrape_date"] == scrape and r["page"] == page]
+        if verdict["week"] is None:
+            if verdict["considered"]:
+                undecided.setdefault((season, scrape), []).append(
+                    f"{page} (best week {verdict['best']}: "
+                    f"{verdict['matched']}/{verdict['considered']}; next week "
+                    f"{verdict['runner_up']}: "
+                    f"{verdict['runner_up_matched']}/{verdict['considered']})")
+            else:
+                blind.setdefault((season, scrape), []).append(page)
+            continue
+        week = int(verdict["week"])
+        for row in page_rows:
+            if row["nfl_week"] != week:
+                override_notes.setdefault((season, scrape, week), set()).add(
+                    (str(row["week_basis"]), row["nfl_week"]))
+            row["nfl_week"] = week
+            row["week_basis"] = CONTENT_BASIS
+        content_notes.setdefault((season, scrape, week), []).append(
+            _content_phrase(page, verdict))
+
     # THE FENCE, PER PAGE, BEFORE THE WRITE. A refused page's rows are removed
     # from the batch and everything else is written — so a complete page is never
     # thrown away because a sibling page is thin (item 3.14a; see
@@ -978,7 +1342,47 @@ def ingest_fp_weekly(conn, df, *, retrieved_as_of: str, page_week=None) -> int:
         "fp_weekly_ecr", unresolved, len(survivors),
         why="unresolved FantasyPros crosswalk id (kept, NULL gsis_id)",
     )
+    for (season, scrape, week), phrases in sorted(content_notes.items()):
+        overridden = sorted(override_notes.get((season, scrape, week), set()),
+                            key=lambda item: (item[0], -1 if item[1] is None else item[1]))
+        # The OVERRIDE leads the sentence: `ingest status` truncates a note at 220
+        # characters, and the override is the part a reader must not lose.
+        head = (f"season {season} week label from {CONTENT_BASIS!r} OVERRODE "
+                + "; ".join(_override_cause(basis, old, week) for basis, old in overridden)
+                if overridden else
+                f"season {season} week label from {CONTENT_BASIS!r}")
+        base.note_run(
+            "fp_weekly_ecr",
+            f"{head}: the {scrape} file ranks week {week}. Rows whose (team, opponent) "
+            f"is a week-{week} game: " + ", ".join(phrases),
+        )
+    for (season, scrape), phrases in sorted(undecided.items()):
+        base.note_run(
+            "fp_weekly_ecr",
+            f"season {season}: the {scrape} file's opponents did NOT decide the week for "
+            + ", ".join(phrases)
+            + f" (deciding needs {_CONTENT_MIN_ROWS}+ recognisable rows, "
+            f"{_CONTENT_MIN_SHARE:.0%} of them games of one week, AND no other week "
+            f"above {_CONTENT_MAX_RUNNER_UP:.0%}); the pull-time label stands for those pages",
+        )
+    for (season, scrape), pages_blind in sorted(blind.items()):
+        # SILENCE IS NOT A VERDICT. With no recognisable (team, opponent) pair the
+        # content authority cannot speak — no schedule ingested, or FantasyPros'
+        # team codes drifted past `TEAM_ALIASES` — and the guarantee that one file
+        # carries one week on every pull lapses for these pages. Said out loud.
+        base.note_run(
+            "fp_weekly_ecr",
+            f"season {season}: no row of the {scrape} file's "
+            + ", ".join(sorted(pages_blind))
+            + " page(s) names a (team, opponent) game on the stored schedule (no schedule "
+            "ingested, or the team codes changed), so the rows could not check the week "
+            "label; the pull-time label stands and a re-pull CAN relabel these pages",
+        )
+    still_provisional = {(int(r["season"]), r["week_basis"]) for r in kept
+                         if r["week_basis"] != CONTENT_BASIS}
     for (season, basis), why in sorted(week_notes.items()):
+        if (season, basis) not in still_provisional:
+            continue
         base.note_run(
             "fp_weekly_ecr",
             f"season {season} week label from {basis!r}: {why}",

@@ -1229,6 +1229,31 @@ def ingest_coverage(
     typer.echo(format_coverage(rows))
 
 
+@ingest_app.command("fp-weekly-labels")
+def ingest_fp_weekly_labels(
+    season: Annotated[Optional[int], typer.Option(
+        help="Season to audit (default: the current NFL season).")] = None,
+    repair: Annotated[bool, typer.Option("--repair",
+        help="Rewrite the contradicted labels in place. Back up the database first.")] = False,
+    path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Stored FantasyPros weekly boards whose week label their own opponents contradict.
+
+    Read-only unless ``--repair``. See ``fp_weekly.audit_stored_week_labels``.
+    """
+    from ziggurat.data.nfl import fp_weekly
+
+    resolved = season if season is not None else nfl_season_of(_today())
+    conn = open_db(path)
+    try:
+        mismatches = fp_weekly.audit_stored_week_labels(conn, season=resolved)
+        repaired = (fp_weekly.repair_stored_week_labels(conn, mismatches)
+                    if repair and mismatches else (0 if repair else None))
+    finally:
+        conn.close()
+    typer.echo(fp_weekly.format_label_audit(mismatches, season=resolved, repaired=repaired))
+
+
 # ============================ item 3.6: push layer ============================
 
 brief_app = typer.Typer(help="Scheduled morning briefing + phone push (item 3.6).",

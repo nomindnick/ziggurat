@@ -1249,3 +1249,332 @@ def test_the_declared_key_matches_the_migrated_schema(db):
         "PRAGMA table_info(fp_weekly_ecr)").fetchall()
     declared = tuple(name for _, name in sorted((r[5], r[1]) for r in info if r[5]))
     assert declared == fp_weekly._PK_COLS
+
+
+# ------------------------------------------ the content authority (2026-09-30)
+#
+# THE DEFECT, three Tuesdays in four: DynastyProcess had not rewritten the CSV
+# since Monday, the FantasyPros page had already flipped to the next week, and
+# the pull filed Monday's board under the page's week. Measured on the live
+# 09-29 capture: 100% of every page's opponents were week 3's, 0% week 4's.
+# `stream` then printed a week-3 market rank beside a week-4 opponent, and the
+# next day's genuine week-4 TE/WR pages were refused against that mislabelled
+# baseline. Every test below builds a schedule in which weeks 3 and 4 pair the
+# SAME sixteen teams differently, so only the opponents can tell them apart.
+
+_TEAMS = ["BUF", "MIA", "NE", "NYJ", "BAL", "CIN", "CLE", "PIT",
+          "HOU", "IND", "JAX", "TEN", "DEN", "KC", "LV", "LAC"]
+#: week -> list of (away, home). Week 3 pairs neighbours; week 4 pairs across.
+_MATCHUPS = {
+    3: [(_TEAMS[i], _TEAMS[i + 1]) for i in range(0, 16, 2)],
+    4: [(_TEAMS[i], _TEAMS[i + 2]) for i in (0, 1, 4, 5, 8, 9, 12, 13)],
+}
+_GAMEDAYS = {3: ("2026-09-24", "2026-09-28"), 4: ("2026-10-01", "2026-10-05")}
+MON_WK3, TUE_WK4, WED_WK4 = "2026-09-28", "2026-09-29", "2026-09-30"
+
+
+def _stub_matchups(db, matchups=None, *, retrieved="2026-08-01"):
+    for week, games in (matchups or _MATCHUPS).items():
+        first, last = _GAMEDAYS[week]
+        for i, (away, home) in enumerate(games):
+            db.execute(
+                "INSERT INTO schedules (game_id, season, week, game_type, gameday, "
+                "home_team, away_team, retrieved_as_of, knowable_as_of) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (f"2026_{week:02d}_{away}_{home}", 2026, week, "REG",
+                 first if i == 0 else last, home, away, retrieved, retrieved),
+            )
+    db.commit()
+
+
+def _opponent(team, week):
+    for away, home in _MATCHUPS[week]:
+        if team == away:
+            return home
+        if team == home:
+            return away
+    raise KeyError(team)
+
+
+def _board_for(board, week, scrape, counts=None, *, first_id=700000):
+    """A board whose every row faces its WEEK-``week`` opponent, dated ``scrape``."""
+    out = _shaped(board, counts or {p: 16 for p in sorted(fp_weekly.LEAGUE_PAGES)}, scrape)
+    out["fantasypros_id"] = list(range(first_id, first_id + len(out)))
+    teams = [_TEAMS[i % 16] for i in range(len(out))]
+    out["team"] = teams
+    out["player_opponent_id"] = [_opponent(t, week) for t in teams]
+    return out
+
+
+def _labels(db, day=None):
+    sql = "SELECT DISTINCT page, nfl_week, week_basis FROM fp_weekly_ecr"
+    rows = db.execute(sql + (" WHERE retrieved_as_of = ?" if day else ""),
+                      (day,) if day else ()).fetchall()
+    return {(r[0], r[1], r[2]) for r in rows}
+
+
+def test_the_rows_own_opponents_decide_the_week_and_beat_the_page(db, board):
+    """THE DEFECT ITSELF. The page says week 4; the file is Monday's week-3 board.
+    Every page must be filed as week 3, and the run log must say it overrode."""
+    _stub_matchups(db)
+    _written, tally = _ingest(db, _board_for(board, 3, MON_WK3), day=TUE_WK4,
+                              page_week=(4, "1790701285"))
+
+    assert _labels(db) == {(p, 3, fp_weekly.CONTENT_BASIS) for p in fp_weekly.LEAGUE_PAGES}
+    text = " | ".join(tally["notes"])
+    assert "ranks week 3" in text
+    assert "OVERRODE the FantasyPros page's week 4" in text
+    assert "OLDER than the page" in text
+    # The override LEADS the note, so `ingest status`'s 220-char cut keeps it.
+    [note] = [n for n in tally["notes"] if "OVERRODE" in n]
+    assert note.index("OVERRODE") < 60
+    # A provisional basis that decided nothing is not narrated as if it had.
+    assert not any("week label from 'fantasypros_page'" in n for n in tally["notes"])
+
+
+def test_a_re_pull_of_the_same_file_never_relabels_it(db, board):
+    """The second half of the defect: the label was decided per PULL, so a later
+    retrieval of the SAME scrape_date carrying a flipped page rewrote the week
+    that every later read resolved to. Content is the same on every pull."""
+    _stub_matchups(db)
+    monday = _board_for(board, 3, MON_WK3)
+    _ingest(db, monday, day=MON_WK3, page_week=(3, "a"))
+    _ingest(db, monday, day=TUE_WK4, page_week=(4, "b"))
+
+    rows = fp_weekly.get_fp_weekly_ecr(db, as_of=TUE_WK4, season=2026)
+    assert rows and {r["nfl_week"] for r in rows} == {3}
+    assert fp_weekly.get_fp_weekly_ecr(db, as_of=TUE_WK4, season=2026, nfl_week=4) == []
+
+
+def test_a_genuine_new_week_is_not_refused_against_last_weeks_file(db, board):
+    """The 2026-09-30 refusal, reproduced and closed. Tuesday stored Monday's
+    week-3 file (page said 4); Wednesday's genuine week-4 file arrives with thin
+    TE/WR pages. With the old label the TE/WR pages were compared against the
+    mislabelled 'week 4' baseline and refused; now there is no week-4 baseline."""
+    _stub_matchups(db)
+    full = {p: 48 for p in sorted(fp_weekly.LEAGUE_PAGES)}
+    _ingest(db, _board_for(board, 3, MON_WK3, full), day=TUE_WK4, page_week=(4, "b"))
+
+    thin = dict(full, **{"ppr-te": 16, "ppr-wr": 16})
+    written, tally = _ingest(db, _board_for(board, 4, WED_WK4, thin, first_id=800000),
+                             day=WED_WK4, page_week=(4, "c"))
+    assert tally["refused"] == 0
+    assert set(_pages_at(db, WED_WK4)) == fp_weekly.LEAGUE_PAGES
+    assert _labels(db, WED_WK4) == {(p, 4, fp_weekly.CONTENT_BASIS)
+                                    for p in fp_weekly.LEAGUE_PAGES}
+    assert written == sum(thin.values())
+
+
+def test_the_same_week_floor_still_bites_once_the_label_is_right(db, board):
+    """The fence is not loosened, only pointed at the right week: a truncated
+    re-scrape of the SAME week is still refused."""
+    _stub_matchups(db)
+    full = {p: 48 for p in sorted(fp_weekly.LEAGUE_PAGES)}
+    _ingest(db, _board_for(board, 4, TUE_WK4, full), day=TUE_WK4)
+    thin = dict(full, **{"ppr-te": 16})
+    _written, tally = _ingest(db, _board_for(board, 4, WED_WK4, thin, first_id=900000),
+                              day=WED_WK4)
+    assert tally["refused"] == 16
+    assert "'ppr-te' (week 4)" in tally["refusals"][0]
+
+
+def test_a_thin_page_borrows_its_files_verdict(db, board):
+    """A page with too few rows to decide (a one-team page on a bye-heavy week)
+    takes the week its own FILE decided: the pages of one file are one scrape."""
+    _stub_matchups(db)
+    counts = {p: 16 for p in sorted(fp_weekly.LEAGUE_PAGES)}
+    counts["k"] = 3
+    _ingest(db, _board_for(board, 3, MON_WK3, counts), day=TUE_WK4, page_week=(4, "b"))
+    assert ("k", 3, fp_weekly.CONTENT_BASIS) in _labels(db)
+
+
+def test_a_page_whose_opponents_are_mixed_keeps_the_pull_time_label_and_says_so(db, board):
+    """Enough rows to decide, but half week 3 and half week 4: NOT decisive, and
+    NOT papered over with the file's answer. The pull-time label stands, and the
+    run log names the page the content could not decide."""
+    _stub_matchups(db)
+    frame = _board_for(board, 3, MON_WK3)
+    mixed = frame["page"] == "qb"
+    qb_teams = frame.loc[mixed, "team"].tolist()
+    frame.loc[mixed, "player_opponent_id"] = [
+        _opponent(t, 4 if i % 2 else 3) for i, t in enumerate(qb_teams)]
+    _written, tally = _ingest(db, frame, day=TUE_WK4, page_week=(4, "b"))
+
+    assert ("qb", 4, "fantasypros_page") in _labels(db)
+    assert ("dst", 3, fp_weekly.CONTENT_BASIS) in _labels(db)
+    assert any("did NOT decide" in n and "qb" in n for n in tally["notes"])
+
+
+def test_infer_week_ignores_byes_and_unknown_codes_and_normalises_aliases(db):
+    _stub_matchups(db)
+    pairs = fp_weekly.schedule_pairs(db, 2026)
+    rows = [{"team": t, "player_opponent_id": _opponent(t, 3)} for t in _TEAMS]
+    rows += [{"team": "BUF", "player_opponent_id": "BYE"},
+             {"team": "XXX", "player_opponent_id": "BUF"},
+             {"team": "BUF", "player_opponent_id": None}]
+    verdict = fp_weekly.infer_week_from_opponents(rows, pairs)
+    assert verdict["week"] == 3
+    assert (verdict["matched"], verdict["considered"]) == (16, 16)
+    assert verdict["runner_up_matched"] == 0
+
+
+def test_a_schedule_with_no_matching_week_decides_nothing(db, board):
+    """No ingested schedule at all: the content authority is silent and the
+    existing rule answers, exactly as before."""
+    written, _ = _ingest(db, board)
+    assert written == 36
+    assert {(w, b) for _p, w, b in _labels(db)} == {(None, "unknown")}
+
+
+def test_the_audit_names_stored_mislabels_and_the_repair_touches_only_labels(db, board):
+    """The stored damage from before this fix: rows written with the page's week.
+    Simulated by writing them directly, as the pre-fix code did."""
+    _stub_matchups(db)
+    _ingest(db, _board_for(board, 3, MON_WK3), day=TUE_WK4, page_week=(4, "b"))
+    db.execute("UPDATE fp_weekly_ecr SET nfl_week = 4, week_basis = 'fantasypros_page'")
+    db.commit()
+    before = db.execute(
+        "SELECT fantasypros_id, page, ecr, rank FROM fp_weekly_ecr ORDER BY 1, 2").fetchall()
+
+    found = fp_weekly.audit_stored_week_labels(db, season=2026)
+    assert {m["page"] for m in found} == fp_weekly.LEAGUE_PAGES
+    assert {(tuple(m["stored_week"]), m["content_week"]) for m in found} == {((4,), 3)}
+    report = fp_weekly.format_label_audit(found, season=2026)
+    assert "Nothing changed" in report and "Back up" in report
+
+    changed = fp_weekly.repair_stored_week_labels(db, found)
+    assert changed == 16 * len(fp_weekly.LEAGUE_PAGES)
+    assert _labels(db) == {(p, 3, fp_weekly.CONTENT_BASIS) for p in fp_weekly.LEAGUE_PAGES}
+    assert db.execute(
+        "SELECT fantasypros_id, page, ecr, rank FROM fp_weekly_ecr ORDER BY 1, 2"
+    ).fetchall() == before
+    assert fp_weekly.audit_stored_week_labels(db, season=2026) == []
+
+
+def test_the_audit_never_reports_a_capture_its_content_cannot_decide(db, board):
+    """The audit names what the rows PROVE is wrong, not what they fail to confirm."""
+    _ingest(db, board)                       # no schedule: nothing is decisive
+    assert fp_weekly.audit_stored_week_labels(db, season=2026) == []
+
+
+def test_the_cli_audit_is_read_only_by_default(tmp_path, board):
+    from typer.testing import CliRunner
+
+    from ziggurat.cli.main import app
+    from ziggurat.data.store import apply_schema, connect
+
+    path = tmp_path / "z.sqlite"
+    conn = connect(str(path))
+    apply_schema(conn)
+    _stub_matchups(conn)
+    _ingest(conn, _board_for(board, 3, MON_WK3), day=TUE_WK4)
+    conn.execute("UPDATE fp_weekly_ecr SET nfl_week = 4, week_basis = 'fantasypros_page'")
+    conn.commit()
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["ingest", "fp-weekly-labels", "--season", "2026",
+                                 "--path", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "Nothing changed" in result.output
+    conn = connect(str(path))
+    assert {r[0] for r in conn.execute("SELECT DISTINCT nfl_week FROM fp_weekly_ecr")} == {4}
+    conn.close()
+
+    result = runner.invoke(app, ["ingest", "fp-weekly-labels", "--season", "2026",
+                                 "--repair", "--path", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "REPAIRED" in result.output
+    conn = connect(str(path))
+    assert {r[0] for r in conn.execute("SELECT DISTINCT nfl_week FROM fp_weekly_ecr")} == {3}
+    conn.close()
+
+
+def test_the_content_pass_runs_BEFORE_the_fence(db, board):
+    """The ordering, pinned (item 3.14b review). A MONDAY pull, page authority
+    off, so the schedule clock says week 3 — but upstream has already published
+    week 4's board, with TE/WR still thin. Fence-first would compare those pages
+    against the stored week-3 file and refuse them; content-first files them as
+    week 4, where there is nothing to shadow."""
+    _stub_matchups(db)
+    full = {p: 48 for p in sorted(fp_weekly.LEAGUE_PAGES)}
+    _ingest(db, _board_for(board, 3, "2026-09-24", full), day="2026-09-24")
+
+    thin = dict(full, **{"ppr-te": 16, "ppr-wr": 16})
+    written, tally = _ingest(db, _board_for(board, 4, MON_WK3, thin, first_id=800000),
+                             day=MON_WK3)
+    assert tally["refused"] == 0
+    assert written == sum(thin.values())
+    assert _labels(db, MON_WK3) == {(p, 4, fp_weekly.CONTENT_BASIS)
+                                    for p in fp_weekly.LEAGUE_PAGES}
+    text = " | ".join(tally["notes"])
+    assert "schedule-clock week 3" in text
+    assert "OLDER" not in text                 # the cause is stated per basis
+
+
+def test_an_unlabelled_capture_is_not_said_to_be_older_than_a_page(db, board):
+    """No page was read and the schedule could not label it: the override note
+    must say exactly that, not the stock 'older than the page' sentence."""
+    _stub_matchups(db)
+    _written, tally = _ingest(db, _board_for(board, 3, "2026-09-20"), day="2026-09-20")
+    assert _labels(db) == {(p, 3, fp_weekly.CONTENT_BASIS) for p in fp_weekly.LEAGUE_PAGES}
+    text = " | ".join(tally["notes"])
+    assert "an unlabelled week" in text and "than the page" not in text
+
+
+def test_a_thin_page_that_CONTRADICTS_its_file_does_not_borrow(db, board):
+    """A three-row page whose every row faces a WEEK-4 opponent, inside a week-3
+    file: too thin to decide on its own, and its rows say the file's week is
+    wrong for it — so it keeps its pull-time label rather than being stamped 3."""
+    _stub_matchups(db)
+    counts = {p: 16 for p in sorted(fp_weekly.LEAGUE_PAGES)}
+    counts["k"] = 3
+    frame = _board_for(board, 3, MON_WK3, counts)
+    k_rows = frame["page"] == "k"
+    frame.loc[k_rows, "player_opponent_id"] = [
+        _opponent(t, 4) for t in frame.loc[k_rows, "team"]]
+    _written, tally = _ingest(db, frame, day=TUE_WK4, page_week=(4, "b"))
+
+    assert ("k", 4, "fantasypros_page") in _labels(db)
+    assert ("dst", 3, fp_weekly.CONTENT_BASIS) in _labels(db)
+    assert any("did NOT decide" in n and "k (" in n for n in tally["notes"])
+
+
+def test_the_runner_up_rule_refuses_a_week_the_rows_cannot_tell_apart():
+    """Two weeks with the SAME games (a rematch-heavy late season, taken to the
+    limit): every row matches both, so nothing is decisive."""
+    games = frozenset({("BUF", "MIA"), ("MIA", "BUF"), ("NE", "NYJ"), ("NYJ", "NE")})
+    pairs = {3: games, 5: games}
+    rows = [{"team": t, "player_opponent_id": o} for t, o in sorted(games)] * 3
+    verdict = fp_weekly.infer_week_from_opponents(rows, pairs)
+    assert verdict["week"] is None
+    assert verdict["matched"] == verdict["runner_up_matched"] == 12
+
+
+def test_team_aliases_are_normalised_on_both_sides():
+    """FantasyPros writes JAC and LAR; nflverse writes JAX and LA."""
+    pairs = {3: frozenset({("JAX", "LA"), ("LA", "JAX")})}
+    rows = [{"team": "JAC", "player_opponent_id": "LAR"},
+            {"team": "LAR", "player_opponent_id": "JAC"}] * 4
+    verdict = fp_weekly.infer_week_from_opponents(rows, pairs)
+    assert (verdict["week"], verdict["matched"], verdict["considered"]) == (3, 8, 8)
+
+
+def test_the_label_reads_the_seasons_NEWEST_schedule_snapshot(db, board):
+    """An older schedule snapshot that paired week 3 differently must not vote:
+    nflverse re-issues the whole season file, so its newest snapshot is the
+    calendar, and a moved game gets a new game_id rather than a new row."""
+    stale = {3: _MATCHUPS[4], 4: _MATCHUPS[3]}          # swapped, and older
+    _stub_matchups(db, stale, retrieved="2026-07-01")
+    _stub_matchups(db, retrieved="2026-08-01")
+    assert fp_weekly.schedule_pairs(db, 2026)[3] == frozenset(
+        p for away, home in _MATCHUPS[3] for p in ((away, home), (home, away)))
+    _ingest(db, _board_for(board, 3, MON_WK3), day=TUE_WK4, page_week=(4, "b"))
+    assert {w for _p, w, _b in _labels(db)} == {3}
+
+
+def test_a_file_the_rows_cannot_check_says_so(db, board):
+    """No schedule ingested: the content authority is blind, and the run log
+    says the relabel guarantee lapsed for those pages rather than going quiet."""
+    _written, tally = _ingest(db, board)
+    assert any("could not check the week label" in n for n in tally["notes"])

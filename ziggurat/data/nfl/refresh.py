@@ -701,7 +701,8 @@ def _scope_fp_weekly(ctx) -> str:
         base.iso_date(ctx.retrieved_as_of), fp_weekly.week_bounds(ctx.conn, ctx.season)
     )
     label = "no week label" if week is None else f"week {week}"
-    return f"today's weekly board, {label} via {basis}"
+    return (f"today's weekly board, provisionally {label} via {basis} — each page's "
+            "own opponents decide the stored week when they can (item 3.14b)")
 
 
 # ---------------------------------------------------------------- item 4.1
@@ -1008,6 +1009,9 @@ SOURCES: tuple[SourceSpec, ...] = (
               "week 0 for a pre-opener capture the live page ranks as week 1 (measured) "
               "— week_basis records which authority labelled each row, and a board the "
               "schedule cannot label is 'unknown' with a NULL week rather than a guess. "
+              "Since item 3.14b the rows' OWN opponents outrank both the page and the "
+              "schedule ('opponents'), because only they describe the file rather than "
+              "the pull; `ziggurat ingest fp-weekly-labels` audits stored captures. "
               "needs_schedules is FALSE on purpose: the scrape_date is the knowledge "
               "time, so a missing schedule costs the WEEK LABEL, not the rows — the "
               "opposite of the six sources that would drop 100%. The FantasyPros page "
