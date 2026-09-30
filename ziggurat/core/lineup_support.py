@@ -1095,9 +1095,9 @@ def build_lineup(
         opp_sigma = math.sqrt(max(opp_var, 0.0))
         margin_sigma = math.sqrt(max(var_final + opp_var, 1e-9))
         opp_sigma_basis = (
-            "his all-healthy projected starting lineup" if opp_source == "computed"
-            else "a flat league-typical figure, because --opponent-total supplied his "
-                 "total and not his lineup"
+            "their all-healthy projected starting lineup" if opp_source == "computed"
+            else "a flat league-typical figure, because --opponent-total supplied their "
+                 "total and not their lineup"
         )
 
     # --- final sanity gate (belt-and-suspenders) -----------------------------

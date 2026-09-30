@@ -6915,7 +6915,107 @@ afterwards — results go in the Update block as dated amendments).**
 - **Independent of the result:** part 3 (the dispersion sentence) and part 4
   (PROJECTED / REALISED labels) ship either way (Rule 6).
 **Update:**
-> _[To be completed]_
+> **DONE 2026-09-30. Parts 1–4 shipped; no shrinkage factor deployed anywhere.**
+>
+> - **Measurement:** `backtest/calibration.py` (`8aafd41`), run exactly to the
+>   frozen pre-registration (`6a3c9f4`), read-only, `python -m
+>   backtest.calibration --db db/ziggurat.sqlite --captures data/decisions`,
+>   ~17 s. Two runs are byte-identical, and the session's independent re-run
+>   reproduced them.
+> - **Labels and scale:** `core/units.py` plus the renderers (`a9e7930`).
+> - **Findings:** gitignored `intel/research/calibration-4.7-2026-09-30.md`.
+>
+> **Primary result** (ESPN universe, projection ≥ 1.0, weeks 1–3 pooled,
+> player-clustered bootstrap B = 2,000):
+>
+> | pos | player-wks | players | b̂ | 95% CI | â | rule says |
+> |---|---|---|---|---|---|---|
+> | QB | 96 | 37 | 1.051 | [0.213, 1.807] | −1.16 | RETIRE |
+> | RB | 243 | 93 | 1.059 | [0.886, 1.206] | −1.36 | RETIRE |
+> | WR | 398 | 153 | 0.922 | [0.729, 1.108] | +0.20 | RETIRE |
+> | TE | 221 | 81 | 0.895 | [0.650, 1.128] | +0.54 | NARROW (b̂ misses 0.90 by 0.005) |
+> | K | 89 | 30 | 0.444 | [−0.422, 1.260] | +5.02 | NARROW |
+> | D/ST | 95 | 32 | 0.581 | [−0.016, 1.207] | +2.42 | NARROW |
+>
+> **Decision (b), recorded against the frozen rule: no DEPLOY at any
+> position.** QB, RB and WR read RETIRE; TE, K and D/ST read NARROW. That
+> outcome is binding as frozen.
+>
+> **What the rule turned out to lack, stated rather than re-decided:** the
+> RETIRE branch carries NO precision requirement.
+> - QB "retires" on an interval 1.6 slope units wide that contains the
+>   literature's 0.67.
+> - WR's interval contains its literature 0.85.
+> - Only RB's interval is tight, and it excludes the literature's 0.79.
+> - So "RETIRE" here means "no evidence the spread is too wide", NOT "the units
+>   are right".
+> - In practice RETIRE and NARROW differ only in whether we re-measure.
+>   **Any Week-8 re-measure is a NEW pre-registration** that adds a width
+>   requirement to RETIRE, never an edit of this one.
+>
+> Against the stated expectation (NARROW at most positions, slopes below 1),
+> every skill-position point estimate came in ABOVE its literature value.
+>
+> **Sensitivities and leads (reported, never decided on):**
+> - **Weeks 2–3 only:** QB 0.778, RB 0.922, WR 0.938, TE 0.980, K 0.438,
+>   D/ST 0.473. Week 1 alone reads QB 2.27 and RB 1.33, so the pooled QB and RB
+>   estimates lean on Week 1.
+> - **The lead worth a real pre-registration.** On the SECONDARY population —
+>   the rows the waiver chain actually prices (scanned free-agent pool plus our
+>   roster) — **RB reads 0.595 [0.41, 0.80]**.
+>   - Those RB projections run about 1.2 pts HIGH (4.48 projected vs 3.31
+>     realised), and the spread looks about 1.7× too wide.
+>   - If that held, chain gains between bench/waiver RBs would be materially
+>     overstated.
+>   - It is a lead for a ≥7-week, pre-registered re-measure, not a finding.
+> - **K 0.444 and D/ST 0.581, both with enormous intervals.** The K cell
+>   measures a partly broken projection (the item-3.11 50+ defect). The
+>   upstream feed also changed mid-sample: `fg_made_50_59` is populated from
+>   the 09-22 pull on, `fg_made_60` is still NULL, and nothing here switches
+>   on it (unverified upstream change).
+> - **Week 4:** not yet final.
+>
+> **Data quality found on the way, all non-blocking:**
+> - Realised skill scoring matches nflverse `fantasy_points_ppr` exactly on
+>   all 1,078 rows.
+> - 136 of 1,142 primary player-weeks are did-not-play zeros, mostly OUT or IR.
+>   Three were ESPN-ACTIVE with no stat or snap row (Kyler Murray wk2, Drew
+>   Lock wk3, Tyson Bagent wk3); not investigated.
+> - **Mike Washington Jr. is still on placeholder id `WAS569019`** in rows
+>   retrieved 07-21..09-18: 57 `league_player_state` rows and 1,026
+>   `projections` rows. Migration 019 did not re-key him; today's reads are
+>   fine, but historical reads hit the placeholder. → item 3.18 follow-up.
+> - Week-3 realised rows come from the Tuesday 09-29 vintage, inside the
+>   stat-correction window.
+>
+> **(c) The dispersion sentence and the labels, live on `waivers`, `stream` and
+> `lineup`, pinned by 28 tests.** Presentation only: before/after renders of
+> all three pages against the live DB are byte-identical apart from the new or
+> relabelled lines. Same claims, gains, order, seats and win prob.
+> - Each page carries a **UNITS** legend: every pts number is PROJECTED unless
+>   marked REALISED.
+> - The chain total gets a **SCALE** line: "+1.9 over 14 wks ≈ +0.1 pts/wk,
+>   against a normal week-to-week swing in your team's score of about ±23.1".
+> - The lineup margin gets its swing (±34.3 on the margin) and says what the
+>   win prob means.
+> - `stream` quotes one D/ST's or kicker's weekly swing. The kicker's is
+>   flagged NOT FITTED.
+> - item 3.14's `+1.84` and `0 to +0.4` are relabelled REALISED.
+> - No swing is hard-coded: every figure is item 3.5's `DEFAULT_VARIANCE`, via
+>   `lineup_support.lineup_sigma` (factored out of the win-prob arithmetic).
+>   Waivers and lineup quote the same number, enforced by test.
+>
+> **Loose ends, recorded:**
+> - The team swing is not written to the decision archive.
+> - The Wednesday briefing prints the UNITS legend twice (it embeds two pages).
+> - **Pre-existing Rule-6 defect:** in a FAVORITE/UNDERDOG week the lineup card
+>   prints a margin that disagrees with its own "you vs opp" totals by up to
+>   2 pts. The new sentence makes no claim that depends on it.
+> - The team swing includes the unfitted kicker figure and the unmeasured
+>   QB-receiver ρ while sitting under the "measured 2021-2025" label. The
+>   existing card label has the same issue.
+>
+> Suite green on main: **3,372 passed, 4 skipped** (the live-DB tests run on main).
 
 ### ✦ Checkpoint 4: Signal deployment decisions
 Deploy, narrow, or retire each signal arm per 4.2/4.4 results; fold tuned defaults into the live modules; record what the backtest priors now are (these become the learning loop's anchor in 5.2).
