@@ -1382,7 +1382,8 @@ sync machine changes.
 Every nflverse source (`schedules`, `weekly_stats`, `snap_counts`, `ngs_*`,
 `injuries`, `team_defense`, `game_odds`) is a whole-season file re-downloaded in
 full, so a missed `ziggurat ingest` run is **staleness, not loss** — re-pullable
-any time. Exactly SIX sources serve the CURRENT value only: **`projections`**
+any time, with ONE caveat: `game_odds`' MIDWEEK lines (below). Exactly SIX
+sources serve the CURRENT value only: **`projections`**
 (Sleeper), **`adp_rankings`** (FantasyPros scrape — corrected 2026-09-04: the file
 it reads is rewritten **Fridays only**, so a missed DAY loses nothing and only a
 missed FRIDAY costs a scrape, whose content is re-derivable from the `db_fpecr`
@@ -1392,7 +1393,11 @@ since item 4.2b — **`ff_opportunity`** (ffverse expected points, re-uploaded i
 one `latest-data` release tag and rewritten on a game-window cron) and
 **`fp_weekly_ecr`** (the same-week FantasyPros weekly board, rewritten TWICE DAILY
 in-season: 81 of 159 ppr-rb ids changed integer rank in one 5.7-hour window).
-`fp_weekly_ecr` is where "today only" is literally true.
+`fp_weekly_ecr` is where "today only" is literally true. The caveat: since item 3.14
+step 3 (2026-09-30) a `game_odds` line is knowable from the day a pull carried it,
+so the TUESDAY line is a decision input and a missed day loses it; the next rewrite
+replaces it. The source is NOT flagged perishable, because its closing lines stay
+re-pullable and the flag is per source.
 `ziggurat ingest status` says which is which, and deliberately
 never uses the league sync's "unrecoverable / missing days" language — an
 undifferentiated alarm is how the one report where those words are literal gets

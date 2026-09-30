@@ -1,17 +1,42 @@
-"""Vegas closing-line ingestion (import_game_odds) — item 1.5.
+"""Vegas line ingestion (import_game_odds) — item 1.5; midweek stamp item 3.14 step 3.
 
-The closing spread / total / moneyline per game, kept OUT of the schedules table
-so a pre-game read can never see a value stamped at the preseason anchor. Odds
-ride the ``load_schedules`` frame but come through their own ``import_game_odds``
+The spread / total / moneyline per game, kept OUT of the schedules table so a
+pre-game read can never see a value stamped at the preseason anchor. Odds ride
+the ``load_schedules`` frame but come through their own ``import_game_odds``
 seam (distinct from ``import_schedules``) so this source has an independent test
 point.
 
-``knowable_as_of`` is stamped with the game's own gameday (read directly off the
-same frame — no ``game_date_map`` join needed). This is conservatively
-leakage-safe: a gameday stamp can only ever be *too late*, never too early. The
-practical consequence is documented on ``get_game_odds`` — a closing line
-stamped at gameday is (correctly) invisible to a same-day pre-kickoff caller
-reading at ``as_of = D-1``.
+WHAT A ROW IS. nflverse rewrites the season file as lines move, so a pull on day
+R carries the line AS OF R for every game not yet played, and the CLOSING line
+once the game has been played. ``_PK_COLS`` holds ``retrieved_as_of``, so every
+pull is its own row and nothing is overwritten in this table.
+
+``knowable_as_of = min(gameday, retrieved_as_of)`` (item 3.14 step 3,
+2026-09-30). Until then it was the gameday alone, which was leakage-safe but
+BLIND: a Tuesday or Wednesday read (the waiver and streaming days) could never
+see a line that had been sitting in the table since Monday, so ``ziggurat
+stream`` printed "Vegas lines not posted" all week over stored lines. The
+per-row stamp is leakage-safe for the reason the plan recorded (item 4.6,
+retired done-when (b)):
+- a row pulled on R is only visible at ``as_of >= R``;
+- the ``historical`` view also gates ``retrieved_as_of``;
+- a row pulled on or after gameday keeps the gameday stamp, so its closing line
+  is still invisible before kickoff day under ``latest_truth`` too.
+A bulk backfill pulled after the season (every 2021–2025 row) is therefore
+stamped exactly as before.
+
+A PLAYED game (the row carries a result) is always stamped at its gameday, so a
+back-stamped ``--allow-backfill`` run cannot publish a closing line early.
+
+The midweek half is lost if not pulled: the closing line is re-pullable
+forever, but the line a pull saw on a given Tuesday is replaced by the next
+rewrite (measured: 18 forward lines vanished between the 09-09 and 09-13 pulls).
+The registry does NOT mark this source ``perishable``. That flag is per SOURCE,
+and ``ingest status`` would then call a re-pullable past season "UNOBTAINABLE"
+and a played season's gap "gone" — both false (item 3.14 step 3 review).
+
+Migration 003's column comment ``-- = gameday`` is stale since this change.
+Applied migrations are never edited, so the correction lives here.
 
 Null odds are KEPT (an unplayed in-season game legitimately carries no line
 yet); only a null *gameday* — which leaves the row unstampable — is dropped.
@@ -54,8 +79,19 @@ _COLMAP = {c: c for c in _ID_COLUMNS + _ODDS_COLUMNS}
 _PK_COLS = ('game_id', 'retrieved_as_of')
 
 
+def _played(src) -> bool:
+    """Does the source row carry a RESULT? (The ``load_schedules`` frame does:
+    ``result`` / ``home_score`` / ``away_score``.) A frame without those columns
+    reads as unplayed, and the pull date decides."""
+    for column in ("result", "home_score", "away_score"):
+        value = src.get(column)
+        if value is not None and value == value:          # not None, not NaN
+            return True
+    return False
+
+
 def ingest_game_odds(conn, df, *, retrieved_as_of: str) -> int:
-    """Persist per-game closing lines, stamping knowable_as_of with the gameday.
+    """Persist per-game lines, stamping ``knowable_as_of = min(gameday, retrieved_as_of)``.
 
     ``require_columns`` fails loudly on odds/identity schema drift. Rows with a
     null gameday (unstampable — typically a not-yet-scheduled future game) are
@@ -65,8 +101,19 @@ def ingest_game_odds(conn, df, *, retrieved_as_of: str) -> int:
     """
     base.require_columns(df, _REQUIRED, source="game_odds")
 
+    pulled = base.iso_date(retrieved_as_of)
+
     def _knowable(src):
-        return base.iso_date(src.get("gameday"))
+        gameday = base.iso_date(src.get("gameday"))
+        if gameday is None:
+            return None
+        if pulled is None or _played(src):
+            # A PLAYED game's row is a closing line, and a closing line is
+            # knowable at kickoff day no matter what the pull date says. This
+            # holds even under a back-stamped `--allow-backfill` run, whose
+            # `retrieved_as_of` would otherwise publish the close early.
+            return gameday
+        return min(gameday, pulled)
 
     rows = base.frame_to_rows(
         df,
@@ -95,14 +142,20 @@ def get_game_odds(
     game_id=None,
     view: base.AsOfView = "historical",
 ):
-    """Closing lines knowable on or before ``as_of`` (keyword-only; no implicit now).
+    """Lines knowable on or before ``as_of`` (keyword-only; no implicit now).
 
-    LEAKAGE / GRANULARITY: every row is stamped ``knowable_as_of = gameday``, so
-    this source cannot supply a *pre-kickoff* line to a same-day live caller — a
-    closing line stamped at gameday D is (correctly) invisible at ``as_of = D-1``.
-    That is by design: nflverse carries only the single closing value, not an
-    intraday line history, so any earlier read would be a leak. Backtest/grading
-    reads go through ``base.latest_truth(get_game_odds)``.
+    WHAT YOU GET: per game, the NEWEST pull knowable at ``as_of`` — i.e. the line
+    as of that pull (``retrieved_as_of`` is on the row), which is the closing
+    line only if that pull came after the game. A Tuesday read sees Tuesday's
+    pull (item 3.14 step 3). A game no pull on or before ``as_of`` carried a line
+    for comes back with NULL odds or not at all.
+
+    LEAKAGE: rows are stamped ``min(gameday, retrieved_as_of)`` (module
+    docstring), so no read sees a line before the day it was pulled, and no read
+    before kickoff day sees a pull made on or after it. Backtest/grading reads go
+    through ``base.latest_truth(get_game_odds)``. For a 2021–2025 game that is the
+    closing line, stamped at gameday, so a backtest on it is still an UPPER BOUND
+    on what a Tuesday read could have seen (item 4.6).
 
     ``spread_line`` is home-oriented (positive = home favored), stored verbatim.
     """
@@ -120,3 +173,23 @@ def get_game_odds(
         conn, "game_odds", as_of=as_of, key_cols=["game_id"],
         extra_where=" AND ".join(clauses), params=params, view=view,
     )
+
+
+def restamp_stored_forward_lines(conn, *, season: int) -> int:
+    """Apply the item-3.14-step-3 stamp to rows stored BEFORE it existed.
+
+    Rows pulled before their game were stamped at the gameday, i.e. invisible
+    until kickoff day; the correct stamp is the pull day. ONE transaction,
+    touches only ``knowable_as_of``, and only on rows where the pull day is
+    EARLIER than the stored stamp. That is exactly the set the old rule
+    over-delayed, and re-running it changes nothing (idempotent). In place for
+    the same reason as ``fp_weekly.repair_stored_week_labels``: the stamp was a
+    derivation, not an observation. Returns rows changed.
+    """
+    with conn:
+        cursor = conn.execute(
+            "UPDATE game_odds SET knowable_as_of = retrieved_as_of "
+            "WHERE season = ? AND retrieved_as_of < knowable_as_of",
+            (int(season),),
+        )
+    return cursor.rowcount

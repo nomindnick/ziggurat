@@ -4282,13 +4282,99 @@ explorer and verifier. Answer it before claiming anything proprietary here.
 > weaker test-side workaround is reverted — two fixes for one defect is one too
 > many, and the test-side one left the production late-binding in place.
 >
-> **Still open after this item:** step 3 (the `game_odds` fence, which inherits
-> item 4.6's retired done-when (b)); the genuinely proprietary question — does the
+> **Still open after this item:** ~~step 3 (the `game_odds` fence, which inherits
+> item 4.6's retired done-when (b))~~ DONE 2026-09-30, see below; the genuinely
+> proprietary question — does the
 > dual-bracket house scoring REORDER the public weekly list? — still unmeasured
 > (and now cheap to answer: both orderings are on one page, `MKT` against
 > `HOUSE`); the season-long half of done-when (b) on `ziggurat stream`; and the
 > grading re-run of `probes/E08_*.py` with a pre-stated practical floor.
 > Suite green (**3,143 passed, 16 skipped, 0 failed; 3,159 collected — the 12 skips above the usual 4 are the tests that need a live `db/ziggurat.sqlite`, which an isolated worktree does not have, NOT anything this item turned off**).
+
+> **Step 3 DONE 2026-09-30 (the `game_odds` midweek stamp).** The plan's premise
+> held exactly:
+> - `_PK_COLS` includes `retrieved_as_of`, so `knowable_as_of = min(gameday,
+>   retrieved_as_of)` per row is leakage-safe.
+> - `ziggurat stream` had been printing "Vegas lines not posted" over lines
+>   already stored. On 09-30 the live table held lines for all 16 week-4 games
+>   and all 15 week-5 games (week 5 has byes).
+>
+> What shipped:
+> - **The stamp:** `game_odds.ingest_game_odds` now writes `min(gameday,
+>   retrieved_as_of)`.
+> - **The leakage test that closes item 4.6's retired done-when (b):**
+>   `test_a_midweek_line_is_knowable_from_its_pull_day_and_never_before`.
+>   - It uses three pulls: Tue 44.0, Thu 45.5, and a post-game closing 46.0.
+>   - `historical` never sees a line before its pull day.
+>   - `latest_truth` drops the retrieval gate and still cannot see the Thursday
+>     line on Tuesday, or the closing line before kickoff day, because that
+>     line is stamped at the gameday.
+> - **2021–2025 rows are unaffected:** every one was bulk-pulled in 2026, so the
+>   min is the gameday. The backtest's closing-line UPPER-BOUND caveat stands.
+> - **Stored rows restamped:** `restamp_stored_forward_lines` gave the 5,446
+>   stored 2026 rows pulled before their games their pull day (899 carry a
+>   line). It is idempotent, and only `knowable_as_of` changes. It was run once
+>   at merge; backup `db/ziggurat.sqlite.bak-2026-09-30-pre-fpweek-relabel`
+>   predates it.
+> - **`stream`:** the Vegas reason names its pull ("Line as of the YYYY-MM-DD
+>   pull; lines move until kickoff"). The stock "closing line" and "line not yet
+>   posted" sentences are gone. A game no pull has carried a line for says "no
+>   line stored".
+> - **Played games:** a PLAYED game (the row carries a result) is always stamped
+>   at its gameday, so a back-stamped `--allow-backfill` run cannot publish a
+>   closing line early.
+> - **Tests:** the consumer-level test drives the INGESTER. Both new leakage
+>   tests fail with the stamp reverted to the gameday (mutation-checked).
+>
+> **Review round (one Opus reviewer, same day).**
+>
+> The leakage sweep came back clean: on a restamped copy of the real rows,
+> 15,232 reads across as-of 09-08..10-06 under both views, with 0 violations.
+> - 2021–2025 is unchanged: 1,424 rows, all pulled 2026-07-25.
+> - The 2026 pre-game rows are real midweek lines. For only 2 of 47 played
+>   games did the last pre-game line equal the close.
+> - No consumer outside `core/streaming.py` reads `game_odds`.
+>
+> Four defects, all fixed before merge:
+> 1. **`perishable=True` made `ingest status` say false things (Rule 6).** It
+>    called a backfillable past season "UNOBTAINABLE … not a gap to fix", and
+>    an offseason gap "gone", though every closing line is re-pullable.
+>    - The flag is per SOURCE, and this source is perishable only for unplayed
+>      games. **REVERTED.**
+>    - The midweek loss is stated in the registry note and CLAUDE.md instead.
+>    - So the plan's "ingest status must treat a forward line as perishable" is
+>      NOT met. It needs a phase- or row-aware flag, which is a separate change.
+> 2. **The restamp had no entry point and had not run** while this block said
+>    it had. It was run at merge (below).
+> 3. **A back-stamped run leaked the close early.** Fixed by the played-game
+>    rule above.
+> 4. **"no line stored" was false in two further cases:**
+>    - the newest pull BLANKED an earlier line (nflverse does);
+>    - the game was unresolvable.
+>
+>    The sentences now say what the pull carries, or that the game could not be
+>    resolved.
+>
+> Also fixed: a test that built a row the new ingester can no longer produce,
+> and the week-5 count above.
+>
+> **Accepted and recorded:** `ziggurat stream --as-of <a 09-09..09-29 date>` now
+> shows Vegas tilts and pull dates the operator never saw that day, because the
+> restamp changed what a past read resolves to. The same holds for the
+> `fp_weekly` repair. A Monday retro that re-runs an old page gets the corrected
+> page; the frozen decision archive holds what was actually shown.
+>
+> **Not built:**
+> - A second line source (the ESPN public scoreboard, noted 2026-09-23). The
+>   nflverse daily pull already carries the current week's lines by Tuesday, so
+>   it is not needed yet.
+> - Any change to what ORDERS the page. The FantasyPros board still orders it,
+>   and the Vegas tilt still moves only the STREAM* contrast column and the
+>   no-board fallback. The residual ρ +0.067 over the board is the plan's own
+>   justification figure, and nothing here re-measured it.
+>
+> **So the +2.02/wk implied-total arm is NOT claimed by this step.** It needs its
+> own paired measurement against the FP board before it may order anything.
 
 ### 3.14b [Fix] The weekly board's WEEK comes from its own rows — DONE 2026-09-30 (from the wk3/wk4 journals)
 **Why it exists.** Three Tuesdays in four, `fp_weekly_ecr` filed the PREVIOUS

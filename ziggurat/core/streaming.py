@@ -48,9 +48,11 @@ Phase-4-tunable hypothesis whose label and source are quoted in the reasons
 
 RULE 1. Every accessor call is keyword-only ``as_of`` and threads ``view``
 straight through. The Vegas tilt reads ``get_game_odds`` under the historical
-view, which correctly returns NOTHING before gameday (``knowable_as_of ==
-gameday``) — so a Tuesday/Wednesday waiver read cannot leak a closing line, and
-the ranker discloses "line not yet posted" instead.
+view. Since item 3.14 step 3 a line is knowable from the day a pull carried it
+(``knowable_as_of = min(gameday, retrieved_as_of)``), so a Tuesday/Wednesday read
+sees the line AS OF the newest pull on or before ``as_of`` — never a later one,
+and never a closing line before kickoff day. The reason names the pull date. A
+game whose newest pull carries no line says exactly that.
 
 RULE 6. Never rank a defense or kicker who is on BYE this week or ruled OUT, and
 never emit a phantom 0 for a candidate with no usable projection — refuse and
@@ -329,7 +331,7 @@ class StreamAdjust:
         tilt = -self.vegas_tilt * math.tanh(z)
         mult = 1.0 + tilt
         reason = (
-            f"VEGAS: the closing line implies {opp_team} scores about "
+            f"VEGAS: the line implies {opp_team} scores about "
             f"{opp_implied:.1f} points (league-typical is {self.vegas_pivot:.0f}); a "
             f"lower implied total means more D/ST scoring, tilt {tilt:+.0%}. "
             f"[{self.vegas_label}; {self.source}]"
@@ -516,8 +518,8 @@ def _rows_by_game(rows: Iterable[Mapping], *, prefer_forecast: bool = False) -> 
 
 
 def _opponent_implied(odds: Mapping, *, is_home: bool) -> float | None:
-    """The opponent's implied team total from a closing line, or None if the line
-    is not posted. ``spread_line`` is home-oriented (positive = home favored):
+    """The opponent's implied team total from the stored line, or None if no pull
+    has carried one. ``spread_line`` is home-oriented (positive = home favored):
     home_implied = (total + spread)/2, away_implied = (total - spread)/2."""
     total = odds.get("total_line")
     spread = odds.get("spread_line")
@@ -729,11 +731,20 @@ def rank_streamers(
                 odds_available = True
                 mult, reason = adjust.vegas_multiplier(opp_implied, opponent or "the opponent")
                 stream_score *= mult
-                reasons.append(reason)
+                pulled = odds_row.get("retrieved_as_of")
+                reasons.append(
+                    reason + (f" Line as of the {pulled} pull; lines move until kickoff."
+                              if pulled else ""))
+            elif game is None:
+                reasons.append(
+                    "VEGAS: this defense's game could not be resolved from the schedule, "
+                    "so no line was looked up; the matchup tilt uses projections only."
+                )
             else:
                 reasons.append(
-                    "VEGAS: line not yet posted at this as-of (closing lines become "
-                    "knowable on gameday); rank refreshes when the line posts."
+                    "VEGAS: the newest pull on or before this as-of carries no line for "
+                    "this game (upstream had not posted one, or blanked it); the matchup "
+                    "tilt uses projections only until a daily pull carries one."
                 )
             # (3) WEATHER — secondary for D/ST.
             wx = weather_by_game.get(game["game_id"]) if game else None
@@ -861,8 +872,10 @@ def rank_streamers(
         )
     if pos == "DST" and not odds_available:
         notes.append(
-            "Vegas lines are not posted yet — the matchup tilt uses opponent "
-            "projections only (this is expected before gameday)."
+            "the newest pull on or before this as-of carries no Vegas line for these "
+            "games — the matchup tilt uses opponent projections only. Lines normally "
+            "appear by midweek; if `ziggurat ingest status` shows `game_odds` fresh and "
+            "this persists, the upstream file carries no line yet."
         )
     if not weather_readable:
         notes.append(
@@ -999,7 +1012,7 @@ def format_stream_board(board: StreamBoard, *, top: int | None = None,
 
     degraded: list[str] = []
     if board.position == "DST" and not board.odds_available:
-        degraded.append("Vegas lines not posted (matchup tilt from projections only)")
+        degraded.append("no Vegas line in the newest pull at this as-of (matchup tilt from projections only)")
     # DEGRADED is a true DATA GAP: no weather row was readable at all. An all-dome
     # slate (weather fully known, correctly inapplicable) is NOT degraded.
     if not board.weather_readable:

@@ -922,10 +922,16 @@ SOURCES: tuple[SourceSpec, ...] = (
     SourceSpec(
         name="game_odds", group=GROUP_DAILY, pull=_pull_game_odds, scope=_season_scope,
         phases=frozenset({PHASE_INSEASON, PHASE_OFFSEASON}),
-        notes="Closing lines ride the schedules frame. NOTE (verified): knowable_as_of is "
-              "the GAMEDAY, so no pre-kickoff reader can see a line — item 3.5 needs a "
-              "pre-game regime (like weather's forecast/archive split) before this is "
-              "useful. Pulled anyway so the history accrues. OFFSEASON included (item "
+        notes="Lines ride the schedules frame. knowable_as_of = min(gameday, "
+              "retrieved_as_of) since item 3.14 step 3 (2026-09-30): a pull carries the "
+              "line AS OF that day for every unplayed game, so a Tuesday read sees "
+              "Tuesday's line and never a later one (it was the gameday alone, which "
+              "hid stored lines from every midweek read). The MIDWEEK half is lost if "
+              "not pulled (the next rewrite replaces it; 18 forward lines vanished "
+              "between the 09-09 and 09-13 pulls), but the source is deliberately NOT "
+              "flagged perishable: the flag is per source, and the closing lines of "
+              "every played game stay re-pullable, so `ingest status` would call a "
+              "backfillable season UNOBTAINABLE. OFFSEASON included (item "
               "3.2c, F-A): this is a whole-season file that is re-pullable forever, and "
               "the phase gate is checked BEFORE the force-able interval gate, so without "
               "it `ingest run --season 2023 --force` refused to pull a completed season "

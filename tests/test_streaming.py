@@ -94,18 +94,20 @@ def test_rank_streamers_requires_as_of(db):
 
 
 def test_a_pre_gameday_read_sees_no_vegas_line(db, marginal_world):
-    """(c) LEAKAGE: game_odds is stamped knowable=gameday, so a Wednesday read
-    before a Sunday game gets NOTHING through the historical view — the D/ST
-    stream discloses 'line not yet posted' rather than leaking a closing line."""
+    """(c) LEAKAGE: a row stamped knowable=gameday (a pull made on or after the
+    game, i.e. a closing line) is NOTHING to a Wednesday read through the
+    historical view — the D/ST stream discloses 'no line stored' rather than
+    leaking a closing line."""
     _basic_world(marginal_world, db)
-    # a closing line that only becomes knowable on gameday (a future Sunday)
+    # a CLOSING line: pulled on gameday itself (G_MIA kicks off 2026-09-21), so
+    # both stamps are the gameday — exactly what the ingester writes for it.
     _odds(db, game_id="G_MIA", home="MIA", away="NYG", total=40.0, spread=-3.0,
-          knowable="2026-09-20")
+          knowable="2026-09-21", retrieved="2026-09-21")
     db.commit()
     board = rank_streamers(db, as_of="2026-09-16", season=SEASON, position="DST", week=WEEK)
     assert board.odds_available is False
     blob = " ".join(r for rec in board.ranked for r in rec.reasons)
-    assert "line not yet posted" in blob
+    assert "the newest pull on or before this as-of carries no line" in blob
     # but at/after gameday the SAME accessor surfaces it
     after = rank_streamers(db, as_of="2026-09-21", season=SEASON, position="DST", week=WEEK)
     assert after.odds_available is True
@@ -805,3 +807,31 @@ def test_the_one_horizon_note_is_silent_on_an_empty_board(db, marginal_world):
     board = rank_streamers(db, as_of=PULL, season=SEASON, position="DST", week=99)
     assert board.ranked == ()
     assert "ONE HORIZON ONLY" not in format_stream_board(board)
+
+
+def test_a_midweek_pull_reaches_the_stream_the_day_it_was_pulled(db, marginal_world):
+    """Item 3.14 step 3, end to end through the INGESTER: a line pulled on the
+    Wednesday of a Sunday game is visible to that Wednesday's read, names its
+    pull, and is invisible to the Tuesday before it."""
+    import pandas as pd
+
+    from ziggurat.data.nfl import game_odds
+
+    _basic_world(marginal_world, db)
+    frame = pd.DataFrame([{
+        "game_id": "G_MIA", "season": SEASON, "week": WEEK, "home_team": "MIA",
+        "away_team": "NYG", "gameday": "2026-09-21", "spread_line": 3.0,
+        "total_line": 40.0, "home_moneyline": None, "away_moneyline": None,
+        "home_spread_odds": None, "away_spread_odds": None, "over_odds": None,
+        "under_odds": None,
+    }])
+    game_odds.ingest_game_odds(db, frame, retrieved_as_of="2026-09-16")
+
+    tuesday = rank_streamers(db, as_of="2026-09-15", season=SEASON, position="DST", week=WEEK)
+    assert tuesday.odds_available is False
+    wednesday = rank_streamers(db, as_of="2026-09-16", season=SEASON, position="DST",
+                               week=WEEK)
+    assert wednesday.odds_available is True
+    blob = " ".join(r for rec in wednesday.ranked for r in rec.reasons)
+    assert "Line as of the 2026-09-16 pull" in blob
+    assert "closing line" not in blob

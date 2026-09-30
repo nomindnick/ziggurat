@@ -96,6 +96,11 @@ def test_the_perishable_set_is_exactly_the_six_current_value_sources():
       DAILY in-season, and 81 of 159 ppr-rb ids changed integer rank inside one
       5.7-hour window (2026-09-04).
 
+    `game_odds` is DELIBERATELY ABSENT although its midweek lines are lost if not
+    pulled (item 3.14 step 3): the flag is per SOURCE, its closing lines stay
+    re-pullable, and flagging it made `ingest status` call a backfillable season
+    UNOBTAINABLE (review, 2026-09-30).
+
     Adding a name here is a claim that a missed day is a LOST OBSERVATION;
     removing one is a claim it is merely stale. Note that `adp_rankings` KEEPS
     the flag while its own note was corrected in the same change: its file is
