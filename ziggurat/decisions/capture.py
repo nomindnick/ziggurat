@@ -107,13 +107,16 @@ CHAIN_INERT_MECHANISM = (
 #: answers).
 POOL_UNKNOWN_NOTE = (
     "pool.jsonl: `scanned` is TRUE exactly when this free agent has an entry in the "
-    "scan's own model (i.e. he was priceable AND survived the per-position pool_limit "
-    "prune). A FALSE `scanned` is genuinely ambiguous between 'no usable projection at "
+    "scan's own model (i.e. he was priceable AND either survived the per-position "
+    "pool_limit prune or was force-scanned as a same-team backup of a rostered "
+    "QB/RB/TE, item 3.4c). A FALSE `scanned` is genuinely ambiguous between 'no usable "
+    "projection at "
     "this as_of' and 'pruned by pool_limit', and this writer does NOT re-scan to tell "
     "them apart — a second scan is a second answer. `priced_in_matrix` is TRUE when he "
     "appears as an ADD in swaps.jsonl; note the matrix drops non-positive rows before "
     "it resolves, so FALSE there means 'not worth a positive gain against any legal "
-    "drop', not 'never looked at'."
+    "drop', not 'never looked at' — or, since item 3.4c counts them, a positive row "
+    "cut at the matrix's row limit (the plan's notes give how many)."
 )
 
 

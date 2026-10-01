@@ -2041,3 +2041,222 @@ def test_swap_row_season_long_delta_defaults_to_None_not_zero(db, world):
     roster, pool = world
     board = _board(db, roster, pool)
     assert all(s.season_long_delta is None for s in board.swaps)
+
+
+# ------------------------------------------- the waiver blind spots (2026-10-01)
+#
+# Three measured live failures, each of which forced a hand-built Tuesday claim:
+# a season-ending IR player read "cannot value" and was dropped LAST (Achane,
+# 09-29); the top-N projection cut could skip the backup of your own injured
+# starter; and holding two D/STs blocked every D/ST-for-D/ST swap (09-29).
+
+
+def _season_over_specs(**over):
+    spec = {"name": "Torn Knee", "pos": "RB", "team": "MIA", "pts": 15.0, "bye": 6,
+            "on_team": 10, "injury": "INJURY_RESERVE", "forecast": set()}
+    spec.update(over)
+    return [s for s in ROSTER_SPECS if s["name"] != "Depth Runner"] + [spec] + POOL_SPECS
+
+
+def test_a_season_over_player_is_priced_at_zero_and_his_drop_costs_exactly_nothing(
+        db, marginal_world):
+    board = _board_with(db, marginal_world, _season_over_specs())
+    row = _row(board, "Torn Knee")
+    assert row.unvalued is False
+    assert row.reasons[0].startswith("SEASON OVER? Torn Knee is priced at ZERO")
+    assert "hypothesis, not a rule" in row.reasons[0]
+    assert any(n.startswith("SEASON OVER? Torn Knee") for n in board.notes)
+    # Its OWN reasons, none of the generic ones that were false on this row: a bye
+    # named as the reason he never starts, a return-probability ladder, a FLOOR
+    # warning, a sit-rate, a "weeks he actually starts" share (item 3.4c review).
+    blob = " ".join(row.reasons)
+    for false_for_this_row in ("bye in week", "probability", "FLOOR", "chance he sits",
+                               "weeks he actually starts", "two sources agree"):
+        assert false_for_this_row not in blob, false_for_this_row
+
+    # A certainty is a gate: unavailable every week, so he is OUT of the injury
+    # lottery and removing him moves V by exactly zero at every reporting depth.
+    # (Left in the lottery at zero points, his absence mass displaced everyone
+    # else's and his drop read -5.3 .. -1.0 by depth — measured 2026-09-29.)
+    keys = list(board.roster_keys)
+    without = [k for k in keys if k != row.player_key]
+    for w in WEEKS:
+        assert board.model.available(row.player_key, w) is False
+    for depth in (1, 2, 3):
+        assert board.model.value_at_depth(without, depth) == pytest.approx(
+            board.model.value_at_depth(keys, depth), abs=1e-9)
+    drops = [s for s in board.swaps if s.drop == "Torn Knee"]
+    assert drops and all(s.drop_unpriceable is False for s in drops)
+    assert all(s.drop_season_over for s in drops)
+    assert all(any(r.startswith("SEASON OVER?") for r in s.reasons) for s in drops)
+
+
+def test_explicit_zero_rows_are_NOT_season_over(db, marginal_world):
+    """The feed ZEROES a player the moment he is placed on IR and re-projects a
+    returner later, so ESPN IR + a zeroed row is ONE event seen twice (KeAndre
+    Lambert-Smith, 09-22 -> back from week 8 on 09-25). Only a feed that has
+    dropped him entirely — no row at all — reads as season over."""
+    board = _board_with(db, marginal_world, _season_over_specs(pts=0.0, forecast=None))
+    assert _row(board, "Torn Knee").unvalued is True
+    assert not any("SEASON OVER" in n for n in board.notes)
+
+
+def test_a_crosswalk_failure_is_never_read_as_season_over(db, marginal_world):
+    """No projection identity at all (``line is None``) is a join failure, not an
+    injury, and "the feed has dropped him" would be a false sentence about it."""
+    roster, pool = marginal_world(_season_over_specs())
+    for r in roster:
+        if r["player"] == "Torn Knee":
+            r["gsis_id"] = "00-9999999"
+    board = marginal.build_board(db, as_of=PULL, season=SEASON, roster=roster,
+                                 pool=pool, weeks=WEEKS, pool_limit=None)
+    assert _row(board, "Torn Knee").unvalued is True
+    assert not any("SEASON OVER" in n for n in board.notes)
+
+
+def test_a_free_agent_on_ir_is_never_season_over_only_a_rostered_player_is(
+        db, marginal_world):
+    spec = {"name": "Pool Torn", "pos": "RB", "team": "MIA", "pts": 15.0, "bye": 6,
+            "injury": "INJURY_RESERVE", "forecast": set()}
+    board = _board_with(db, marginal_world, ROSTER_SPECS + POOL_SPECS + [spec])
+    names = {e.player for e in board._swaps._ctx[0].values()}
+    assert "Pool Torn" not in names
+    assert not any("SEASON OVER" in n for n in board.notes)
+
+
+def test_an_ir_player_whose_return_the_feed_projects_is_not_season_over(
+        db, marginal_world):
+    """Short-term IR: ESPN says INJURY_RESERVE but the feed still forecasts him.
+    Silence is not unanimous, so he is priced from his forecast as before."""
+    board = _board_with(db, marginal_world, _season_over_specs(forecast=None))
+    row = _row(board, "Torn Knee")
+    assert row.unvalued is False
+    assert not any(r.startswith("SEASON OVER") for r in row.reasons)
+    assert not any("priced at ZERO" in n for n in board.notes)
+
+
+def test_a_preseason_ir_tag_is_never_read_as_season_over(db, marginal_world):
+    roster, pool = marginal_world(_season_over_specs())
+    board = marginal.build_board(db, as_of="2026-09-05", season=SEASON, roster=roster,
+                                 pool=pool, weeks=WEEKS, pool_limit=None)
+    assert _row(board, "Torn Knee").unvalued is True
+
+
+def test_the_backups_of_your_own_players_are_scanned_past_the_projection_cut(
+        db, marginal_world):
+    """A rostered ATL RB; three ATL RB free agents projected too low for a
+    top-1 cut, behind four better RBs on the SAME bye (so the bye carve-out
+    cannot rescue them). The top TWO teammates are scanned; the third is not;
+    and a WR teammate of a rostered WR is never forced in."""
+    pool = [
+        {"name": "Atl Backup A", "pos": "RB", "team": "ATL", "pts": 1.5, "bye": 11},
+        {"name": "Atl Backup B", "pos": "RB", "team": "ATL", "pts": 1.0, "bye": 11},
+        {"name": "Atl Backup C", "pos": "RB", "team": "ATL", "pts": 0.5, "bye": 11},
+        # behind three better WRs on its own bye, so the bye carve-out cannot keep
+        # it either — otherwise "never a WR" would be vacuous (item 3.4c review)
+        # (DAL's bye is 8 — the bye map is per TEAM, from the rostered DAL WR)
+        {"name": "Dal Spare WR", "pos": "WR", "team": "DAL", "pts": 0.5, "bye": 8},
+    ] + [{"name": f"Bye Rival {i}", "pos": "RB", "team": t, "pts": 9.0 - i, "bye": 11}
+         for i, t in enumerate(("CAR", "CLE", "LAR", "ARI"))
+    ] + [{"name": f"Bye Rival WR {i}", "pos": "WR", "team": t, "pts": 7.0 - i, "bye": 8}
+         for i, t in enumerate(("CIN", "DET", "WAS"))]
+    roster, pool_rows = marginal_world(ROSTER_SPECS + POOL_SPECS + pool)
+    board = marginal.build_board(db, as_of=PULL, season=SEASON, roster=roster,
+                                 pool=pool_rows, weeks=WEEKS, pool_limit=1)
+    [note] = [n for n in board.notes if n.startswith("also scanned")]
+    assert "Atl Backup A (RB, ATL)" in note and "Atl Backup B (RB, ATL)" in note
+    assert "Atl Backup C" not in note and "Dal Spare WR" not in note
+    names = {e.player for e in board._swaps._ctx[0].values()}
+    assert {"Atl Backup A", "Atl Backup B"} <= names and "Atl Backup C" not in names
+    assert "Dal Spare WR" not in names
+
+
+def test_the_backups_of_a_starter_on_the_IR_SLOT_are_still_scanned(db, marginal_world):
+    """The season-over reason tells the operator to move an injured starter to
+    the IR slot — and the first draft then stopped scanning his backups, because
+    it read the ACTIVE roster only (item 3.4c review)."""
+    # ONLY the IR-slotted starter is an ATL RB: "Second Runner" (also ATL) would
+    # make the active roster an owner on its own and hide the defect.
+    specs = [dict(s, slot="IR", injury="INJURY_RESERVE") if s["name"] == "Lead Runner"
+             else s for s in ROSTER_SPECS if s["name"] not in ("Hurt Guy", "Second Runner")]
+    pool = [{"name": "Atl Backup A", "pos": "RB", "team": "ATL", "pts": 1.5, "bye": 11}] + [
+        {"name": f"Bye Rival {i}", "pos": "RB", "team": t, "pts": 9.0 - i, "bye": 11}
+        for i, t in enumerate(("CAR", "CLE", "LAR", "ARI"))]
+    roster, pool_rows = marginal_world(specs + POOL_SPECS + pool)
+    board = marginal.build_board(db, as_of=PULL, season=SEASON, roster=roster,
+                                 pool=pool_rows, weeks=WEEKS, pool_limit=1)
+    names = {e.player for e in board._swaps._ctx[0].values()}
+    assert "Atl Backup A" in names
+
+
+def test_a_backup_with_no_forecast_yet_is_named_not_silently_skipped(db, marginal_world):
+    """Named only behind a HURT starter: behind a healthy one an unforecast
+    third-stringer is the feed's normal state (nine of them on the 09-29 board)."""
+    pool = [{"name": "Atl Unknown", "pos": "RB", "team": "ATL", "pts": 0.0, "bye": 11,
+             "forecast": set()}]
+    hurt = [dict(s, injury="QUESTIONABLE") if s["name"] == "Lead Runner" else s
+            for s in ROSTER_SPECS]
+    pool.append({"name": "Atl Torn", "pos": "RB", "team": "ATL", "pts": 0.0, "bye": 11,
+                 "forecast": set(), "injury": "INJURY_RESERVE"})
+    board = _board_with(db, marginal_world, hurt + POOL_SPECS + pool)
+    [note] = [n for n in board.notes if n.startswith("could NOT scan")]
+    assert "Atl Unknown (RB, ATL)" in note
+    assert "Atl Torn" not in note                              # out himself: no fill-in
+
+
+def test_an_unforecast_backup_behind_a_HEALTHY_starter_is_not_named(db, marginal_world):
+    pool = [{"name": "Atl Unknown", "pos": "RB", "team": "ATL", "pts": 0.0, "bye": 11,
+             "forecast": set()}]
+    board = _board_with(db, marginal_world, ROSTER_SPECS + POOL_SPECS + pool)
+    assert not any("could NOT scan" in n for n in board.notes)
+
+
+def test_every_positive_row_the_matrix_limit_drops_is_counted(db, marginal_world):
+    """The silent swap_limit cut made a printed count false (57 shown vs 113 true,
+    live 09-29). The rows it drops are now COUNTED, split by lane."""
+    roster, pool = marginal_world(_season_over_specs())
+    kwargs = dict(as_of=PULL, season=SEASON, roster=roster, pool=pool, weeks=WEEKS,
+                  pool_limit=None)
+    full = marginal.build_board(db, swap_limit=None, **kwargs)
+    positive = [r for r in full._swaps._rows if r.gain > 0.0]
+    assert len(positive) > 5 and full.swaps_cut == (0, 0)
+    cut = marginal.build_board(db, swap_limit=5, **kwargs)
+    streamed, season = cut.swaps_cut
+    kept_positive = sum(1 for r in cut._swaps._rows if r.gain > 0.0)
+    assert streamed + season == len(positive) - kept_positive
+    assert season == sum(1 for r in positive
+                         if r.drop_position not in marginal.STREAMED_POSITIONS) - sum(
+        1 for r in cut._swaps._rows
+        if r.gain > 0.0 and r.drop_position not in marginal.STREAMED_POSITIONS)
+
+
+
+def test_a_one_for_one_dst_swap_is_priced_when_two_are_already_held(
+        db, marginal_world):
+    """The H-wk02-1 roster: two D/STs held, over this board's own guard of 1.
+    A D/ST-for-D/ST swap keeps the count and must be priced; a D/ST added for a
+    NON-D/ST drop raises it to three and stays refused."""
+    second = {"name": "Spare D/ST", "pos": "D/ST", "team": "TB", "pts": 1.0, "bye": 9,
+              "on_team": 10}
+    # Better than BOTH held defenses in the first window week (Miami's 20 lands in
+    # odd weeks), so the one-week horizon a streamed slot is priced on sees a gain.
+    elite = {"name": "Elite D/ST", "pos": "D/ST", "team": "BAL", "pts": 40.0, "bye": 12}
+    specs = ([s for s in ROSTER_SPECS if s["name"] != "Ghost Player"] + [second]
+             + POOL_SPECS + [elite])
+    board = _board_with(db, marginal_world, specs)
+    dst_for_dst = [s for s in board.swaps
+                   if s.add_position == "DST" and s.drop_position == "DST"]
+    assert any(s.add == "Elite D/ST" for s in dst_for_dst)
+    assert not [s for s in board.swaps
+                if s.add_position == "DST" and s.drop_position != "DST"]
+
+
+def test_only_this_boards_own_guard_lets_a_swap_keep_an_over_cap_count():
+    """A LEAGUE limit stays absolute: ESPN refuses the add. Our guard does not."""
+    keep = marginal.cap_allows_keep
+    assert keep("DST", 1, None) is True                 # the guard, no league row
+    assert keep("DST", 1, {"DST": 3}) is True           # the league allows three
+    assert keep("DST", 1, {"DST": 1}) is False          # the league binds too
+    assert keep("WR", 2, None) is False                 # tighter than the guard 8
+    assert keep("WR", 8, {"WR": 8}) is False            # the league's own 8
+    assert keep("DST", None, None) is False

@@ -194,6 +194,28 @@ def effective_position_caps(league_limits=None, *, caps: Mapping[str, int] = POS
 UNDROPPABLE_TAG = "[UNDROPPABLE — on ESPN's undroppable list; the app refuses this drop"
 
 
+def cap_allows_keep(position: str, cap: int | None, league_limits=None) -> bool:
+    """May a swap KEEP an over-cap count at ``position``? (2026-10-01)
+
+    Only when the binding fence is THIS board's own modelling guard
+    (``POSITION_CAPS``) and not the league's rule. A guard keeps the scan from
+    RAISING a count (item 3.2: a second defense is a flat-feed artefact); it has no
+    business refusing a ONE-FOR-ONE swap on a roster the operator chose to build
+    over it (the H-wk02-1 two-D/ST rotation slot). A LEAGUE limit is different:
+    ESPN refuses the add, so it stays absolute. A cap TIGHTER than the guard can
+    only have come from the league; a cap equal to it is the league's too when the
+    league's own limit (canon keys, ``board.league_limits``) is at or below it.
+    """
+    guard = POSITION_CAPS.get(position)
+    if cap is None or guard is None or cap != guard:
+        return False
+    if league_limits is not None:
+        limit = dict(league_limits).get(position)
+        if limit is not None and limit <= cap:
+            return False
+    return True
+
+
 def canon_league_limits(league_limits):
     """The league's own limits in the VALUATION canon, or None when none were read.
 
@@ -348,6 +370,51 @@ REPORT_DEPTH = 3
 REPORT_SEED = 7
 
 _HANDCUFF_POSITIONS = frozenset({"QB", "RB", "TE"})
+
+#: Free-agent teammates at the SAME position always scanned behind each of your
+#: own QB/RB/TE (2026-10-01). The top-30-by-projection cut is blind exactly when
+#: it matters: the week your starter goes down, the feed has not yet promoted his
+#: backup. Measured live on 2026-09-27: Ollie Gordon II, who took 84% of Miami's
+#: snaps the moment De'Von Achane tore his ACL, sat at 1.6 projected points,
+#: outside the cut, so `waivers` never priced him and the Tuesday claim was
+#: hand-built. Two, because naming one handcuff is right ~54% of the time and
+#: the second and third backup together cover ~77% (the item-3.6 measurement).
+OWN_BACKUP_KEEP = 2
+
+#: ESPN injury designations that, TOGETHER with a feed that forecasts nothing
+#: for him in any remaining week, make a ROSTERED player "season over": priced at
+#: ZERO and modelled unavailable every week, instead of "cannot value him"
+#: (2026-10-01). See ``_entry_from_row``.
+SEASON_OVER_STATUSES = frozenset({"INJURY_RESERVE"})
+
+#: Designations that make a free agent no use as a FILL-IN this week or beyond.
+_OUT_OF_ACTION = frozenset(
+    {"OUT", "DOUBTFUL", "INJURY_RESERVE", "IR", "SUSPENSION", "NOT_ACTIVE"})
+
+#: The evidence behind the season-over rule, quoted on every row it touches. A
+#: LABELLED HYPOTHESIS on a tiny sample, measured 2026-09-09..10-01 by the item-3.4c
+#: review: ESPN's INJURY_RESERVE and a ZEROED feed are ONE event seen twice (the
+#: feed zeroes a player the moment he is placed on IR; KeAndre Lambert-Smith read
+#: that way on 09-22 and was re-projected from week 8 on 09-25), so they are NOT
+#: two sources. What separated the cases was the SHAPE of the silence: confirmed
+#: season-enders had NO forecast row in any remaining week, while short-term IR
+#: players kept explicit zero rows until their return was projected.
+SEASON_OVER_EVIDENCE = (
+    "hypothesis, not a rule: since 2026-09-09 every confirmed season-ending injury "
+    "seen in this feed (6) had NO forecast row left at all, while short-term IR "
+    "players (4) kept explicit zero rows until their return was projected; n is small"
+)
+
+
+def season_over_sentence(player: str) -> str:
+    """The one sentence every season-over row and claim carries (Rule 6)."""
+    return (
+        f"SEASON OVER? {player} is priced at ZERO: ESPN lists INJURY_RESERVE and the "
+        f"projection feed has dropped the player entirely — no forecast row in any "
+        f"remaining week ({SEASON_OVER_EVIDENCE}). If this is SHORT-TERM IR, the "
+        f"player is worth more than zero: check the news before dropping, and if "
+        f"your IR slot is free, moving the player there costs nothing"
+    )
 
 
 class WeekResolutionError(RuntimeError):
@@ -649,6 +716,9 @@ class SwapRow:
     # existing SwapRow constructors and the marginal suite unchanged.
     add_espn_id: str | None = None
     drop_espn_id: str | None = None
+    # The drop side is priced at ZERO as SEASON OVER (item 3.4c) — a labelled
+    # hypothesis the claim line must carry, like ``drop_unpriceable``.
+    drop_season_over: bool = False
     # --- item 3.14 step 2: the OTHER horizon --------------------------------
     # ``gain`` for a streamed (D/ST, K) row is a ONE-WEEK number priced on
     # ``model_now``: the whole point of the streamed lane. What it never said is
@@ -731,6 +801,12 @@ class MarginalBoard:
     # this board and only the module guard on a database with no settings row, and
     # nothing downstream can tell those apart from the number.
     league_limits: Mapping[str, int] | None = None
+
+    @property
+    def swaps_cut(self) -> tuple[int, int]:
+        """``(streamed, season_long)`` positive swaps the ``swap_limit`` dropped
+        BEFORE re-pricing (search-estimator counts). Disclosed, never silent."""
+        return tuple(getattr(self._swaps, "cut", (0, 0)))
 
     @property
     def swaps(self) -> tuple[SwapRow, ...]:
@@ -827,8 +903,11 @@ class _SwapMatrix:
     FROZEN dataclass, so a cache cannot be assigned on it.
     """
 
-    def __init__(self, rows, keys, *, entries, model_full, model_now, depth):
+    def __init__(self, rows, keys, *, entries, model_full, model_now, depth,
+                 cut=(0, 0)):
         self._rows, self._keys = rows, keys
+        # (streamed, season-long) positive rows the swap_limit dropped (item 3.4c).
+        self.cut = cut
         self._ctx = (entries, model_full, model_now, depth)
         self._resolved: tuple[SwapRow, ...] | None = None
         self._resolved_keys: tuple[tuple[str, str], ...] | None = None
@@ -1241,6 +1320,10 @@ class _Entry:
     no_projection_at_all: bool = False
     pulled_as_of: str | None = None     # HIS newest projection vintage
     stale_projection: str | None = None  # set when his vintage lags the board's
+    # Priced at ZERO and modelled unavailable in every week (2026-10-01): ESPN
+    # lists him INJURY_RESERVE and the feed forecasts nothing for him. See
+    # ``_entry_from_row``.
+    season_over: bool = False
 
 
 class ScenarioModel:
@@ -1294,7 +1377,13 @@ class ScenarioModel:
                     e.position, w, status=e.injury_status, live_status=live_status,
                     weeks_since=max(0, w - current_week),
                 )
-                hard_out = on_bye or p >= 1.0
+                # A season-over player (two sources: ESPN INJURY_RESERVE and a
+                # feed with nothing for him) is a CERTAINTY, so a gate, not a
+                # scenario. Leaving him in the lottery with zero points made
+                # dropping him read -5.3 to -1.0 depending on truncation depth
+                # (measured 2026-09-29): his absence mass displaced every other
+                # player's in the renormalised enumeration.
+                hard_out = on_bye or p >= 1.0 or e.season_over
                 av[k] = not hard_out
                 po[k] = 0.0 if hard_out else p
                 pt[k] = e.points.get(w, 0.0)
@@ -1557,7 +1646,7 @@ class ScenarioModel:
 
 
 def _entry_from_row(row: Mapping, lines, byes: ByeMap, weeks: Sequence[int],
-                    *, on_roster: bool) -> _Entry | None:
+                    *, on_roster: bool, live_status: bool = True) -> _Entry | None:
     """Normalize one ``league_player_state``-shaped row into an ``_Entry``.
 
     THE ROSTER SEAM. Rows arrive as ``Mapping`` and are ``dict()``-ed at the top
@@ -1599,6 +1688,28 @@ def _entry_from_row(row: Mapping, lines, byes: ByeMap, weeks: Sequence[int],
     thin = bool(playable) and len(covered) < COVERAGE_FLOOR * len(playable)
     unvalued = line is None or sum(points.values()) == 0.0 or thin
 
+    # SEASON OVER is the ONE case where "no forecast" may be priced as "zero"
+    # (2026-10-01), and it is a LABELLED HYPOTHESIS (``SEASON_OVER_EVIDENCE``).
+    # Item 3.2's coverage rule exists because silence alone cannot tell "worth
+    # nothing" from "we do not know". Measured live 2026-09-29: De'Von Achane (torn
+    # ACL, out for 2026) read "drop UNPRICED — verify before dropping" and was
+    # placed LAST in the claim chain. The gate is narrow on purpose:
+    # * ESPN INJURY_RESERVE on YOUR roster, once statuses are live;
+    # * the feed KNOWS the player (``line is not None`` — a crosswalk failure is
+    #   not an injury) and has NO forecast row in any remaining week. A ZEROED row
+    #   does not qualify: the feed zeroes every player on IR placement and
+    #   re-projects returners later, so "IR + zero" is one event seen twice, not
+    #   two sources (the first draft of this rule said otherwise; item 3.4c
+    #   review, Lambert-Smith 09-22 -> 09-25).
+    status_token = str(row.get("injury_status") or "").strip().upper()
+    season_over = (
+        on_roster and live_status and status_token in SEASON_OVER_STATUSES
+        and line is not None and not covered
+    )
+    if season_over:
+        points = {w: 0.0 for w in weeks}
+        unvalued = False
+
     name = row.get("player") or (line.player if line is not None else None) or key
     return _Entry(
         key=key,
@@ -1621,7 +1732,36 @@ def _entry_from_row(row: Mapping, lines, byes: ByeMap, weeks: Sequence[int],
         no_projection_at_all=line is None or not covered,
         pulled_as_of=(max(line.retrieved_as_of)
                       if line is not None and line.retrieved_as_of else None),
+        season_over=season_over,
     )
+
+
+def _own_backups(owners: Iterable[tuple[str | None, str | None]],
+                 pool: Sequence[_Entry], kept: Sequence[_Entry], *,
+                 per_player: int = OWN_BACKUP_KEEP) -> list[_Entry]:
+    """Free agents the projection cut skipped who back up one of YOUR players.
+
+    ``owners`` is ``(team, position)`` for EVERY rostered player, IR slot
+    included: the starter who just went on IR is exactly the case this exists
+    for, and the season-over reason itself tells the operator to move him there
+    (item 3.4c review — the first draft read the ACTIVE roster only). For each
+    QB/RB/TE owner with a known team, the top ``per_player`` free agents on the
+    SAME team at the SAME position (by remaining-window projection) are returned
+    if ``kept`` does not already hold them.
+    """
+    have = {e.key for e in kept}
+    out: dict[str, _Entry] = {}
+    for team, position in set(owners):
+        if position not in _HANDCUFF_POSITIONS or team is None:
+            continue
+        mates = sorted(
+            (p for p in pool if p.team == team and p.position == position),
+            key=lambda p: (-sum(p.points.values()), p.key),
+        )
+        for p in mates[:per_player]:
+            if p.key not in have:
+                out[p.key] = p
+    return list(out.values())
 
 
 def _prune_pool(pool: Sequence[_Entry], limit: int | None) -> list[_Entry]:
@@ -1914,6 +2054,27 @@ def _row_reasons(
     healthy_starts, any_starts = starts
     reasons: list[str] = []
 
+    if entry.season_over:
+        # Its OWN short list, returned early. The generic bullets below were each
+        # written for a player who can still play, and on this row every one of
+        # them was false: "he is on MIA's bye in week 6" as the reason he never
+        # starts, a return-probability ladder ("back with probability 29% ..."),
+        # "this number is a FLOOR", and a "weeks he actually starts" share for a
+        # player who starts in none (item 3.4c review).
+        reasons.append(season_over_sentence(entry.player))
+        if best is not None and entry.droppable != 0:
+            reasons.append(
+                f"drop {entry.player} and add {best.player} ({best.position}): "
+                f"{-marginal:+.1f} house pts over "
+                f"{_plural(len(horizon_weeks), 'week')}, all of it the replacement's "
+                f"own value, because this board scores the dropped player at zero"
+            )
+            if classify_acquisition(best.roster_status) == ACQ_WAIVER:
+                reasons.append(
+                    f"{best.player} is on WAIVERS, not a free agent — that is a claim "
+                    f"to queue, not a click (item 3.4 plans the claim)"
+                )
+        return tuple(reasons)
     unavailable_all = all(not model.available(entry.key, w) for w in horizon_weeks)
     if unavailable_all:
         # Blaming positional competition here produced the self-contradictory
@@ -2038,7 +2199,8 @@ def _row_reasons(
     if entry.position in STREAMED_POSITIONS:
         reasons.append(
             f"your {entry.position} is priced on THIS WEEK ONLY, because you stream that "
-            f"slot week to week; a second {entry.position} is never considered as an add"
+            f"slot week to week; a {entry.position} is only ever considered as an add "
+            f"in exchange for one you hold, never as an extra one"
         )
     else:
         reasons.append(availability.describe(entry.position, horizon_weeks))
@@ -2170,10 +2332,16 @@ def build_board(
             "which understates what you would lose)"
         )
 
+    # Computed BEFORE the entries: the season-over rule reads it (a preseason
+    # INJURY_RESERVE tag is a roster label, not a game designation).
+    live = normalize_as_of(as_of) >= normalize_as_of(
+        live_status_from(conn, as_of=as_of, season=season, view=view)
+    )
+
     entries: dict[str, _Entry] = {}
     roster_keys: list[str] = []
     for row in active:
-        e = _entry_from_row(row, lines, byes, window, on_roster=True)
+        e = _entry_from_row(row, lines, byes, window, on_roster=True, live_status=live)
         if e is None:
             notes.append(f"skipped a roster row with an unreadable position: {row.get('player')}")
             continue
@@ -2211,6 +2379,53 @@ def build_board(
             f"few of every bye week — a deeper name cannot beat one already scanned "
             f"unless it wins on bye timing)"
         )
+    owner_rows = [(entries[k].team, entries[k].position, entries[k].injury_status)
+                  for k in roster_keys] + [
+        (_norm_team(r.get("pro_team")), canon_position(r.get("position")),
+         r.get("injury_status"))
+        for r in roster_rows if r not in active
+    ]
+    owners = [(t, p) for t, p, _status in owner_rows]
+    backups = _own_backups(owners, pool_entries, kept)
+    # The Rule-6 complement: a backup with NO forecast yet cannot be priced, so it
+    # cannot be scanned — but it is exactly the player this feature names, so it is
+    # named rather than silently skipped (item 3.4c review). Only behind a starter
+    # who is actually HURT: behind a healthy one, an unforecast third-stringer is
+    # the normal state of the feed, and naming nine of them every week (measured on
+    # the 09-29 board) is the noise that teaches a reader to skip the line.
+    hurt_slots = {
+        (t, p) for t, p, status in owner_rows
+        if p in _HANDCUFF_POSITIONS and t is not None
+        and str(status or "").strip().upper() not in ("", "ACTIVE", "NORMAL")
+    }
+    # ...and never a teammate who is himself out: on 2026-10-01 the note named
+    # De'Von Achane (torn ACL, a free agent by then) as a backup to "price by hand"
+    # behind a Questionable Jaylen Wright.
+    blind_mates = [
+        e for e in unpriceable_fas
+        if (e.team, e.position) in hurt_slots
+        and str(e.injury_status or "").strip().upper() not in _OUT_OF_ACTION
+    ]
+    if blind_mates:
+        notes.append(
+            f"could NOT scan {len(blind_mates)} backup(s) of your own HURT players "
+            f"because the projection feed has no forecast for them yet: "
+            + ", ".join(f"{e.player} ({e.position}, {e.team})"
+                        for e in sorted(blind_mates, key=lambda e: -e.percent_owned)[:5])
+            + " — price them by hand if one of your starters is hurt"
+        )
+    if backups:
+        kept = list(kept) + backups
+        notes.append(
+            f"also scanned {len(backups)} free agent(s) the projection cut skipped, "
+            f"because each backs up one of YOUR players at the same team and position "
+            f"(the cut is blind the week a starter goes down, before the feed "
+            f"promotes the backup): "
+            + ", ".join(f"{e.player} ({e.position}, {e.team})" for e in backups)
+        )
+    season_over = [entries[k] for k in roster_keys if entries[k].season_over]
+    if season_over:
+        notes.extend(season_over_sentence(e.player) for e in season_over)
     for e in kept:
         entries[e.key] = e
 
@@ -2228,9 +2443,6 @@ def build_board(
                 e.stale_projection = e.pulled_as_of
 
     links, handcuff_detail = _depth_links(lines, entries, window)
-    live = normalize_as_of(as_of) >= normalize_as_of(
-        live_status_from(conn, as_of=as_of, season=season, view=view)
-    )
     if not live:
         notes.append(
             "preseason: ESPN injury tags are roster labels this early, not game "
@@ -2277,6 +2489,7 @@ def build_board(
         handcuffs=handcuffs,
         handcuff_detail=handcuff_detail,
         conn=conn,
+        league_limits=league_limits,
         as_of=as_of,
         season=season,
         source=source,
@@ -2346,6 +2559,7 @@ def _scan(
     handcuffs,
     handcuff_detail,
     conn,
+    league_limits=None,
     as_of,
     season,
     source,
@@ -2414,7 +2628,19 @@ def _scan(
         best: _Entry | None = None
         for f in candidates:
             cap = position_caps.get(f.position)
-            if cap is not None and after_counts.get(f.position, 0) + 1 > cap:
+            held = after_counts.get(f.position, 0) + 1
+            # A cap forbids RAISING a position's count above it, never KEEPING a
+            # count the roster already holds (2026-10-01). Holding two D/STs (the
+            # H-wk02-1 rotation slot) put the roster over the D/ST guard of 1, and
+            # the old test then refused even a ONE-FOR-ONE D/ST swap — so `waivers`
+            # could not price a better streaming defense at all, and the week-4
+            # Vikings claim was built by hand. A second defense as a pure ADD (the
+            # flat-feed artefact item 3.2 measured) is still refused: it raises
+            # the count. And a LEAGUE limit stays absolute (``cap_allows_keep``).
+            if cap is not None and held > cap and not (
+                held <= counts.get(f.position, 0)
+                and cap_allows_keep(f.position, cap, league_limits)
+            ):
                 continue
             v = model.value(remaining + [f.key])
             gain = v - base
@@ -2425,7 +2651,7 @@ def _scan(
                     add_status=f.roster_status,
                     add_startable_this_week=model_now.available(f.key, window[0]),
                     horizon_weeks=len(horizon),
-                    drop_unpriceable=d.unvalued,
+                    drop_unpriceable=d.unvalued, drop_season_over=d.season_over,
                     add_espn_id=f.espn_id, drop_espn_id=d.espn_id,
                     reasons=(
                         f"add {f.player} ({f.position}), drop {d.player} "
@@ -2440,7 +2666,9 @@ def _scan(
                         f"{d.player} has no usable projection, so this board scored him "
                         f"0 in every week — this gain is an UPPER BOUND and he is "
                         f"probably your cheapest drop, but we could not price him",
-                    ) if d.unvalued else ()),
+                    ) if d.unvalued else ()) + ((
+                        season_over_sentence(d.player),
+                    ) if d.season_over else ()),
                 ))
                 swap_keys.append((drop_key, f.key, remaining))
             if v > best_value:
@@ -2461,6 +2689,7 @@ def _scan(
                 add_status=best.roster_status,
                 add_startable_this_week=model_now.available(best.key, window[0]),
                 horizon_weeks=len(horizon), drop_unpriceable=d.unvalued,
+                drop_season_over=d.season_over,
                 add_espn_id=best.espn_id, drop_espn_id=d.espn_id,
                 reasons=(
                     f"add {best.player} ({best.position}), drop {d.player} "
@@ -2471,7 +2700,7 @@ def _scan(
                     if model_now.available(best.key, window[0])
                     else f"{best.player} cannot start this week (ruled out / on bye) — "
                          f"this is a hold-for-later add, not a lineup fix",
-                ),
+                ) + ((season_over_sentence(d.player),) if d.season_over else ()),
             ))
             swap_keys.append((drop_key, best.key, remaining))
 
@@ -2557,12 +2786,21 @@ def _scan(
     )
     order = sorted(range(len(swaps)), key=lambda i: (-swaps[i].gain, swaps[i].add,
                                                      swaps[i].drop))
+    cut = (0, 0)
     if swap_limit is not None:
+        # The rows the limit drops are COUNTED, never silently lost (item 3.4c
+        # review): one season-over drop pairs positively with every scanned free
+        # agent (117 rows live on 09-29), and the silent cut then made the page's
+        # "N further one-week STREAM(s)" read 57 when the truth was 113. Counted on
+        # the cheap SEARCH estimator, i.e. before the reporting re-price.
+        dropped = [swaps[i] for i in order[swap_limit:] if swaps[i].gain > 0.0]
+        cut = (sum(1 for r in dropped if r.drop_position in STREAMED_POSITIONS),
+               sum(1 for r in dropped if r.drop_position not in STREAMED_POSITIONS))
         order = order[:swap_limit]
     matrix = _SwapMatrix(
         [swaps[i] for i in order], [swap_keys[i] for i in order],
         entries=entries, model_full=model_full, model_now=model_now,
-        depth=report_depth,
+        depth=report_depth, cut=cut,
     )
     return rows + unvalued_rows, matrix
 

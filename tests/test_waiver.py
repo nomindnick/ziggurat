@@ -2405,9 +2405,12 @@ def test_the_rotation_slot_never_names_an_undroppable_or_unpriceable_body(db, ma
 
 def _doctored_body(plan, *, points, name="Spare Runner", position="RB"):
     body = plan.drop_board[0]
+    # The held D/ST row stays: since item 3.4c the block prints only for a roster
+    # holding exactly ONE defense, and it counts them off the drop board.
+    held_dst = tuple(d for d in plan.drop_board if d.position == "DST")
     return replace(plan, drop_board=(replace(
         body, player=name, position=position, marginal_points=points,
-        horizon_weeks=16, unpriceable=False, undroppable=False),))
+        horizon_weeks=16, unpriceable=False, undroppable=False),) + held_dst)
 
 
 def test_the_rotation_slot_prices_a_POSITIVE_body_as_a_permanent_cost(db, marginal_world):
@@ -2445,7 +2448,8 @@ def test_the_rotation_slot_says_so_when_there_is_no_body_to_pay_with(db, margina
     _stream_world(marginal_world)
     _league_settings(db, dst_limit=3)
     plan = _plan(db, claim_budget=10)
-    lines = " ".join(waiver._rotation_slot_lines(replace(plan, drop_board=())))
+    only_dst = tuple(d for d in plan.drop_board if d.position == "DST")
+    lines = " ".join(waiver._rotation_slot_lines(replace(plan, drop_board=only_dst)))
     assert waiver.ROTATION_SLOT_HEADER in lines
     assert "nothing to pay with" in lines
     assert "the answer for today, not a missing feature" in lines
@@ -2481,14 +2485,16 @@ def test_the_rotation_slot_reconciles_itself_with_the_drop_boards_own_sentence(
         db, marginal_world):
     """Two renderers of one scan appearing to contradict each other is the failure
     the item-3.8A audit paid for. The DROP BOARD on this same page prints
-    `marginal.py`'s own 'a second DST is never considered as an add' — which stays
+    `marginal.py`'s own 'a DST is only ever considered as an add in exchange for one
+    you hold' — which stays
     TRUE, because it is about the ranked SEARCH — directly below a block that
     prices exactly that shape. The reconciliation is stated, not left to the
     reader, and BOTH sentences must be on the page for this test to mean anything."""
     _stream_world(marginal_world)
     _league_settings(db, dst_limit=3)
     text = waiver.format_waiver_plan(_plan(db, claim_budget=10), reasons=True)
-    assert "a second DST is never considered as an add" in text   # marginal.py's
+    assert ("a DST is only ever considered as an add in exchange for one you hold"
+            in text)                                               # marginal.py's
     assert "This does NOT contradict the drop board below" in text
     assert "This block is a PRICE, not a ranking." in text
 
@@ -2664,3 +2670,71 @@ def test_the_dst_card_on_this_page_marks_its_backtest_figures_realised(db, margi
     assert "+1.84 REALISED house pts/wk" in text
     assert "0 to +0.4 pts/wk (REALISED" in text
     assert "PROJECTED change to ONE week's score" in text
+
+
+def test_the_chain_keeps_a_one_for_one_swap_at_an_over_guard_position(
+        db, marginal_world):
+    """Four QBs held, over this board's own QB guard of 3 (2026-10-01). A QB-for-QB
+    claim keeps the count and must survive the CHAIN's own cap re-check, not only
+    the matrix filter; a QB added for a non-QB drop would raise it and must not."""
+    specs = [s for s in _active_specs() if s["name"] not in ("Fifth Catcher", "Sixth Catcher")]
+    specs += [
+        {"name": "Third Passer", "pos": "QB", "team": "NO", "pts": 2.0, "bye": 7, "on_team": TEAM},
+        {"name": "Fourth Passer", "pos": "QB", "team": "SEA", "pts": 1.0, "bye": 8, "on_team": TEAM},
+        _ir_spec("OUT"),
+        {"name": "Free Passer", "pos": "QB", "team": "NE", "pts": 19.0, "bye": 9},
+    ]
+    marginal_world(specs, retrieved=PULL)
+    plan = _plan(db, claim_budget=10)
+    moves = plan.claims + plan.fcfs_grabs
+    qb_moves = [c for c in moves if c.add_position == "QB"]
+    assert qb_moves, [(c.add, c.drop) for c in moves]
+    assert all(c.drop_position == "QB" for c in qb_moves)
+
+
+def test_a_season_over_drop_is_tagged_on_the_claim_line_itself(db, marginal_world):
+    """The zero is a labelled hypothesis, and short-term IR can look the same for a
+    few days — so the claim line carries it in the DEFAULT view, like an UNPRICED
+    drop does (item 3.4c review), not only the drop board's 'already spent' row."""
+    torn = {"name": "Torn Knee", "pos": "RB", "team": "MIA", "pts": 15.0, "bye": 6,
+            "on_team": TEAM, "injury": "INJURY_RESERVE", "forecast": set()}
+    specs = [s for s in _active_specs() if s["name"] != "Depth Runner"] + [torn]
+    marginal_world(specs + [_ir_spec("OUT")] + _POOL_SPECS, retrieved=PULL)
+    plan = _plan(db, claim_budget=10)
+    moves = [c for c in plan.claims + plan.fcfs_grabs if c.drop == "Torn Knee"]
+    assert moves and all(c.drop_season_over for c in moves)
+    text = waiver.format_waiver_plan(plan, reasons=False)
+    assert "[drop priced at ZERO as SEASON OVER — check the news first]" in text
+
+
+def test_the_rotation_slot_is_SILENT_once_two_dsts_are_already_held(db, marginal_world):
+    """With two D/STs held the slot EXISTS and the matrix prices D/ST-for-D/ST
+    directly (item 3.4c), so 'a second defense is filtered out before anything is
+    priced' would be false directly under those rows."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    plan = _plan(db, claim_budget=10)
+    assert waiver._rotation_slot_lines(plan)            # one D/ST: it prints
+    [dst] = [d for d in plan.drop_board if d.position == "DST"]
+    two = replace(plan, drop_board=plan.drop_board + (replace(dst, player="Spare D/ST"),))
+    assert waiver._rotation_slot_lines(two) == []
+
+
+def test_the_rotation_slot_needs_a_stream_that_ADDS_a_defense(db, marginal_world):
+    """'Keep the D/ST, ADD Braelon Allen into a bench slot' is not this shape."""
+    _stream_world(marginal_world)
+    _league_settings(db, dst_limit=3)
+    plan = _plan(db, claim_budget=10)
+    non_dst = replace(plan, streaming=tuple(
+        replace(r, add_position="RB") for r in plan.streaming))
+    assert waiver._rotation_slot_lines(non_dst) == []
+
+
+def test_rows_cut_at_the_matrix_limit_are_disclosed_by_lane():
+    chain = waiver._ChainResult(
+        (), (), (), 0.0, (), 0, waiver.STOP_EXHAUSTED, 0,
+        streamed_hidden=1, matrix_cut_streamed=2, matrix_cut_season=4)
+    text = " ".join(waiver._chain_notes(chain, claim_budget=10, weeks=14))
+    assert "3 further one-week STREAM(s) are positive but not shown" in text
+    assert "2 of them were dropped earlier, at the swap matrix's row limit" in text
+    assert "4 season-long add/drop pair(s)" in text and "UNMEASURED, not rejected" in text

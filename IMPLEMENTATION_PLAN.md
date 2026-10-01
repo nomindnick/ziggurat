@@ -2588,6 +2588,147 @@ MEASURES something and then drops it is worse than one that never looked — it
 turns the tool's own stop sentence into a lie, and that sentence is the part a
 novice cannot check.**
 
+**Addendum — item 3.4c, the waiver scan's three blind spots, 2026-10-01 (from
+the wk03 retro and the wk04 Tuesday).** Each forced a hand-built claim on a live
+Tuesday. The fixes move other rows' prices only through the season-over gate (±0.1
+on the 09-29 board, as Achane leaves the injury lottery).
+
+1. **A season-ending IR player read "cannot value" and was dropped LAST.**
+   - **The failure:** on 09-29 De'Von Achane (torn ACL, ESPN `INJURY_RESERVE`,
+     no forecast in any remaining week) carried "drop UNPRICED — verify before
+     dropping". The chain spent Rodriguez, Marks and Metcalf before the one body
+     worth exactly nothing, and the session re-ran it by hand to get `#1 Kamara
+     <- Achane +13.6`.
+   - **The fix, as finally shipped after review:** a ROSTERED player whose ESPN
+     status is `INJURY_RESERVE`, whom the feed KNOWS (a joined projection
+     identity, so a crosswalk failure never qualifies) but has dropped entirely
+     (no forecast ROW in any remaining week), is now **season over (a labelled
+     hypothesis)**:
+     - priced at zero;
+     - modelled UNAVAILABLE in every week. A certainty is a gate, not a
+       scenario: left in the injury lottery at zero points, his absence mass
+       displaced everyone else's, and his drop read −5.3 … −1.0 by truncation
+       depth (measured 09-29).
+   - **On the page:** a note and a first reason say why, plus the short-term-IR
+     caveat and the free-IR-slot alternative.
+   - **What it does NOT cover:**
+     - A short-term IR player whose return the feed projects keeps his forecast.
+     - A preseason tag is never read this way.
+     - The one-day LAG case stays as it was: on 09-28 ESPN already said IR
+       while the 09-27 feed still projected Achane at 253.8.
+   - **Live replay at as_of 09-29:** `#1 add Alvin Kamara <- drop De'Von Achane
+     +13.6`, exactly the session's hand number.
+2. **The projection cut could skip the backup of your own starter.**
+   - **The fix:** `_own_backups` adds, past the top-30 cut, the top
+     `OWN_BACKUP_KEEP = 2` free agents on the same team at the same position
+     behind every rostered QB/RB/TE. That holds whether or not the rostered
+     player is priceable, because the injured starter is the case this exists
+     for. Two, because one named handcuff is right ~54% of the time and two
+     backups cover ~77% (item 3.6). The page names who was added.
+   - **Correction to the wk03 journal:** on the 09-28 board Gordon was already
+     inside the cut (his rest-of-season total cleared it; only his WEEK-4
+     number was 1.6). The guarantee is for the next starter whose backup's
+     season total lags too.
+3. **Holding two D/STs blocked every D/ST-for-D/ST swap.**
+   - **The failure:** the H-wk02-1 rotation slot put the roster over this
+     board's own D/ST guard of 1. Both cap checks (the matrix filter in
+     `marginal._scan` and the chain's per-step `cap_ok` in `waiver.py`) then
+     refused even a one-for-one swap. The week-4 Vikings claim was priced by
+     hand off `lineup`'s optional-upgrade note.
+   - **The rule now (`marginal.cap_allows_keep`):** a cap forbids RAISING a
+     count above it. A swap may KEEP an over-cap count ONLY when the binding
+     fence is this board's own guard. A LEAGUE limit stays absolute, because
+     ESPN refuses the add: a cap tighter than the guard can only be the
+     league's, and an equal one is the league's too when its own limit is at or
+     below it. `test_the_league_own_position_limit_binds_when_it_is_tighter`
+     caught the first, too-broad draft of this rule.
+   - **Live 2026-09-30:** the streaming lane now prices `add Chiefs D/ST <- drop
+     Packers D/ST +2.1` (and `<- drop Rams D/ST`). A second D/ST as a pure ADD
+     is still refused.
+   - **Known disagreement, surfaced not fixed:** the waivers streaming lane
+     ranks by HOUSE points, while `ziggurat stream` orders D/ST by the
+     FantasyPros board (item 3.14). So the lane can rank a D/ST the market has
+     lower (Chiefs FP DST10 above Packers DST5 this week). The lane already
+     says `stream` is where that decision belongs.
+
+**Review round (one Opus reviewer, same day): 6 confirmed defects, all fixed
+before merge.**
+1. **The gate was a tautology (major).** The first draft read "IR + the feed
+   forecasts nothing POSITIVE" as "two sources agree". But the feed ZEROES every
+   player at IR placement and re-projects returners later, so the two are one
+   event seen twice:
+   - KeAndre Lambert-Smith (INJURY_RESERVE) would have read season over on
+     09-22, and was re-projected from week 8 on 09-25.
+   - Narrowed to the SHAPE the review found separating the cases: confirmed
+     season-enders had NO forecast row left (6: Achane, Dart, Tonges, Davis,
+     Patrick, Pacheco), while short-term IR kept explicit ZERO rows (4).
+   - n is tiny, so every row and the claim line quote it as a hypothesis
+     (`SEASON_OVER_EVIDENCE`).
+2. **A season-over row contradicted itself (major).** It printed:
+   - "he is on MIA's bye in week 6" as the reason he never starts;
+   - a return-probability ladder;
+   - "this number is a FLOOR";
+   - a "weeks he actually starts" share.
+
+   It now gets its own short reason list, returned early.
+3. **The ROTATION SLOT block was false on a two-D/ST roster.** It said "a
+   SECOND defense is filtered out … before anything is priced" directly under
+   the new priced D/ST-for-D/ST rows. It now prints only for a roster holding
+   exactly ONE D/ST, and only for a stream that ADDS a defense. The latter was
+   pre-existing: it had read "keep the D/ST, ADD Braelon Allen".
+4. **The D/ST drop-board sentence** "a second DST is never considered as an add"
+   became false. Now: "a D/ST is only ever considered as an add in exchange for
+   one you hold, never as an extra one".
+5. **A season-over drop floods the matrix,** pairing positively with every
+   scanned free agent (117 rows live). The silent `swap_limit=200` cut then made
+   "57 further one-week STREAM(s)" false (true: 113). Cut rows are now COUNTED
+   by lane (`board.swaps_cut`), added to the streams line, and any cut
+   season-long pair is disclosed as UNMEASURED, not rejected.
+6. **Backups vanished once the starter moved to the IR SLOT** (the move the
+   season-over reason recommends). Owners now include IR-slot players.
+
+Also fixed:
+- The claim LINE carries `[drop priced at ZERO as SEASON OVER — check the news
+  first]` in the default view.
+- A teammate with no forecast yet is NAMED ("could NOT scan … price them by
+  hand"), not silently skipped.
+- `decisions/capture.py`'s `POOL_UNKNOWN_NOTE` now says `scanned` also covers
+  force-scanned backups and matrix-cut rows.
+- The 54%/77% handcuff figure is a depth-chart rank-2/3 measurement. It is used
+  here for the top-2 free-agent teammates, which is a different set when the
+  rank-2 backup is rostered elsewhere — a proxy, recorded as such.
+
+**Tests:** 17 new.
+- **Season over:**
+  - priced at zero with an exact-zero drop cost at depths 1–3, and none of the
+    six false generic sentences;
+  - explicit zero rows are NOT season over;
+  - a crosswalk failure is NOT;
+  - a free agent is NOT;
+  - short-term IR is untouched;
+  - a preseason tag is ignored.
+- **Backups:**
+  - past a top-1 cut, top two only, and never a WR (now non-vacuous);
+  - IR-slot owners count;
+  - an unforecast backup is named.
+- **Caps:**
+  - D/ST-for-D/ST is priced, but a third D/ST is refused;
+  - `cap_allows_keep` against our guard and against league limits;
+  - the CHAIN keeps a QB-for-QB claim at an over-guard count.
+- **Pages:**
+  - matrix-cut counts by lane, and their disclosure;
+  - the claim-line tag;
+  - the rotation block is silent with two D/STs held and for a non-D/ST add.
+
+Each of 18 mutations is killed by at least one test.
+
+**NOT done, recorded:**
+- Mutants that stop passing `league_limits` into `_scan` / `cap_ok` survive;
+  only the predicate is unit-tested. Low impact: an over-LEAGUE-limit roster
+  cannot exist under ESPN.
+- The waivers streaming lane still ranks D/ST by house points, while `stream`
+  orders them by the market (see 3 above).
+
 ### 3.5 [Build] Lineup support & streaming
 **Goal:** Weekly starter recommendations with win-probability variance posture (opponent projected total → underdog/favorite mode), slot-lock optionality (Thursday players never in FLEX), time-contingent GTD handling, Sunday-morning inactives check; plus the D/ST + K streaming ranker using house scoring, opponent quality, Vegas totals, and weather. Hard-coded sanity checks (OUT/bye players never recommended) enforced in code with tests.
 **Done when:** for a synthetic week, the lineup changes appropriately when the opponent's projection swings from −20 to +20, and the streaming ranker's weather sensitivity is demonstrable.

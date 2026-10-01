@@ -101,6 +101,7 @@ from ziggurat.core.marginal import (
     POSITION_CAPS,
     STREAMED_POSITIONS,
     UNDROPPABLE_TAG,
+    cap_allows_keep,
     MarginalBoard,
     MarginalRow,
     SwapRow,
@@ -496,6 +497,7 @@ class ClaimRec:
     reasons: tuple[str, ...]
     gain_alone: float = 0.0         # standalone (the pre-3.4b number)
     chain_rank: int = 0             # 1-based; 0 => not in the season-long chain
+    drop_season_over: bool = False  # the drop is priced at ZERO as SEASON OVER (3.4c)
     # The DROP's ESPN id (item 4.2b, B1). ``add_espn_id`` has been carried since
     # the item-3.4 audit fixed a duplicate-display-name mis-join; the drop side
     # was left on the name alone, and a journal or an archive that records "what
@@ -1202,6 +1204,7 @@ def _swap_rec(
         startable_this_week=s.add_startable_this_week,
         horizon=s.horizon_weeks,
         drop_unpriceable=False if is_pure_add else s.drop_unpriceable,
+        drop_season_over=False if is_pure_add else s.drop_season_over,
         waiver_rank=waiver_rank if kind == KIND_WAIVER else None,
         reasons=_claim_reasons(
             s, kind=kind, waiver_rank=waiver_rank, team_count=team_count,
@@ -1235,6 +1238,10 @@ class _ChainResult:
     chain_under_ranked: tuple[ChainRejection, ...] = ()
     chain_capped: tuple[ChainRejection, ...] = ()
     streamed_hidden: int = 0        # positive streams cut by the claim_budget slice
+    # Positive rows the swap MATRIX dropped at its row limit before any re-price
+    # (item 3.4c review) — (streamed, season-long). Disclosed, never silent.
+    matrix_cut_streamed: int = 0
+    matrix_cut_season: int = 0
     phase_a_skipped: int = 0        # distinct adds phase A did not scan (top-K cap)
     phase_a_truncated: bool = False  # phase A stopped on cost, NOT on economics
     exhaust_reused: int = 0         # drain skips caused by a spent add/drop identity
@@ -1437,19 +1444,21 @@ def _select_claims(
         for s in stream_sorted[:budget]
     )
     streamed_hidden = max(len(stream_sorted) - len(stream_recs), 0)
+    cut_streamed, cut_season = getattr(board, "swaps_cut", (0, 0))
+    cut_fields = {"matrix_cut_streamed": cut_streamed, "matrix_cut_season": cut_season}
     if budget <= 0:
         # "You asked me not to look" is NOT "there were no candidates" — the note
         # this feeds must never claim the pool holds nothing worth having.
         return _ChainResult(
             (), (), stream_recs, 0.0, (), 0, STOP_BUDGET, 0,
             streamed_hidden=streamed_hidden, position_caps=position_caps,
-            league_limits=league_limits,
+            league_limits=league_limits, **cut_fields,
         )
     if not seasonal:
         return _ChainResult(
             (), (), stream_recs, 0.0, (), 0, STOP_NO_CANDIDATES, 0,
             streamed_hidden=streamed_hidden, position_caps=position_caps,
-            league_limits=league_limits,
+            league_limits=league_limits, **cut_fields,
         )
 
     caps = dict(position_counts)
@@ -1478,10 +1487,15 @@ def _select_claims(
         cap = position_caps.get(s.add_position)
         if cap is None:
             return True
-        after = caps.get(s.add_position, 0) + 1
+        held = caps.get(s.add_position, 0)
+        after = held + 1
         if not pure and s.drop_position == s.add_position:
             after -= 1
-        return after <= cap
+        # Same rule as ``marginal._scan``: this board's own guard forbids RAISING
+        # a count above it, never keeping one the roster already holds; a LEAGUE
+        # limit stays absolute (``marginal.cap_allows_keep``, 2026-10-01).
+        return after <= cap or (
+            after <= held and cap_allows_keep(s.add_position, cap, league_limits))
 
     def apply_caps(s: SwapRow, pure: bool) -> None:
         caps[s.add_position] = caps.get(s.add_position, 0) + 1
@@ -1748,7 +1762,7 @@ def _select_claims(
         streamed_hidden=streamed_hidden, phase_a_skipped=phase_a_skipped,
         phase_a_truncated=phase_a_truncated,
         exhaust_reused=exhaust_reused, exhaust_capped=exhaust_capped,
-        position_caps=position_caps, league_limits=league_limits,
+        position_caps=position_caps, league_limits=league_limits, **cut_fields,
     )
 
 
@@ -2405,13 +2419,26 @@ def _chain_notes(chain: _ChainResult, *, claim_budget: int, weeks: int) -> list[
             f"carry NO number against the finished chain ({how}) — treat them as "
             f"unmeasured, not as rejected."
         )
-    if chain.streamed_hidden:
+    hidden = chain.streamed_hidden + chain.matrix_cut_streamed
+    if hidden:
         out.append(
-            f"{chain.streamed_hidden} further one-week STREAM(s) are positive but not "
-            f"shown: that lane is sliced by --claim-budget too. It sits OUTSIDE the "
+            f"{hidden} further one-week STREAM(s) are positive but not "
+            f"shown: that lane is sliced by --claim-budget too"
+            + (f" ({chain.matrix_cut_streamed} of them were dropped earlier, at the "
+               f"swap matrix's row limit, before any re-pricing — a search-estimator "
+               f"count)" if chain.matrix_cut_streamed else "")
+            + ". It sits OUTSIDE the "
             f"chain — those rows are ranked alternatives for one slot, best first, so "
             f"the top one is still the best of them. `ziggurat stream` is the full "
             f"lane and the place that decision belongs."
+        )
+    if chain.matrix_cut_season:
+        out.append(
+            f"{chain.matrix_cut_season} season-long add/drop pair(s) that the cheap "
+            f"search priced positive were cut at the swap matrix's row limit before "
+            f"the chain could see them: UNMEASURED, not rejected. If the list above "
+            f"ended because 'the priced add/drop pairs ran out', some of these were "
+            f"never offered to it."
         )
     return out
 
@@ -2483,6 +2510,10 @@ def _claim_line(rec: ClaimRec) -> str:
     # An unpriceable drop is flagged in the DEFAULT view (item 3.4 audit F6),
     # mirroring the inline "(cannot start this week)" flag.
     unpriced = "  [drop UNPRICED — verify before dropping]" if rec.drop_unpriceable else ""
+    if rec.drop_season_over:
+        # Same register, DEFAULT view (item 3.4c review): the zero is a labelled
+        # hypothesis, and short-term IR looks the same for a few days.
+        unpriced += "  [drop priced at ZERO as SEASON OVER — check the news first]"
     # The chain RANK, on every chained line in the DEFAULT view (item 3.4b audit).
     # The two sections are split by ACTION (queue overnight vs click now), so the
     # chain runs ACROSS them and the printed order is NOT the chain order whenever
@@ -2583,8 +2614,19 @@ def _rotation_slot_lines(plan: "WaiverPlan") -> list[str]:
     not: a cap of 1 that the league also imposes is a rule, and pricing a move the
     app would refuse is the failure mode item 3.8a fixed everywhere else.
     """
+    # The shape priced here is ADDING a second defense, so it needs a roster that
+    # holds exactly ONE. With two already held the rotation slot exists, and since
+    # item 3.4c the matrix prices a D/ST-for-D/ST swap directly — the streaming
+    # rows above ARE the price, and this block's "filtered out before anything is
+    # priced" would be false directly beneath them (item 3.4c review). And the
+    # streamed row must itself ADD a defense: a "keep the D/ST, ADD Braelon Allen
+    # into a bench slot" rental is not this shape at all.
+    held_dst = sum(1 for d in plan.drop_board if d.position == "DST")
+    if held_dst != 1:
+        return []
     stream = next(
-        (r for r in plan.streaming if r.drop_position == "DST" and r.drop), None)
+        (r for r in plan.streaming
+         if r.drop_position == "DST" and r.add_position == "DST" and r.drop), None)
     if stream is None:
         return []
     caps = plan.position_caps or {}
@@ -2621,9 +2663,9 @@ def _rotation_slot_lines(plan: "WaiverPlan") -> list[str]:
         # scan appearing to contradict each other is the failure the item-3.8A
         # audit paid for, so the reconciliation is stated here rather than left for
         # the reader to notice.
-        "  This does NOT contradict the drop board below, which says a second D/ST "
-        "is never considered as an add: that is true of the ranked SEARCH and stays "
-        "true. This block is a PRICE, not a ranking."
+        "  This does NOT contradict the drop board below, which says a D/ST is only "
+        "ever considered as an add in exchange for one you hold: that is true of the "
+        "ranked SEARCH and stays true. This block is a PRICE, not a ranking."
     )
     out.append(
         f"  THE SHAPE: keep {stream.drop} (the D/ST you already hold), ADD "
