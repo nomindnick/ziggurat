@@ -123,6 +123,27 @@ def test_favorite_seats_the_floor_and_underdog_seats_the_boom(db, marginal_world
     assert fav_names != und_names            # THE differ assertion
 
 
+def test_in_a_posture_week_the_margin_is_the_seated_lineups_not_the_greedy_ones(
+        db, marginal_world):
+    """Item 3.17b. Pre-fix, ``margin`` was the GREEDY lineup's margin while the
+    totals beside it were the SEATED lineup's, so a FAVORITE card printed a margin
+    its own two numbers contradicted. Now ``margin`` is exactly you - opp, the
+    posture driver is ``posture_margin``, and the card names the gap between them."""
+    marginal_world(_contest_specs(), retrieved=PULL)
+    g = _build(db).own_projected_total
+    fav = _build(db, opponent_total=g - 20)
+    assert fav.posture == "FAVORITE"
+    assert fav.margin == pytest.approx(fav.own_projected_total - fav.opponent_total)
+    assert fav.posture_margin == pytest.approx(20.0)        # greedy total - opp
+    assert fav.own_projected_total < g                       # the floor swap cost points
+    assert fav.margin < fav.posture_margin
+    card = format_lineup_recommendation(fav)
+    assert f"margin {fav.posture_margin:+.1f}; the seated lineup gives up" in card
+    neutral = _build(db, opponent_total=g)
+    assert neutral.margin == pytest.approx(neutral.posture_margin)
+    assert "posture set on" not in format_lineup_recommendation(neutral)
+
+
 def test_greedy_seats_the_boom_by_points(db, marginal_world):
     """Sanity precondition for the flip: the boom TE out-projects the floor RB, so
     the points-greedy (NEUTRAL) lineup seats the boom and benches the floor."""

@@ -14,7 +14,11 @@ import typer
 
 from ziggurat.core.candidates import build_candidates, format_candidates
 from ziggurat.core.divergence import build_divergence, format_report
-from ziggurat.core.lineup_support import build_lineup, format_lineup_recommendation
+from ziggurat.core.lineup_support import (
+    build_lineup,
+    format_lineup_recommendation,
+    read_live_for_card,
+)
 from ziggurat.core.marginal import (
     DEFAULT_POOL_LIMIT,
     WeekResolutionError,
@@ -441,26 +445,37 @@ def lineup(
     reasons: Annotated[bool, typer.Option("--reasons", help="Print every starter's reasons.")] = False,
     source: Annotated[str, typer.Option(help="Projection source.")] = "sleeper_rotowire",
     now: Annotated[Optional[str], typer.Option(
-        help="Decision clock (ET ISO datetime) for GTD/inactives logic; default midnight ET of --as-of.")] = None,
+        help="Decision clock (ET ISO datetime) for GTD/inactives logic; default midnight ET "
+             "of --as-of, or the wall clock with --live.")] = None,
+    live: Annotated[bool, typer.Option("--live",
+        help="Read ESPN's live scoreboard (one network read): locked starters count "
+             "what they have scored, and ESPN's own projection prints beside ours.")] = False,
     path: Annotated[Path, typer.Option(help="SQLite facts database.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Recommend the week's starting lineup to maximise P(win): opponent-aware
     favorite/underdog posture, slot-lock optionality, GTD contingencies and an
-    inactives watch (item 3.5).
+    inactives watch (item 3.5). ``--live`` adds item 3.17b's live read.
 
     All seating, variance priors, posture and sanity logic live in
     ``core/lineup_support.py``; this command parses, calls, and prints (rule 3).
     """
     day = as_of or _today()
     resolved_season = _season(season)
-    now_et = _parse_now(now)
+    clock = now_et(now) if live else _parse_now(now)
     conn = open_db(path)
     try:
         team_id = team
+        creds = None
         if team_id is None:
             creds = load_espn_credentials()
             team_id = resolve_own_team(
                 conn, as_of=day, season=resolved_season, swid=creds["swid"]
+            )
+        live_read = live_error = None
+        if live:
+            live_read, live_error = read_live_for_card(
+                conn, season=resolved_season, as_of=day, now=clock, team_id=team_id,
+                credentials=creds,
             )
         rec = build_lineup(
             conn,
@@ -471,8 +486,10 @@ def lineup(
             opponent_total=opponent_total,
             last_week=last_week,
             source=source,
-            now=now_et,
+            now=clock,
             today=_today(),
+            live_read=live_read,
+            live_error=live_error,
         )
     except (WeekResolutionError, OwnTeamUnresolved) as exc:
         typer.echo(f"error: {exc}", err=True)

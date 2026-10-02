@@ -63,6 +63,19 @@ Rule 6 — a novice cannot smell a wrong lineup, so a seated starter who is on B
 or ruled OUT is a HARD ERROR in code (``assert_no_illegal_starters``), every row
 ships its reasons and driving numbers, and every prior quotes its label. Rule 8 —
 permanent module, never imports from ``ziggurat/draft/``.
+
+THE CARD ONCE GAMES START (item 3.17b, added 2026-10-02, from the Week-3 retro).
+Four defects, none worth points and every one worth the operator's trust:
+(1) the card carried a locked starter at his PROJECTION all weekend (Packers
+D/ST, projected 7.0, realised -6.0 on the Thursday), so it read 54% while the
+true margin was near -10 — ``live=`` now counts a locked starter's ESPN points;
+(2) the printed margin was the BEST-PROJECTED lineup's, not the seated one's, so
+in a FAVORITE/UNDERDOG week it disagreed with the two totals beside it by up to
+2 points — ``margin`` is now exactly ``you - opp`` and the posture driver is its
+own field; (3) a 0.4-point QB/TE swap that flipped on a feed refresh read
+exactly like a real change — near ties are now named, against a measured
+refresh-flip rate; (4) ESPN's own projection, the second opinion the session
+was reading by hand, now rides the same live read as a column.
 """
 
 import math
@@ -95,6 +108,7 @@ from ziggurat.core.valuation import (
 from ziggurat.data.asof import normalize_as_of
 from ziggurat.data.nfl import base, refresh
 from ziggurat.data.nfl.schedules import get_schedule
+from ziggurat.league import live as league_live
 from ziggurat.league import state as league_state
 
 # --------------------------------------------------------------------- constants
@@ -138,17 +152,68 @@ _ESPN_STARTING_SLOTS = MappingProxyType({
 })
 
 # The one sentence the card owes the operator about a locked player's points
-# (item 3.13 design point 4). We have no live-score source, so a locked player is
-# carried at his PROJECTION. State the tradeoff honestly and do not dress it up:
-# on the one live instance measured (2026-09-13, week 1) the projection (16.9) was
-# FURTHER from the truth (5.6 realised) than deleting him would have been (0.0).
-# This fix buys EXECUTABILITY, not accuracy.
+# (item 3.13 design point 4). WITHOUT a live read, a locked player is carried at
+# his PROJECTION. State the tradeoff honestly and do not dress it up: on the one
+# live instance measured (2026-09-13, week 1) the projection (16.9) was FURTHER
+# from the truth (5.6 realised) than deleting him would have been (0.0), and in
+# week 3 a D/ST projected 7.0 had already scored -6.0 on the Thursday while the
+# card read 54% all weekend. Item 3.17b: ``--live`` removes the caveat by
+# counting his ESPN points instead; this sentence is for the card run without it.
 LOCKED_CARRY_LABEL = (
-    "a locked player is carried at his PROJECTION, not his live score — this tool "
-    "has no live-score feed. On the one live instance measured (2026-09-13, week 1) "
-    "the projection was FURTHER from the realised points than dropping him to zero "
-    "would have been. This is about showing you a lineup you can actually execute, "
-    "NOT about the total being right."
+    "a locked player is carried at the PROJECTION, not the live score: this card "
+    "has no usable live read (it ran WITHOUT --live, or the live read failed or was "
+    "ignored — see LIVE READ). On the one live instance measured (2026-09-13, week "
+    "1) the projection was FURTHER from the realised points than dropping that "
+    "player to zero would have been, and in week 3 a D/ST projected 7.0 had already "
+    "scored -6.0. Without a live read, this card is about showing you a lineup you "
+    "can actually execute, NOT about the total being right."
+)
+
+# Item 3.17b: the case a live read was applied but carried no points for a locked
+# starter (a roster row missing from ESPN's payload, or no applied total). The
+# no-live label above would be false there, and so would the live-count rule.
+LIVE_MISSING_LABEL = (
+    "a locked starter the live read carried NO points for is carried at the "
+    "PROJECTION, not the live score — LIVE READ says why. `ziggurat league live` "
+    "shows ESPN's own number for that player."
+)
+
+# Item 3.17b. What a locked starter COUNTS for once a live read is supplied. A
+# FINAL game is exact (ESPN's own applied points, no swing left). An IN-PROGRESS
+# game is an estimate, and the estimate's shape is the hypothesis: offense and
+# kickers accumulate, so "points so far + the projection for the share of the
+# game left" is the natural pace; a D/ST does NOT accumulate — its points-allowed
+# bracket starts at its best value and decays — so adding the projection to an
+# early live number would double-count, and it BLENDS instead. The share left is
+# clock-estimated from the stored kickoff and the same fixed game length
+# ``league.live`` uses, so an overtime game reads final early.
+LIVE_COUNT_LABEL = (
+    "HYPOTHESIS (item 3.17b): a locked starter whose game is FINAL counts the ESPN "
+    "points exactly. One whose game is IN PROGRESS counts the points so far PLUS "
+    "the house projection times the share of the game left; a D/ST BLENDS its "
+    "live number with its projection by that share instead, because its "
+    "points-allowed bracket is not cumulative. The share left is estimated from "
+    f"the kickoff clock and a {league_live.TYPICAL_GAME_MINUTES}-minute game, so "
+    "an overtime game reads final early."
+)
+
+# Item 3.17b — the near-tie band, MEASURED rather than chosen. On the 2026 feed,
+# weeks 2-3, every same-position pair of starter-relevant players (projected >= 5)
+# whose house projections sat within 5 points of each other on the WEDNESDAY card
+# was re-read on the SUNDAY card: pairs closer than 1.0 point had swapped order
+# 19.1% of the time (477 of 2,497), pairs 1.0-2.0 apart 7.2% (143 of 1,986),
+# 2.0-3.0 apart 3.8% (57 of 1,495). Pairs share players, so the counts are not
+# independent draws. The band is where a refresh flip stops being routine.
+NEAR_TIE_POINTS = 1.0
+NEAR_TIE_LABEL = (
+    f"NEAR TIE = a bench player who could fill that slot projects within "
+    f"{NEAR_TIE_POINTS:.1f} house point of the seated starter it would replace. "
+    f"Either start is defensible: on the 2026 feed (weeks 2-3), same-position pairs "
+    f"this close on the Wednesday card had swapped order by Sunday 19% of the time "
+    f"(477 of 2,497 pairs; 7% for pairs 1-2 points apart). That rate was measured "
+    f"on same-position pairs; a FLEX pair across positions is read on the same "
+    f"scale. Do not churn your lineup over one of these. ESPN's number, when shown, "
+    f"is a second opinion, not a tiebreak."
 )
 
 
@@ -288,6 +353,28 @@ class StarterRec:
     gtd: bool                       # a genuinely game-time-decision starter
     reasons: tuple[str, ...]
     locked: bool = False            # item 3.13: his game has started; slot frozen
+    # --- item 3.17b: the live read (all None when the card ran without --live) --
+    espn_proj: float | None = None      # ESPN's OWN projection — a second opinion
+    live_points: float | None = None    # ESPN points so far (locked starters only)
+    live_state: str | None = None       # 'final' | 'in progress' (clock estimate)
+    counted_points: float | None = None  # what the TOTAL counts, when it is not proj
+
+
+@dataclass(frozen=True)
+class NearTie:
+    """A start/sit call inside the measured feed-refresh noise (item 3.17b).
+
+    ``gap`` is seated minus bench, in projected house points. Negative means the
+    seated player projects LOWER — a posture swap chose him for variance."""
+
+    slot: str
+    seated: str
+    seated_proj: float
+    bench: str
+    bench_proj: float
+    gap: float
+    seated_espn: float | None = None
+    bench_espn: float | None = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +391,9 @@ class BenchRec:
     reasons: tuple[str, ...]
     locked: bool = False            # item 3.13: his game has started; cannot be seated
     has_proj: bool = True           # False -> proj_points 0.0 is NO FORECAST, not a zero
+    espn_proj: float | None = None  # item 3.17b: ESPN's own projection (live read)
+    live_points: float | None = None  # item 3.17b: a locked bench body's points so far
+    live_state: str | None = None     # item 3.17b: 'final' | 'in progress' (clock estimate)
 
 
 @dataclass(frozen=True)
@@ -349,7 +439,10 @@ class LineupRecommendation:
     posture: str                    # FAVORITE | NEUTRAL | UNDERDOG
     own_projected_total: float
     opponent_total: float | None
-    margin: float                   # mu_greedy - mu_opp (the posture driver)
+    # Item 3.17b: EXACTLY own_projected_total - opponent_total, the two numbers
+    # printed beside it (0.0 with no opponent). Pre-3.17b this was the greedy
+    # lineup's margin and disagreed with its own totals in a non-NEUTRAL week.
+    margin: float
     win_prob: float
     starters: tuple[StarterRec, ...]
     bench: tuple[BenchRec, ...]
@@ -377,6 +470,21 @@ class LineupRecommendation:
     margin_sigma: float | None = None   # sqrt(var_own + var_opp): the win prob's denominator
     opp_sigma_basis: str = ""
     sigma_provenance: str = ""
+    # --- item 3.17b -------------------------------------------------------------
+    # The POSTURE DRIVER: the best-projected (greedy) lineup's margin, which is
+    # what decides FAVORITE / NEUTRAL / UNDERDOG. Equal to ``margin`` in a
+    # NEUTRAL week; in a posture week it differs by what the posture swaps traded.
+    posture_margin: float = 0.0
+    near_ties: tuple[NearTie, ...] = ()
+    live_used: bool = False             # a live read was applied to this card
+    live_counted: int = 0               # seated starters counted at live points
+    live_notes: tuple[str, ...] = ()    # what the live read did, and any disagreement
+    espn_own_total: float | None = None  # ESPN's projections summed over THIS card's starters
+    espn_opp_total: float | None = None  # ...over the opponent's lineup AS SET in ESPN
+    espn_missing: int = 0               # starters ESPN served no projection for
+    espn_opp_missing: int = 0           # ...on the opponent's side as set in ESPN
+    live_locked: int = 0                # your seated starters whose game has kicked off
+    live_counted_opp: int = 0           # the opponent's starters counted at live points
 
 
 # ------------------------------------------------------------- internal seat row
@@ -405,6 +513,14 @@ class _Seat:
     locked: bool = False              # kickoff <= the `now` DECISION clock
     pin_slot: str | None = None       # locked AND already in an ESPN starting slot
     proj_key: tuple | None = None     # the weekly_lines key he was priced from
+    # --- item 3.17b: the live read ---------------------------------------
+    # When a live read reprices a locked seat, ``points``/``sigma`` become what
+    # the TOTAL counts and the house projection is kept here, so every row can
+    # still print the projection it was seated on.
+    house_points: float | None = None
+    live_points: float | None = None  # ESPN points so far
+    live_state: str | None = None     # league_live.STATUS_FINAL / STATUS_LIVE
+    espn_proj: float | None = None    # ESPN's own projection (any seat)
 
 
 def _norm_team(raw) -> str | None:
@@ -506,6 +622,135 @@ def _price_roster(
             proj_key=proj_key,
         )
     return seats
+
+
+# ------------------------------------------------------------ the live read
+
+
+def _live_rows(side) -> dict[str, "league_live.LiveStarter"]:
+    """ESPN player id -> that player's live row, starters AND bench (item 3.17b)."""
+    if side is None:
+        return {}
+    return {r.espn_player_id: r for r in (*side.starters, *side.bench)
+            if r.espn_player_id is not None}
+
+
+def _share_left(kickoff: datetime | None, now: datetime) -> float:
+    """Clock-estimated share of a game still to play, in [0, 1] (LIVE_COUNT_LABEL).
+
+    The same fixed game length ``league live`` labels its statuses with, so the
+    two surfaces call the same game final at the same minute."""
+    if kickoff is None:
+        return 0.0
+    elapsed = (now - kickoff).total_seconds() / 60.0
+    return min(1.0, max(0.0, 1.0 - elapsed / league_live.TYPICAL_GAME_MINUTES))
+
+
+def _apply_live(seats: Mapping[str, _Seat], rows: Mapping, *, now: datetime,
+                who: str) -> list[str]:
+    """Reprice every LOCKED seat the live read carries, and attach ESPN's own
+    projection to every seat it carries. Mutates ``seats``; returns notes.
+
+    Only LOCKED seats are repriced. An unlocked man's game has not started, so his
+    live points are zero by construction — and if ESPN has applied points to one,
+    the stored kickoff or the decision clock is wrong, which is REPORTED rather
+    than silently trusted in either direction. ``who`` is 'your' / 'his'."""
+    notes: list[str] = []
+    for seat in seats.values():
+        row = rows.get(seat.espn_id) if seat.espn_id else None
+        if row is None:
+            if seat.pin_slot:
+                notes.append(
+                    f"{who} locked starter {seat.player} is not in ESPN's live "
+                    "payload, so that starter is carried at the PROJECTION on this "
+                    "card.")
+            continue
+        seat.espn_proj = row.projected
+        if not seat.locked:
+            if row.points:
+                kick = seat.kickoff.isoformat() if seat.kickoff else "unknown"
+                notes.append(
+                    f"CLOCK DISAGREEMENT: ESPN has already applied {row.points:.1f} "
+                    f"points to {who} {seat.player}, but the stored kickoff ({kick}) is "
+                    f"after the decision clock ({now.isoformat()}). The stored schedule "
+                    "or --now is wrong; this card treats that player as NOT locked.")
+            continue
+        if row.points is None:
+            if seat.pin_slot:
+                notes.append(
+                    f"ESPN served no points for {who} locked starter {seat.player}, so "
+                    "that starter is carried at the PROJECTION on this card.")
+            continue
+        left = _share_left(seat.kickoff, now)
+        proj = seat.points
+        if left <= 0.0:
+            counted, sigma, state = row.points, 0.0, league_live.STATUS_FINAL
+        elif seat.position == "DST":
+            counted = row.points * (1.0 - left) + proj * left
+            sigma, state = seat.sigma * math.sqrt(left), league_live.STATUS_LIVE
+        else:
+            counted = row.points + proj * left
+            sigma, state = seat.sigma * math.sqrt(left), league_live.STATUS_LIVE
+        seat.house_points = proj
+        seat.live_points = row.points
+        seat.live_state = state
+        seat.points = counted
+        seat.sigma = sigma
+    return notes
+
+
+def read_live_for_card(conn, *, season: int, as_of, now: datetime, team_id: int,
+                       credentials: Mapping | None = None, fetch=None
+                       ) -> tuple["league_live.LiveMatchup | None", str | None]:
+    """One live read for the lineup card: ``(matchup, None)`` or ``(None, why)``.
+
+    The card must DEGRADE when the read fails, never die: a Sunday-morning network
+    blip must not cost the operator the lineup card itself. The failure sentence
+    goes onto the card (``build_lineup(live_error=...)``) so a missing live read is
+    never mistaken for a quiet one. ``credentials`` (the ``load_espn_credentials``
+    dict) is loaded INSIDE the guard when not supplied, so missing cookies degrade
+    the card too. ``fetch`` is the offline-test seam."""
+    try:
+        if credentials is None:
+            from ziggurat.data.nfl.espn_source import load_espn_credentials
+            credentials = load_espn_credentials()
+        matchup = league_live.read_live_matchup(
+            conn, season=season, league_id=credentials["league_id"],
+            espn_s2=credentials["espn_s2"], swid=credentials["swid"],
+            as_of=as_of, now=now, team_id=team_id, fetch=fetch)
+    except Exception as exc:  # noqa: BLE001 — degrade loudly, never crash the card
+        return None, (
+            f"the live read FAILED ({type(exc).__name__}: {exc}). Locked starters "
+            "are at their PROJECTIONS and there is no ESPN column; `ziggurat league "
+            "live` shows the live score directly.")
+    return matchup, None
+
+
+def _lineup_disagreements(seats: Mapping[str, _Seat], rows: Mapping, *, who: str
+                          ) -> list[str]:
+    """Locked games only: does ESPN's LIVE lineup match the STORED snapshot's?
+
+    The card pins a locked starter where the last sync saw him. If the operator
+    (or the opponent) moved a player after that sync and before the lock, the pin
+    is wrong and so is the total. Report it; never quietly pick one."""
+    out: list[str] = []
+    for seat in seats.values():
+        if not seat.locked or not seat.espn_id:
+            continue
+        row = rows.get(seat.espn_id)
+        if row is None:
+            continue
+        stored_starting = seat.pin_slot is not None
+        if row.starting != stored_starting:
+            live_where = "STARTING" if row.starting else "on the BENCH"
+            stored_where = "starting" if stored_starting else "on the bench"
+            out.append(
+                f"LINEUP DISAGREEMENT: ESPN's live read has {who} {seat.player} "
+                f"{live_where}, but the stored roster snapshot had that player "
+                f"{stored_where} "
+                "when that game locked. ESPN is the authority; run `ziggurat league "
+                "sync` and re-run this card.")
+    return out
 
 
 # ---------------------------------------------------------- win-prob arithmetic
@@ -924,7 +1169,8 @@ def resolve_opponent(
 
 def _opponent_lineup(
     conn, *, as_of, season, week, opp_team_id, source, byes, variance, structure, view,
-    locks=None, now=None,
+    locks=None, now=None, live_rows=None, live_notes: list[str] | None = None,
+    live_stats: dict | None = None,
 ) -> tuple[float, float] | None:
     """The opponent's deterministic ALL-HEALTHY best-lineup ``(mu, var)`` — the
     symmetric, legible baseline. Byes still score zero (their rows are blank/
@@ -934,7 +1180,12 @@ def _opponent_lineup(
     Item 3.13 applies the IDENTICAL lock pinning here. It has to: the live defect
     was a rival's already-played WR being re-seated by OUR optimiser inside his
     projected total, which mis-stated the opponent by up to 11.3 house points —
-    13.6 pp of win probability — on the one matchup it fired on."""
+    13.6 pp of win probability — on the one matchup it fired on.
+
+    Item 3.17b applies the IDENTICAL live repricing too (``live_rows``): his
+    already-played starters count what they scored, exactly as yours do. Notes the
+    live read produces are appended to ``live_notes``; ``live_stats`` receives
+    ``counted`` (his seated starters counted at live points)."""
     rows = active_players([dict(r) for r in league_state.get_player_state(
         conn, as_of=as_of, season=season, on_team_id=opp_team_id, view=view,
     )])
@@ -947,7 +1198,22 @@ def _opponent_lineup(
                           locks=locks, now=now)
     if not seats:
         return None
+    if live_rows is not None and now is not None:
+        found = _apply_live(seats, live_rows, now=now, who="the opponent's")
+        found += _lineup_disagreements(seats, live_rows, who="the opponent's")
+        if live_notes is not None:
+            live_notes.extend(found)
     fill = _greedy_fill(seats, structure, pins=build_pins(seats))
+    if live_stats is not None and live_rows is not None:
+        live_stats["counted"] = sum(1 for k in fill.starters
+                                    if seats[k].live_state is not None)
+    if live_notes is not None and live_rows is not None:
+        for k in sorted(fill.starters, key=lambda k: seats[k].player):
+            s = seats[k]
+            if s.live_state is not None:
+                live_notes.append(
+                    f"opponent's {s.player} ({s.position}) counted at {s.points:.1f}: "
+                    f"{_live_detail(s)}.")
     return _lineup_stats(fill.starters, seats, variance)
 
 
@@ -969,6 +1235,8 @@ def build_lineup(
     now: datetime | None = None,
     view: base.AsOfView = "historical",
     today=None,
+    live_read: "league_live.LiveMatchup | None" = None,
+    live_error: str | None = None,
 ) -> LineupRecommendation:
     """Recommend the week's starting lineup to maximise P(win) (item 3.5, Module B).
 
@@ -980,7 +1248,16 @@ def build_lineup(
     rather than return a finished week on a waiver Tue/Wed). ``opponent_total``
     overrides the auto-computed opponent lineup total (the posture lever the
     done-when drives). ``now`` is a tz-aware ET DECISION input for the GTD /
-    inactives logic, kept SEPARATE from ``as_of`` (which gates data)."""
+    inactives logic, kept SEPARATE from ``as_of`` (which gates data).
+
+    ``live_read`` (item 3.17b) is one ``league.live`` read of this week's matchup.
+    It reprices every LOCKED starter on BOTH sides at what he has scored (see
+    ``LIVE_COUNT_LABEL``) and attaches ESPN's own projection to every row. It is
+    validated first — wrong team or wrong scoring period and it is ignored, with a
+    note. With no explicit ``now``, the read's own clock becomes the decision
+    clock: a live score judged against a midnight clock would call every game
+    'not started'. ``live_error`` is ``read_live_for_card``'s failure sentence: a
+    live read that was asked for and failed is printed, never silently skipped."""
     if own_team_id is None:
         raise OwnTeamUnresolved(
             "build_lineup needs a resolved own_team_id; got None. Pass --team or "
@@ -1009,31 +1286,71 @@ def build_lineup(
     # slots the optimiser had already decided. They have to gate availability
     # instead: a locked slot is not a preference, it is a wall.
     locks = game_locks(conn, as_of=as_of, season=season, week=resolved_week, view=view)
+
+    # --- item 3.17b: validate the live read before anything is priced --------
+    live_notes: list[str] = []
+    if live_error:
+        live_notes.append(live_error)
+    own_live_rows = None
+    if live_read is not None:
+        if now is None:
+            now = datetime.fromisoformat(live_read.read_at)
+        live_team = None if live_read.own is None else live_read.own.team_id
+        if live_team != own_team_id:
+            live_notes.append(
+                f"the live read is for team {live_team}, not this card's team "
+                f"{own_team_id} — it was IGNORED; every locked starter is at the "
+                "projection.")
+        elif live_read.scoring_period is None or int(live_read.scoring_period) != resolved_week:
+            live_notes.append(
+                f"the live read is ESPN scoring period {live_read.scoring_period}, but "
+                f"this card is week {resolved_week} — it was IGNORED; every locked "
+                "starter is at the projection.")
+        else:
+            own_live_rows = _live_rows(live_read.own)
     now_et = _resolve_now(now, as_of)
 
     seats = _price_roster(active_rows, lines, week=resolved_week, byes=byes,
                           variance=variance, live_status=live, apply_hard_out=True,
                           locks=locks, now=now_et)
+    if own_live_rows is not None:
+        live_notes.extend(_apply_live(seats, own_live_rows, now=now_et, who="your"))
+        live_notes.extend(_lineup_disagreements(seats, own_live_rows, who="your"))
     pins = build_pins(seats)
     pinned_keys = frozenset(k for keys in pins.values() for k in keys)
 
     notes: list[str] = []
     sanity_blocks = _sanity_blocks(seats, week=resolved_week)
-    locked_notes = _locked_notes(seats, week=resolved_week)
+    locked_notes = _locked_notes(seats, week=resolved_week,
+                                 live_used=own_live_rows is not None)
 
     # --- opponent total + variance -------------------------------------------
     opp_var = variance.opp_flat_sigma ** 2
     opp_source: str
+    opp_live_rows = None
+    opp_live_stats: dict = {}
     if opponent_total is not None:
         mu_opp = float(opponent_total)
         opp_source = "override"
     else:
         opp_id = resolve_opponent(conn, as_of=as_of, season=season, week=resolved_week,
                                   own_team_id=own_team_id, view=view)
+        if own_live_rows is not None and opp_id is not None:
+            live_opp = live_read.opponent
+            if live_opp is not None and live_opp.team_id == opp_id:
+                opp_live_rows = _live_rows(live_opp)
+            else:
+                live_notes.append(
+                    f"the live read's opponent ("
+                    f"{'none' if live_opp is None else 'team ' + str(live_opp.team_id)}) "
+                    f"is not the stored schedule's (team {opp_id}) — THEIR locked "
+                    "starters stay at their projections.")
         opp = (_opponent_lineup(
             conn, as_of=as_of, season=season, week=resolved_week, opp_team_id=opp_id,
             source=source, byes=byes, variance=variance, structure=roster_structure,
-            view=view, locks=locks, now=now_et) if opp_id is not None else None)
+            view=view, locks=locks, now=now_et, live_rows=opp_live_rows,
+            live_notes=live_notes, live_stats=opp_live_stats)
+            if opp_id is not None else None)
         if opp is None:
             mu_opp = None
             opp_source = "unresolved"
@@ -1051,7 +1368,7 @@ def build_lineup(
         # lineup, NEUTRAL, and say so (Rule 6). Playoff weeks land here.
         posture = "NEUTRAL"
         final = greedy
-        margin = 0.0
+        posture_margin = 0.0
         win_prob = 0.5
         notes.append(
             "no opponent matchup was readable for this week (fantasy playoff week, "
@@ -1061,12 +1378,16 @@ def build_lineup(
     else:
         spread = math.sqrt(max(var_greedy + opp_var, 1e-9))
         close_band = max(5.0, 0.3 * spread)
-        margin = mu_greedy - mu_opp
-        if abs(margin) < close_band:
+        # The POSTURE DRIVER is the best-projected lineup's margin. It is NOT the
+        # margin the card prints (item 3.17b): a posture swap moves the seated
+        # total off the greedy one, and the printed margin must be the difference
+        # of the two printed totals.
+        posture_margin = mu_greedy - mu_opp
+        if abs(posture_margin) < close_band:
             posture = "NEUTRAL"
             final = greedy
         else:
-            posture = "FAVORITE" if margin > 0 else "UNDERDOG"
+            posture = "FAVORITE" if posture_margin > 0 else "UNDERDOG"
             slotmap = _steepest_ascent(
                 greedy, seats, roster_structure, mu_opp=mu_opp, var_opp=opp_var,
                 variance=variance, mu_cap=_MU_SACRIFICE_CAP, pinned_keys=pinned_keys)
@@ -1115,8 +1436,30 @@ def build_lineup(
 
     # --- rows ----------------------------------------------------------------
     starters = _starter_rows(final, seats, variance, opponent_total=mu_opp,
-                             posture=posture, margin=margin, locks=locks)
+                             posture=posture, margin=posture_margin, locks=locks,
+                             live_used=own_live_rows is not None)
     bench = _bench_rows(final, seats, variance)
+    near_ties = _near_ties(final, seats, roster_structure)
+
+    # --- item 3.17b: ESPN's own numbers, summed (a second opinion) -----------
+    live_used = own_live_rows is not None
+    live_counted = sum(1 for k in final.starters if seats[k].live_state is not None)
+    live_locked = sum(1 for k in final.starters if seats[k].locked)
+    live_counted_opp = int(opp_live_stats.get("counted", 0))
+    espn_own_total = espn_opp_total = None
+    espn_missing = espn_opp_missing = 0
+    if live_used:
+        vals = [seats[k].espn_proj for k in final.starters]
+        espn_missing = sum(1 for v in vals if v is None)
+        if espn_missing < len(vals):
+            espn_own_total = sum(v for v in vals if v is not None)
+        # Only an opponent the stored schedule VALIDATED gets a sum; an unmatched
+        # live opponent, an --opponent-total override or a no-matchup week gets '-'.
+        if opp_live_rows is not None and live_read.opponent is not None:
+            ovals = [r.projected for r in live_read.opponent.starters]
+            espn_opp_missing = sum(1 for v in ovals if v is None)
+            if espn_opp_missing < len(ovals):
+                espn_opp_total = sum(v for v in ovals if v is not None)
 
     # --- K/DST optional upgrade note (never an implicit add/drop) -------------
     notes.extend(_streaming_upgrade_notes(
@@ -1127,7 +1470,9 @@ def build_lineup(
         notes.append(
             f"opponent total {mu_opp:.1f} is his DETERMINISTIC all-healthy "
             "best-projected lineup (symmetric with yours), priced through the house "
-            "scoring engine.")
+            "scoring engine"
+            + (f" — with {_plural(live_counted_opp, 'already-played starter')} "
+               "counted at ESPN points." if live_counted_opp else "."))
     elif opp_source == "override":
         notes.append(f"opponent total {mu_opp:.1f} was supplied directly (--opponent-total).")
 
@@ -1141,7 +1486,7 @@ def build_lineup(
         posture=posture,
         own_projected_total=final.total,
         opponent_total=mu_opp,
-        margin=margin,
+        margin=(final.total - mu_opp) if mu_opp is not None else 0.0,
         win_prob=win_prob,
         starters=starters,
         bench=bench,
@@ -1161,7 +1506,50 @@ def build_lineup(
         margin_sigma=margin_sigma,
         opp_sigma_basis=opp_sigma_basis,
         sigma_provenance=sigma_provenance(variance),
+        posture_margin=posture_margin,
+        near_ties=near_ties,
+        live_used=live_used,
+        live_counted=live_counted,
+        live_notes=tuple(live_notes),
+        espn_own_total=espn_own_total,
+        espn_opp_total=espn_opp_total,
+        espn_missing=espn_missing,
+        espn_opp_missing=espn_opp_missing,
+        live_locked=live_locked,
+        live_counted_opp=live_counted_opp,
     )
+
+
+def _near_ties(fill: LineupFill, seats: Mapping[str, _Seat], structure: RosterStructure
+               ) -> tuple[NearTie, ...]:
+    """Every start/sit call inside ``NEAR_TIE_POINTS`` (item 3.17b).
+
+    For each MOVABLE bench player, the comparison is against the lowest-projected
+    unlocked starter whose slot he could fill (FLEX included) — the one he would
+    actually replace. Locked starters and locked bench bodies are out: nothing
+    about them is a decision. Compared on the house PROJECTION, never on a
+    live-repriced number (only locked seats are repriced, and they are excluded)."""
+    seated = [(label, key) for label, key in fill.slots
+              if key is not None and not seats[key].locked]
+    seated_keys = {key for _label, key in fill.slots if key is not None}
+    out: list[NearTie] = []
+    for b_key in sorted(seats, key=lambda k: (-seats[k].points, k)):
+        b = seats[b_key]
+        if b_key in seated_keys or not b.available:
+            continue
+        options = [(seats[k].points, label, k) for label, k in seated
+                   if _eligible(b_key, label, seats, structure)]
+        if not options:
+            continue
+        s_points, label, s_key = min(options)
+        gap = s_points - b.points
+        if abs(gap) < NEAR_TIE_POINTS:
+            s = seats[s_key]
+            out.append(NearTie(
+                slot=label, seated=s.player, seated_proj=s.points, bench=b.player,
+                bench_proj=b.points, gap=gap, seated_espn=s.espn_proj,
+                bench_espn=b.espn_proj))
+    return tuple(out)
 
 
 # The most E(points) a posture move may trade away versus the greedy lineup — a
@@ -1217,7 +1605,8 @@ def _sanity_blocks(seats: Mapping[str, _Seat], *, week: int) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _locked_notes(seats: Mapping[str, _Seat], *, week: int) -> tuple[str, ...]:
+def _locked_notes(seats: Mapping[str, _Seat], *, week: int,
+                  live_used: bool = False) -> tuple[str, ...]:
     """The LOCKED arm of the taxonomy (item 3.13): players whose game has started.
 
     Locked STARTERS are named individually — they are on the card, at a projection
@@ -1236,10 +1625,13 @@ def _locked_notes(seats: Mapping[str, _Seat], *, week: int) -> tuple[str, ...]:
                                              s.player)):
         kick = s.kickoff.isoformat() if s.kickoff else "an unknown time"
         tag = f", ESPN has him {s.injury_status}" if s.injury_status else ""
-        priced = (f"carried at his projected {s.points:.1f}"
-                  if s.has_proj else
-                  "carried at 0.0 — the feed had no week-"
-                  f"{week} forecast for him, so this is an absence of data, not a zero")
+        if s.live_state is not None:
+            priced = f"counted at {s.points:.1f}: {_live_detail(s)}"
+        elif s.has_proj:
+            priced = f"carried at his projected {s.points:.1f}"
+        else:
+            priced = ("carried at 0.0 — the feed had no week-"
+                      f"{week} forecast for him, so this is an absence of data, not a zero")
         out.append(
             f"LOCKED — {_who(s)} in your {s.pin_slot} slot{tag}: his game kicked off "
             f"{kick}, so ESPN froze that slot and there is NOTHING you can do about "
@@ -1250,9 +1642,31 @@ def _locked_notes(seats: Mapping[str, _Seat], *, week: int) -> tuple[str, ...]:
             f"LOCKED (bench) — {_plural(len(bench), 'player')} on your bench "
             f"{'has' if len(bench) == 1 else 'have'} also kicked off and can no "
             f"longer be moved INTO the lineup: {names}.")
-    if starters:
-        out.append(LOCKED_CARRY_LABEL)
+    if any(s.live_state is not None for s in starters):
+        out.append(LIVE_COUNT_LABEL)
+    if any(s.live_state is None for s in starters):
+        out.append(LIVE_MISSING_LABEL if live_used else LOCKED_CARRY_LABEL)
     return tuple(out)
+
+
+def _live_detail(s: _Seat) -> str:
+    """One phrase: how a live-repriced seat's counted number was built (3.17b)."""
+    proj = s.house_points if s.house_points is not None else 0.0
+    projected = (f"projected {proj:.1f}" if s.has_proj
+                 else "no house forecast for this player")
+    if s.live_state == league_live.STATUS_FINAL:
+        return f"game FINAL, {s.live_points:.1f} REALISED ({projected})"
+    if not s.has_proj:
+        return (f"game IN PROGRESS, {s.live_points:.1f} REALISED so far (no house "
+                "forecast for the rest of the game)")
+    if s.position == "DST":
+        return (f"game IN PROGRESS, {s.live_points:.1f} REALISED so far, blended with "
+                f"the {proj:.1f} projection by the share of the game left")
+    # Printed parts add up to the printed count (the 3.17b rounding rule).
+    rest = _shown_diff(s.points, s.live_points)
+    return (f"game IN PROGRESS, {s.live_points:.1f} REALISED so far + "
+            f"{rest:.1f} projected for the rest of the game "
+            f"(full-game projection {proj:.1f})")
 
 
 def _locks_first(fill: LineupFill, seats: Mapping[str, _Seat], *, now: datetime
@@ -1443,6 +1857,8 @@ def _streaming_upgrade_notes(
     out: list[str] = []
     for pos in ("DST", "K"):
         held = seated.get(pos)
+        if held is not None and held.locked:
+            continue      # item 3.17b: a locked slot is not an upgrade decision
         try:
             board = streaming.rank_streamers(
                 conn, as_of=as_of, season=season, position=pos, week=week,
@@ -1472,6 +1888,7 @@ def _streaming_upgrade_notes(
 def _starter_rows(
     fill: LineupFill, seats: Mapping[str, _Seat], variance: VarianceModel,
     *, opponent_total, posture: str, margin: float, locks: Mapping[str, datetime],
+    live_used: bool = False,
 ) -> tuple[StarterRec, ...]:
     rows: list[StarterRec] = []
     for label, key in fill.slots:
@@ -1481,12 +1898,14 @@ def _starter_rows(
         token = str(s.injury_status or "").strip().upper()
         gtd = token in GTD_STATUSES
         kick = locks.get(s.team)
+        proj = s.house_points if s.house_points is not None else s.points
         reasons = [
-            f"projects {s.points:.1f} house pts (week priced through the house "
+            f"projects {proj:.1f} house pts (week priced through the house "
             "scoring engine).",
-            variance.describe(s.position, s.points, s.sigma),
+            variance.describe(s.position, proj, variance.sigma(s.position, proj)),
             f"floor {s.points - s.sigma:.1f} / ceiling {s.points + s.sigma:.1f} "
-            "(+/-1 sigma dispersion band).",
+            "(+/-1 sigma dispersion band"
+            + (", of what is left to play)." if s.live_state is not None else ")."),
         ]
         if label == FLEX_LABEL:
             reasons.append("seated in FLEX (RB/WR/TE) — the interchangeable slot; if "
@@ -1494,14 +1913,14 @@ def _starter_rows(
                            "position so you keep the most late optionality.")
         if posture == "FAVORITE":
             reasons.append("FAVORITE posture: the lineup leans to FLOORS (lower "
-                           f"variance) to protect a projected lead of {margin:+.1f}; a "
-                           f"posture swap sacrifices at most {_MU_SACRIFICE_CAP:.0f} "
-                           "projected points.")
+                           "variance) to protect the best-projected lineup's lead of "
+                           f"{margin:+.1f}; a posture swap sacrifices at most "
+                           f"{_MU_SACRIFICE_CAP:.0f} projected points.")
         elif posture == "UNDERDOG":
             reasons.append("UNDERDOG posture: the lineup leans to CEILINGS (higher "
-                           f"variance) to chase a projected deficit of {margin:+.1f}; a "
-                           f"posture swap sacrifices at most {_MU_SACRIFICE_CAP:.0f} "
-                           "projected points.")
+                           "variance) to chase the best-projected lineup's deficit of "
+                           f"{margin:+.1f}; a posture swap sacrifices at most "
+                           f"{_MU_SACRIFICE_CAP:.0f} projected points.")
         if gtd and not s.locked:
             reasons.append(f"GAME-TIME DECISION ({s.injury_status}) — see the "
                            "contingency plan; do not bench pre-emptively if a safe "
@@ -1512,13 +1931,32 @@ def _starter_rows(
                 f"{s.kickoff.isoformat() if s.kickoff else 'already'} — ESPN froze "
                 "this slot at his own kickoff, so he cannot be benched and nobody "
                 "can be moved in. This row is not a recommendation.")
-            reasons.append(LOCKED_CARRY_LABEL)
+            if s.live_state is not None:
+                reasons.append(f"counted at {s.points:.1f} in your total: "
+                               f"{_live_detail(s)}.")
+                full = variance.sigma(s.position, proj)
+                reasons.append(
+                    "game final: no swing left, so FLOOR = CEIL = the count."
+                    if s.live_state == league_live.STATUS_FINAL else
+                    f"swing left to play: +/-{s.sigma:.1f} (the full-game +/-{full:.1f} "
+                    "scaled by the share of the game left); FLOOR/CEIL on this row "
+                    "are the count +/- that.")
+                reasons.append(LIVE_COUNT_LABEL)
+            elif live_used:
+                reasons.append(LIVE_MISSING_LABEL)
+            else:
+                reasons.append(LOCKED_CARRY_LABEL)
+        if s.espn_proj is not None:
+            reasons.append(f"ESPN's own projection: {s.espn_proj:.1f} (a second "
+                           "opinion — not used to seat).")
         rows.append(StarterRec(
             slot=label, player=s.player, position=s.position, espn_id=s.espn_id,
-            gsis_id=s.gsis_id, proj_points=s.points, sigma=s.sigma,
+            gsis_id=s.gsis_id, proj_points=proj, sigma=s.sigma,
             floor=s.points - s.sigma, ceiling=s.points + s.sigma,
             kickoff=kick.isoformat() if kick else None, injury_status=s.injury_status,
-            gtd=gtd, reasons=tuple(reasons), locked=s.locked))
+            gtd=gtd, reasons=tuple(reasons), locked=s.locked,
+            espn_proj=s.espn_proj, live_points=s.live_points, live_state=s.live_state,
+            counted_points=s.points if s.live_state is not None else None))
     return tuple(rows)
 
 
@@ -1540,7 +1978,8 @@ def _bench_rows(
             # A locked man with no forecast prints 0.0 in the points column, and
             # LOCKED removes him from the UNPRICEABLE block — so the only place
             # left to say "that zero is an absence of data" is here.
-            priced = (f"{s.points:.1f} projected house pts" if s.has_proj else
+            proj = s.house_points if s.house_points is not None else s.points
+            priced = (f"{proj:.1f} projected house pts" if s.has_proj else
                       "0.0 in the points column ONLY because the feed carries no "
                       "forecast for him at this as-of — an absence of data, not a "
                       "measured zero")
@@ -1553,8 +1992,10 @@ def _bench_rows(
                       "not make the seated lineup this week.")
         rows.append(BenchRec(
             player=s.player, position=s.position, espn_id=s.espn_id, gsis_id=s.gsis_id,
-            proj_points=s.points, sigma=s.sigma, injury_status=s.injury_status,
-            reasons=(reason,), locked=s.locked, has_proj=s.has_proj))
+            proj_points=s.house_points if s.house_points is not None else s.points,
+            sigma=s.sigma, injury_status=s.injury_status,
+            reasons=(reason,), locked=s.locked, has_proj=s.has_proj,
+            espn_proj=s.espn_proj, live_points=s.live_points, live_state=s.live_state))
     return tuple(rows)
 
 
@@ -1638,6 +2079,12 @@ def _plural(n: int, word: str) -> str:
 # --------------------------------------------------------------------- display
 
 
+def _shown_diff(a: float, b: float) -> float:
+    """``a - b`` as the reader would compute it from the two numbers PRINTED at one
+    decimal — so a printed difference always matches the printed operands."""
+    return round(round(a, 1) - round(b, 1), 1) + 0.0
+
+
 def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = False) -> str:
     """Render the start/sit card (display only — Rule 3)."""
     opp = "-" if rec.opponent_total is None else f"{rec.opponent_total:.1f}"
@@ -1648,11 +2095,32 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
     out.extend(rec.locks_first)
     out.extend(rec.freshness)
     out.append("")
+    # Item 3.17b: every printed difference is taken from the PRINTED numbers, so
+    # "you 124.9 vs opp 127.6" can never sit beside "margin -2.8".
+    shown_margin = (_shown_diff(rec.own_projected_total, rec.opponent_total)
+                    if rec.opponent_total is not None else rec.margin)
     out.append(
         f"{rec.posture}  —  you {rec.own_projected_total:.1f}  vs  opp {opp}  "
-        f"(margin {rec.margin:+.1f}, win prob {100 * rec.win_prob:.0f}%)")
+        f"(margin {shown_margin:+.1f}, win prob {100 * rec.win_prob:.0f}%)")
     # Item 4.7: the scale of the line above and the kind of number it is, beside it.
-    if rec.own_sigma is not None:
+    # Item 3.17b: once live points are counted the sigmas are the swing LEFT TO
+    # PLAY, not a projected week's — so the sentence must say that instead.
+    live_counted_any = rec.live_used and (rec.live_counted or rec.live_counted_opp)
+    if rec.own_sigma is not None and live_counted_any:
+        if rec.opp_sigma is not None and rec.margin_sigma is not None:
+            out.append(
+                f"  SCALE (live): what is LEFT TO PLAY can still move the margin "
+                f"{units.swing(rec.margin_sigma)} (yours +/-{rec.own_sigma:.1f}, your "
+                f"opponent's +/-{rec.opp_sigma:.1f}); starters whose games are final "
+                f"count their {units.REALISED} points and add no swing. The win prob is "
+                f"the chance the final margin lands above zero given that swing "
+                f"{rec.sigma_provenance}")
+        else:
+            out.append(
+                f"  SCALE (live): what is LEFT TO PLAY can still move your total "
+                f"{units.swing(rec.own_sigma)}; starters whose games are final count "
+                f"their {units.REALISED} points and add no swing {rec.sigma_provenance}")
+    elif rec.own_sigma is not None:
         own = units.WeeklyScale(
             sigma=rec.own_sigma,
             basis="the seated starters' weekly swings combined",
@@ -1662,18 +2130,95 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
             own=own, opp_sigma=rec.opp_sigma, opp_basis=rec.opp_sigma_basis,
             margin_sigma=rec.margin_sigma))
     out.append(f"  {units.UNITS_LEGEND}")
+    # Item 3.17b: the matchup line's margin is the difference of its two totals.
+    # In a posture week the posture was set on a different number; say which.
+    # Only a posture week moves the seated lineup off the greedy one; in a NEUTRAL
+    # week the two margins are identical and any printed gap is rounding.
+    # The gate is on the UNROUNDED gap (a no-swap posture week has them equal);
+    # the printed amount comes from the printed operands, floored at "< 0.1".
+    posture_shown = round(rec.posture_margin, 1) + 0.0
+    if (rec.opponent_total is not None and rec.posture != "NEUTRAL"
+            and rec.posture_margin - rec.margin > 1e-6):
+        lean = "FLOORS" if rec.posture == "FAVORITE" else "CEILINGS"
+        given = round(posture_shown - shown_margin, 1)
+        amount = f"{given:.1f}" if given >= 0.1 else "less than 0.1"
+        out.append(
+            f"  posture set on the best-projected lineup's margin "
+            f"{posture_shown:+.1f}; the seated lineup gives up {amount} projected "
+            f"pts of it to lean on {lean} (cap {_MU_SACRIFICE_CAP:.0f}).")
+    if rec.live_used:
+        if live_counted_any:
+            out.append(
+                f"  LIVE: {rec.live_counted} of your starters and "
+                f"{rec.live_counted_opp} of the opponent's count ESPN points (yours are "
+                f"marked LIVE in the table, theirs are named under LIVE READ), so these "
+                f"totals mix {units.REALISED} points with {units.PROJECTED} ones.")
+        elif not rec.live_locked:
+            out.append("  LIVE: none of your starters has played yet, and none of the "
+                       f"opponent's was counted; every total here is {units.PROJECTED}.")
+        uncounted = rec.live_locked - rec.live_counted
+        if uncounted > 0:
+            one = uncounted == 1
+            out.append(
+                f"  LIVE: {_plural(uncounted, 'starter')} of yours "
+                f"{'has' if one else 'have'} played, but the live read carried no "
+                f"points for {'that starter' if one else 'them'}, so "
+                f"{'it is' if one else 'they are'} still at {units.PROJECTED} points "
+                "— see LIVE READ.")
+        own_espn = "-" if rec.espn_own_total is None else f"{rec.espn_own_total:.1f}"
+        opp_espn = "-" if rec.espn_opp_total is None else f"{rec.espn_opp_total:.1f}"
+        gaps = [f"{n} of {who}" for n, who in ((rec.espn_missing, "yours"),
+                                               (rec.espn_opp_missing, "theirs")) if n]
+        miss = f"; no ESPN projection for {' and '.join(gaps)}" if gaps else ""
+        out.append(
+            f"  ESPN's own pre-game projections (a second opinion, not used to seat): "
+            f"this card's starters {own_espn} vs opp {opp_espn} (the lineup they have "
+            f"set in ESPN; '-' = not summed){miss}.")
     out.append("")
 
+    espn_col = rec.live_used
     out.append(f"{'SLOT':<5} {'PLAYER':<22} {'POS':<4} {'PROJ':>6} {'FLOOR':>6} "
-               f"{'CEIL':>6} {'sigma':>6}  STATUS")
+               f"{'CEIL':>6} {'sigma':>6}" + (f" {'ESPN':>6}" if espn_col else "")
+               + "  STATUS")
     for s in rec.starters:
         flag = "  LOCKED" if s.locked else ("" if not s.gtd else "  GTD")
+        if s.live_state is not None:
+            flag += (f"  LIVE {s.live_state}: {s.live_points:.1f} {units.REALISED}"
+                     f" -> counts {s.counted_points:.1f}")
+        espn = ""
+        if espn_col:
+            espn = " " + (f"{s.espn_proj:>6.1f}" if s.espn_proj is not None else f"{'-':>6}")
         out.append(
             f"{s.slot:<5} {s.player[:22]:<22} {s.position:<4} {s.proj_points:>6.1f} "
-            f"{s.floor:>6.1f} {s.ceiling:>6.1f} {s.sigma:>6.1f}  "
+            f"{s.floor:>6.1f} {s.ceiling:>6.1f} {s.sigma:>6.1f}{espn}  "
             f"{s.injury_status or '-'}{flag}")
         if reasons:
             out.extend(f"      - {r}" for r in s.reasons)
+    if espn_col:
+        out.append("  PROJ = the house projection the card seats on; ESPN = ESPN's own "
+                   "pre-game projection. On a LIVE row, sigma is the swing still left "
+                   "to play and FLOOR/CEIL are the count +/- that (equal to the count "
+                   "once the game is final).")
+
+    # Item 3.17b: near ties print at every verbosity — they are the churn guard.
+    if rec.near_ties:
+        out.append("")
+        out.append("NEAR TIES (either start is defensible — do not churn over these):")
+        for t in rec.near_ties:
+            espn = ""
+            if t.seated_espn is not None and t.bench_espn is not None:
+                if round(t.seated_espn, 1) == round(t.bench_espn, 1):
+                    lean = "ESPN has them level"
+                else:
+                    lean = ("ESPN favours "
+                            + (t.seated if t.seated_espn > t.bench_espn else t.bench))
+                espn = f"; ESPN {t.seated_espn:.1f} vs {t.bench_espn:.1f} ({lean})"
+            why = "" if t.gap >= 0 else " — seated for the posture, not the points"
+            apart = abs(_shown_diff(t.seated_proj, t.bench_proj))
+            out.append(
+                f"  {t.slot}: {t.seated} {t.seated_proj:.1f} (seated) vs {t.bench} "
+                f"{t.bench_proj:.1f} (bench), {apart:.1f} apart{why}{espn}")
+        out.append(f"  {NEAR_TIE_LABEL}")
 
     if rec.locked_notes:
         out.append("")
@@ -1718,9 +2263,21 @@ def format_lineup_recommendation(rec: LineupRecommendation, *, reasons: bool = F
             # points column is the part a novice reads first.
             if not b.has_proj:
                 tag += "  (0.0 = NO FORECAST at this as-of, not a measured zero)"
+            if b.live_points is not None:
+                when = ("game final" if b.live_state == league_live.STATUS_FINAL
+                        else "so far, game in progress")
+                tag += f"  [{b.live_points:.1f} {units.REALISED}, {when}]"
+            if b.espn_proj is not None:
+                tag += f"  (ESPN {b.espn_proj:.1f})"
             out.append(f"  {b.player} ({b.position})  {b.proj_points:.1f} pts{tag}")
             if reasons:
                 out.extend(f"      - {r}" for r in b.reasons)
+
+    if rec.live_notes:
+        out.append("")
+        out.append("LIVE READ:")
+        for n in rec.live_notes:
+            out.append(f"  - {n}")
 
     for note in rec.notes:
         out.append(f"! {note}")

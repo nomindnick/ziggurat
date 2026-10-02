@@ -5039,6 +5039,123 @@ carries an explicit workaround note for (4)).
 > `..._names_a_stale_RANKED_candidate`), and the old uncountable wording is
 > asserted GONE rather than merely replaced.
 
+### 3.17b [Fix] The lineup card once games start — live points, near ties, ESPN's number, one margin (added 2026-10-02, from the Week-3 retro and the 4.7 build)
+**Why it exists.** Four lineup-card defects from the Week-3 journal and the 4.7
+build's loose ends. None is worth points; every one cost the operator's trust, and
+each needed a hand-correction from the session:
+1. **A locked starter was carried at his PROJECTION all weekend.** Week 3's
+   Packers D/ST was projected 7.0 and realised −6.0 on the Thursday; the card read
+   54–55% while the true margin was near −10 (~38%, by hand). The live number
+   already existed — item 3.17's `league live` reads it — but the card never
+   consulted it. (Week-3 retro, "what the process missed" #2.)
+2. **The printed margin disagreed with its own totals.** `margin` was the GREEDY
+   lineup's (the posture driver) while the two totals beside it were the SEATED
+   lineup's, so a FAVORITE/UNDERDOG week printed a margin up to ~2 points off
+   `you − opp`. Separately rounded numbers made it worse: "you 124.9 vs opp
+   127.6 (margin −2.8)" was printable even in a NEUTRAL week (4.7 build, loose
+   end; observed live 2026-10-02).
+3. **No near-tie language.** A 0.4-point QB/TE swap that flipped on a feed
+   refresh read exactly like a real change (Week 3 D2/D3/D5: Purdy/Mahomes,
+   Warren/Johnson) — a novice would churn the lineup twice a day.
+4. **ESPN's own projection was read by hand** from `league live` as the second
+   opinion on every close call (09-23, 09-24, 09-30).
+**Goal / scope.** One change to `core/lineup_support.py` plus a `--live` flag on
+`ziggurat lineup`; no migration, no new network seam (the read is item 3.17's
+`league.live.read_live_matchup`; `core → league` is the legal direction).
+**Design decisions.**
+- **Live repricing touches LOCKED seats only, on BOTH sides, BEFORE the seat
+  search.** A locked seat cannot move, so repricing changes no seat directly — but
+  it moves the margin, and therefore the posture and the variance play for the
+  slots still open. That is the point on a Sunday morning after a Thursday or
+  London game. The opponent gets the identical repricing (the item-3.13 symmetry
+  lesson).
+- **What a locked starter COUNTS is a labelled hypothesis (`LIVE_COUNT_LABEL`).**
+  FINAL (clock estimate, `league.live.TYPICAL_GAME_MINUTES`): ESPN's points
+  exactly, sigma 0. IN PROGRESS: offense/K add points so far + projection × share
+  of the game left; a D/ST BLENDS live and projection by that share, because its
+  points-allowed bracket starts at its best value and is not cumulative. Sigma
+  scales by √(share left).
+- **A live read is validated, never trusted blindly.** Wrong team or wrong scoring
+  period → ignored with a note. ESPN points on a player this card considers NOT
+  locked → `CLOCK DISAGREEMENT` (the stored kickoff or `--now` is wrong), no
+  repricing either way. A locked player ESPN's live lineup places differently
+  from the stored snapshot → `LINEUP DISAGREEMENT` (re-sync). A failed read
+  degrades the card with the failure printed (`read_live_for_card`), never kills it.
+- **With `--live` and no `--now`, the read's wall clock is the decision clock**: a
+  live score judged against the default midnight clock would call every game 'not
+  started' and leave a finished starter movable.
+- **`margin` is exactly `own_projected_total − opponent_total`; the posture driver
+  is the new `posture_margin`**, and a posture week prints one line naming the
+  gap between them. Every printed difference is taken from the PRINTED (1 dp)
+  operands (`_shown_diff`).
+- **Near ties are MEASURED, not chosen (`NEAR_TIE_POINTS = 1.0`).** 2026 feed,
+  weeks 2–3, every same-position pair of starter-relevant players (projected ≥ 5)
+  within 5 points on the Wednesday card, re-read on the Sunday card: pairs closer
+  than 1.0 swapped order **19.1% (477 of 2,497)**; 1.0–2.0 apart **7.2% (143 of
+  1,986)**; 2.0–3.0 apart **3.8% (57 of 1,495)**. Pairs share players, so the
+  counts are not independent. The comparison for each movable bench player is
+  the lowest-projected UNLOCKED starter whose slot that player could fill (FLEX
+  included); locked starters are never half of a near tie. The block prints at
+  every verbosity — it is the churn guard.
+- **ESPN's projection is a second opinion, never a seat input**: a column, plus
+  two sums (this card's starters; the opponent's lineup AS SET in ESPN), and an
+  "agrees / leans the other way" tag on each near tie.
+**Done when:** each of the four ships with a test that fails without it (mutation-
+checked), the Sunday/Wednesday/Thursday cadence text names `--live`, and a live run
+on the real database renders all four.
+**Update:**
+> **Done 2026-10-02 (Friday of Week 4, before the Sunday London lock).** All four
+> deliverables shipped in `core/lineup_support.py` plus `ziggurat lineup --live`
+> (one read-only GET through `league.live.read_live_matchup`; no migration, no new
+> network seam). Built in an isolated worktree, merged only when green.
+>
+> **Live run on the real database (2026-10-02, team 10 vs team 5).** Without
+> `--live`: NEUTRAL, you 124.9 vs opp 127.6, margin −2.7 (the pre-fix card printed
+> −2.8 beside those two totals), two NEAR TIES (TE Warren 12.0 v Johnson 11.8; D/ST
+> Packers 6.5 v Rams 5.9). With `--live`: the opponent's Thursday D/ST counted at
+> its ESPN points (their total 127.6 → 125.8), DK Metcalf's Thursday 16.5 shown
+> REALISED on our bench, and ESPN's own pre-game projections summed at **117.5 v
+> 127.1** against the house's 124.9 v 125.8 — a 9-point disagreement that was
+> previously only visible by hand. A simulated Sunday 11:35 ET clock showed the
+> London-game TE counted IN PROGRESS and the TE near tie correctly withdrawn (a
+> locked starter is never half of one).
+>
+> **Opus refute-first review: 3 major + 8 minor, all fixed and pinned.** (M1) the
+> D/ST/K upgrade note compared a free agent's projection with the held starter's
+> LIVE count for a slot that had already locked (real render: "6.0 vs your Packers
+> D/ST −6.0") — a locked slot now gets no note. (M2) the "posture set on…" line
+> fired off rounding in a posture week whose search made no swap — gated on the
+> unrounded gap now, "less than 0.1" when a real swap costs under the print
+> resolution. (M3) the 4.7 SCALE sentence still said "the PROJECTED margin swings …
+> from week to week" once live points were counted (Monday night: "+/-0.0 pts from
+> week to week") — a "SCALE (live): what is LEFT TO PLAY" variant replaces it.
+> Minors: a live read that carried no row for a locked starter printed "none of
+> your starters has played yet" and the live-count rule (new `LIVE_MISSING_LABEL`
+> and a counted-vs-locked line); the ESPN opponent sum printed `0.0` for no data
+> and was computed for an UNVALIDATED opponent (now `-`, both sides' missing counts
+> printed, only a schedule-validated opponent summed); in-progress parts did not
+> add to the printed count; the header disclosed only our side's live points;
+> three gendered strings; the no-live label's grammar and its "re-run with --live"
+> loop when the read was IGNORED; `--live --team N` with missing cookies raised
+> instead of degrading (credentials now load inside the guard); the FLOOR/CEIL
+> footer and near-tie wording ("best bench option", "(agrees)") were inexact. The
+> opponent-mismatch check survived the reviewer's mutation (no test) and the CLI
+> wiring had no test — both now pinned.
+>
+> **Tests: +23** (`test_lineup_locks.py`'s new 3.17b section: 14 at build plus 8
+> for the review round; 1 in `test_lineup_support.py`). **Mutation-checked: 17 of 17
+> mechanisms caught** (10 at build, 7 after the review; one test's operands were
+> re-chosen so the unrounded-remainder mutant fails). The 3.13 test that pins the
+> no-live label's honest-tradeoff phrases still passes against the reworded label.
+>
+> **Recorded, not done:** (a) the in-progress estimate is a labelled clock
+> hypothesis — an overtime game reads final early, and a D/ST's blend is a guess
+> with no measurement behind it; grade it against Monday's final numbers before
+> trusting it on a close Sunday. (b) the near-tie rate was measured on
+> same-position pairs over two weeks (weeks 2–3) and is applied to FLEX pairs;
+> re-measure at week 8. (c) the Wednesday briefing still renders the card without
+> a live read (by design — nothing is locked on a Wednesday morning).
+
 ### 3.18 [Fix] The espn_id → gsis crosswalk keeps the wrong id for 2026 rookies (added 2026-09-15, from the Week-2 preflight)
 **Why it exists.** **Every** CLI run prints ~140 lines of
 `crosswalk: espn_id N maps to multiple gsis (HAR575189, 00-0041328); keeping

@@ -609,3 +609,453 @@ def test_the_stale_row_scan_reads_the_newest_pull_per_key_not_the_oldest_overall
     }
     stale = lineup_support._stale_projection_rows(lines, as_of=PULL)
     assert stale == [("SKILL", "b")]
+
+
+# ============ 3.17b — the card once games start: live points, near ties =========
+#
+# Item 3.17b (2026-10-02, from the Week-3 retro). Week 3's card carried a locked
+# D/ST at its PROJECTION (7.0) all weekend after it had scored -6.0 on the
+# Thursday, so it read 54% while the true margin was near -10 — and a novice
+# reading the card alone could not have known. These tests pin what a live read
+# may and may not do to the card.
+
+from dataclasses import replace as _replace  # noqa: E402
+
+from ziggurat.core.lineup_support import (  # noqa: E402
+    DEFAULT_VARIANCE,
+    LIVE_COUNT_LABEL,
+    NEAR_TIE_LABEL,
+    NEAR_TIE_POINTS,
+    _Seat,
+    _apply_live,
+    read_live_for_card,
+)
+from ziggurat.league import live as league_live  # noqa: E402
+
+# marginal_world's ESPN ids: 2000 + spec index (skill), -16000 - index (D/ST).
+_ID = {spec["name"]: (str(-16000 - i) if spec["pos"] == "D/ST" else str(2000 + i))
+       for i, spec in enumerate(_lock_specs() + _opp_specs())}
+_HALF_GAME = datetime(2026, 9, 16, 21, 52, 30, tzinfo=ET)   # 97.5 min after 20:15
+
+
+def _row(name, *, points, projected, starting=True, slot="WR"):
+    return league_live.LiveStarter(
+        slot=slot, starting=starting, player=name, espn_player_id=_ID[name],
+        pro_team=None, points=points, projected=projected, status="final",
+        kickoff=None)
+
+
+def _side(team_id, rows):
+    return league_live.LiveSide(
+        team_id=team_id, team_name=None, live_points=None, final_points=None,
+        points_source="totalPointsLive",
+        starters=tuple(r for r in rows if r.starting),
+        bench=tuple(r for r in rows if not r.starting))
+
+
+def _live(own_rows, opp_rows=None, *, team=TEAM, opp_team=OPP_TEAM, period=WEEK,
+          read_at=AFTER_MIDWEEK):
+    return league_live.LiveMatchup(
+        season=SEASON, week=period, scoring_period=period, own=_side(team, own_rows),
+        opponent=None if opp_rows is None else _side(opp_team, opp_rows),
+        closed=False, winner=None, read_at=read_at.isoformat(timespec="seconds"),
+        notes=())
+
+
+def _starter(rec, name):
+    return next(s for s in rec.starters if s.player == name)
+
+
+def test_a_final_locked_starter_counts_what_he_scored_not_his_projection(
+        db, marginal_world):
+    """The Week-3 defect, in miniature. With a live read, a locked starter whose game
+    is FINAL counts ESPN's points (REALISED), carries no swing, and the card says so
+    — the projection is still printed, never overwritten."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    without = _build(db, now=AFTER_MIDWEEK)
+    rec = _build(db, now=AFTER_MIDWEEK,
+                 live_read=_live([_row(_LOCKED_WR, points=3.2, projected=14.0)]))
+
+    row = _starter(rec, _LOCKED_WR)
+    assert row.locked and row.live_state == league_live.STATUS_FINAL
+    assert row.proj_points == pytest.approx(16.9)        # the projection survives
+    assert row.counted_points == pytest.approx(3.2)
+    assert row.live_points == pytest.approx(3.2)
+    assert row.sigma == 0.0                               # nothing left to play
+    assert rec.own_projected_total == pytest.approx(without.own_projected_total - 16.9 + 3.2)
+    assert rec.live_used and rec.live_counted == 1
+    assert LIVE_COUNT_LABEL in rec.locked_notes
+    assert LOCKED_CARRY_LABEL not in rec.locked_notes
+    card = format_lineup_recommendation(rec)
+    assert "LIVE final: 3.2 REALISED -> counts 3.2" in card
+    assert "mix REALISED points with PROJECTED ones" in card
+
+
+def test_an_in_progress_starter_counts_points_so_far_plus_the_rest_of_his_projection(
+        db, marginal_world):
+    """Half-way through his game (by the kickoff clock), an offensive starter counts
+    points so far + half his projection, and half his variance is left."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=_HALF_GAME,
+                 live_read=_live([_row(_LOCKED_WR, points=4.0, projected=14.0)],
+                                 read_at=_HALF_GAME))
+    row = _starter(rec, _LOCKED_WR)
+    assert row.live_state == league_live.STATUS_LIVE
+    assert row.counted_points == pytest.approx(4.0 + 16.9 * 0.5)
+    assert row.sigma == pytest.approx(DEFAULT_VARIANCE.sigma("WR", 16.9) * 0.5 ** 0.5)
+
+
+def test_a_dst_in_progress_blends_rather_than_adds():
+    """A D/ST's points-allowed bracket is not cumulative: an early live number already
+    holds the best bracket, so adding the projection would double-count. It blends;
+    an offensive player adds. Same clock, same share left (0.5)."""
+    kick = datetime(2026, 9, 16, 20, 15, tzinfo=ET)
+
+    def seat(pos):
+        return _Seat(key=pos, player=pos, position=pos, team="CHI", espn_id=pos,
+                     gsis_id=None, points=8.0, sigma=6.0, injury_status=None,
+                     lineup_slot=pos, on_bye=False, has_proj=True, hard_out=False,
+                     available=False, kickoff=kick, locked=True, pin_slot=pos)
+
+    seats = {"DST": seat("DST"), "WR": seat("WR")}
+    rows = {p: league_live.LiveStarter(slot=p, starting=True, player=p,
+                                       espn_player_id=p, pro_team="CHI", points=10.0,
+                                       projected=8.0, status="in progress", kickoff=None)
+            for p in seats}
+    _apply_live(seats, rows, now=_HALF_GAME, who="your")
+    assert seats["DST"].points == pytest.approx(10.0 * 0.5 + 8.0 * 0.5)   # blend
+    assert seats["WR"].points == pytest.approx(10.0 + 8.0 * 0.5)          # add
+    assert seats["DST"].house_points == seats["WR"].house_points == 8.0
+
+
+def test_the_opponent_locked_starter_is_repriced_identically_and_named(
+        db, marginal_world):
+    """Symmetry (the 3.13 lesson): the opponent's already-played starter counts what
+    he scored, too, and the LIVE READ block names him and the number."""
+    marginal_world(_lock_specs() + _opp_specs(), retrieved=PULL)
+    _slate(db)
+    _matchup(db, home_team_id=TEAM, away_team_id=OPP_TEAM)
+    db.commit()
+    live = _live([], [_row("Rival Locked Wideout", points=11.0, projected=6.0)])
+    rec = build_lineup(db, as_of=PULL, season=SEASON, own_team_id=TEAM, week=WEEK,
+                       now=AFTER_MIDWEEK, live_read=live)
+    assert rec.opponent_total == pytest.approx(107.0 - 5.0 + 11.0)
+    assert any("Rival Locked Wideout" in n and "11.0" in n and "FINAL" in n
+               for n in rec.live_notes)
+    assert rec.live_counted_opp == 1
+    assert "with 1 already-played starter counted at ESPN points" in " ".join(rec.notes)
+
+
+def test_a_live_read_for_the_wrong_team_or_week_is_ignored_out_loud(db, marginal_world):
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rows = [_row(_LOCKED_WR, points=3.2, projected=14.0)]
+    for live, phrase in ((_live(rows, team=99), "team 99"),
+                         (_live(rows, period=WEEK + 1), f"scoring period {WEEK + 1}")):
+        rec = _build(db, now=AFTER_MIDWEEK, live_read=live)
+        assert not rec.live_used
+        assert _starter(rec, _LOCKED_WR).counted_points is None
+        assert any(phrase in n and "IGNORED" in n for n in rec.live_notes)
+
+
+def test_points_on_an_unlocked_player_are_reported_never_trusted(db, marginal_world):
+    """ESPN applying points to a man this card thinks has not kicked off means the
+    stored kickoff or --now is wrong. The card says so and leaves him unpriced by
+    the live read — in EITHER direction."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=AFTER_MIDWEEK,
+                 live_read=_live([_row("Second Wideout", points=9.0, projected=15.0)]))
+    assert _starter(rec, "Second Wideout").counted_points is None
+    assert any("CLOCK DISAGREEMENT" in n and "Second Wideout" in n for n in rec.live_notes)
+
+
+def test_a_live_lineup_that_disagrees_with_the_snapshot_is_reported(db, marginal_world):
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=AFTER_MIDWEEK, live_read=_live(
+        [_row(_LOCKED_WR, points=3.2, projected=14.0, starting=False, slot="BE")]))
+    assert any("LINEUP DISAGREEMENT" in n and _LOCKED_WR in n for n in rec.live_notes)
+
+
+def test_espn_projections_ride_along_as_a_column_and_two_totals(db, marginal_world):
+    """ESPN's own number is a SECOND OPINION: printed beside ours, summed over this
+    card's starters and over the opponent's lineup as set — and used to seat nothing."""
+    marginal_world(_lock_specs() + _opp_specs(), retrieved=PULL)
+    _slate(db)
+    _matchup(db, home_team_id=TEAM, away_team_id=OPP_TEAM)
+    db.commit()
+    without = build_lineup(db, as_of=PULL, season=SEASON, own_team_id=TEAM, week=WEEK,
+                           now=BEFORE_ANYTHING)
+    own = [_row("Pocket Passer", points=0.0, projected=18.5, slot="QB"),
+           _row("Second Wideout", points=0.0, projected=12.25)]
+    opp = [_row("Rival Passer", points=0.0, projected=20.0, slot="QB"),
+           _row("Rival Wideout", points=0.0, projected=10.0),
+           _row("Rival Bench Wideout", points=0.0, projected=99.0, starting=False)]
+    rec = build_lineup(db, as_of=PULL, season=SEASON, own_team_id=TEAM, week=WEEK,
+                       now=BEFORE_ANYTHING,
+                       live_read=_live(own, opp, read_at=BEFORE_ANYTHING))
+    assert {s.player for s in rec.starters} == {s.player for s in without.starters}
+    assert rec.own_projected_total == pytest.approx(without.own_projected_total)
+    assert _starter(rec, "Pocket Passer").espn_proj == pytest.approx(18.5)
+    assert rec.espn_own_total == pytest.approx(18.5 + 12.25)
+    assert rec.espn_missing == len(rec.starters) - 2
+    assert rec.espn_opp_total == pytest.approx(30.0)         # bench row excluded
+    card = format_lineup_recommendation(rec)
+    assert " ESPN  STATUS" in card
+    assert "this card's starters 30.8 vs opp 30.0" in card
+
+
+def test_with_no_explicit_clock_the_live_read_time_is_the_decision_clock(
+        db, marginal_world):
+    """A live score judged against the default midnight clock would call every game
+    'not started' and leave a finished starter movable."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, live_read=_live([_row(_LOCKED_WR, points=3.2, projected=14.0)]))
+    assert _starter(rec, _LOCKED_WR).locked
+    assert _starter(rec, _LOCKED_WR).counted_points == pytest.approx(3.2)
+
+
+def test_a_failed_live_read_degrades_the_card_and_says_so(db, marginal_world):
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+
+    def boom(**_kwargs):
+        raise ConnectionError("espn unreachable")
+
+    creds = {"league_id": 1, "espn_s2": "x", "swid": "{y}"}
+    live, err = read_live_for_card(db, season=SEASON, as_of=PULL, now=AFTER_MIDWEEK,
+                                   team_id=TEAM, credentials=creds, fetch=boom)
+    assert live is None and "FAILED" in err and "espn unreachable" in err
+    rec = _build(db, now=AFTER_MIDWEEK, live_read=live, live_error=err)
+    assert not rec.live_used and err in rec.live_notes
+    assert LOCKED_CARRY_LABEL in rec.locked_notes
+    assert "LIVE READ:" in format_lineup_recommendation(rec)
+
+
+# --- near ties ---------------------------------------------------------------
+
+
+def _tie_specs(bench_pts, *, locked_pts=21.0):
+    specs = _healthy_specs()
+    specs[3]["pts"] = locked_pts           # the midweek WR
+    specs[6]["pts"] = bench_pts            # Bench Wideout
+    return specs
+
+
+def test_a_start_sit_call_inside_the_band_is_named_a_near_tie(db, marginal_world):
+    marginal_world(_tie_specs(17.5), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=BEFORE_ANYTHING)
+    assert [(t.slot, t.seated, t.bench) for t in rec.near_ties] == [
+        (FLEX_LABEL, "Flex Wideout", _PROMOTED_WR)]
+    assert rec.near_ties[0].gap == pytest.approx(0.5)
+    card = format_lineup_recommendation(rec)        # default verbosity, not --reasons
+    assert "NEAR TIES" in card and NEAR_TIE_LABEL in card
+    assert "Flex Wideout 18.0 (seated) vs Bench Wideout 17.5 (bench), 0.5 apart" in card
+
+
+def test_a_gap_at_or_beyond_the_band_is_not_a_near_tie(db, marginal_world):
+    marginal_world(_tie_specs(18.0 - NEAR_TIE_POINTS), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=BEFORE_ANYTHING)
+    assert rec.near_ties == ()
+    assert "NEAR TIES" not in format_lineup_recommendation(rec)
+
+
+def test_a_locked_starter_is_never_half_of_a_near_tie(db, marginal_world):
+    """Nothing about a locked starter is a decision. Here the locked WR (17.8) would
+    be the closest seated player to the bench body (17.5); the tie must be against
+    the closest UNLOCKED one (Flex Wideout, 18.0) instead."""
+    marginal_world(_tie_specs(17.5, locked_pts=17.8), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=AFTER_MIDWEEK)
+    assert _starter(rec, _LOCKED_WR).locked
+    assert [t.seated for t in rec.near_ties] == ["Flex Wideout"]
+
+
+# --- one margin ----------------------------------------------------------------
+
+
+def test_the_printed_margin_is_the_difference_of_the_printed_totals():
+    """'you 124.9 vs opp 127.6 (margin -2.8)' was printable: both totals and the
+    margin were rounded separately. The printed margin now comes from the printed
+    totals."""
+    rec = lineup_support.LineupRecommendation(
+        posture="NEUTRAL", own_projected_total=124.86, opponent_total=127.64,
+        margin=124.86 - 127.64, win_prob=0.47, starters=(), bench=(), contingencies=(),
+        watch_list=(), sanity_blocks=(), freshness=(), notes=(), as_of="2026-10-02",
+        season=SEASON, week=4, team_id=TEAM, posture_margin=124.86 - 127.64)
+    assert "you 124.9  vs  opp 127.6  (margin -2.7," in format_lineup_recommendation(rec)
+    assert "posture set on" not in format_lineup_recommendation(rec)
+    moved = _replace(rec, posture="UNDERDOG", posture_margin=-1.2)
+    assert ("posture set on the best-projected lineup's margin -1.2; the seated lineup "
+            "gives up 1.5 projected pts") in format_lineup_recommendation(moved)
+
+
+# --- 3.17b review round (Opus refute-first, 2026-10-02) ---------------------------
+
+
+def test_a_live_opponent_the_schedule_does_not_name_is_not_trusted(db, marginal_world):
+    """Review finding (survived mutation): the opponent check had no test. A live
+    read whose opponent is not the stored schedule's leaves THEIR locked starters at
+    projection, says so, and gets no ESPN sum."""
+    marginal_world(_lock_specs() + _opp_specs(), retrieved=PULL)
+    _slate(db)
+    _matchup(db, home_team_id=TEAM, away_team_id=OPP_TEAM)
+    db.commit()
+    live = _live([], [_row("Rival Locked Wideout", points=11.0, projected=6.0)],
+                 opp_team=99)
+    rec = build_lineup(db, as_of=PULL, season=SEASON, own_team_id=TEAM, week=WEEK,
+                       now=AFTER_MIDWEEK, live_read=live)
+    assert rec.opponent_total == pytest.approx(107.0)
+    assert rec.live_counted_opp == 0 and rec.espn_opp_total is None
+    assert any("team 99" in n and "not the stored schedule" in n for n in rec.live_notes)
+    assert "vs opp - " in format_lineup_recommendation(rec)
+
+
+def test_a_locked_starter_the_live_read_missed_is_never_called_unplayed(
+        db, marginal_world):
+    """Review finding: with a live read that carried no row for a locked starter, the
+    card said 'none of your starters has played yet' and closed the locked block with
+    the live-count rule. It must say the starter played and is still at PROJECTION."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=AFTER_MIDWEEK, live_read=_live([]))
+    assert rec.live_used and rec.live_locked == 1 and rec.live_counted == 0
+    card = format_lineup_recommendation(rec)
+    assert "none of your starters has played yet" not in card
+    assert "1 starter of yours has played, but the live read carried no points" in card
+    assert lineup_support.LIVE_MISSING_LABEL in rec.locked_notes
+    assert LIVE_COUNT_LABEL not in rec.locked_notes
+    assert any(_LOCKED_WR in n and "not in ESPN's live payload" in n
+               for n in rec.live_notes)
+
+
+def test_once_live_points_count_the_scale_sentence_is_the_swing_left_to_play(
+        db, marginal_world):
+    """Review finding: the 4.7 sentence read 'the PROJECTED margin swings ... week to
+    week' on a card whose totals hold REALISED points and whose sigmas are what is
+    left to play."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=AFTER_MIDWEEK,
+                 live_read=_live([_row(_LOCKED_WR, points=3.2, projected=14.0)]))
+    card = format_lineup_recommendation(rec)
+    assert "SCALE (live): what is LEFT TO PLAY can still move the margin" in card
+    assert "the PROJECTED margin swings" not in card
+    plain = _build(db, now=AFTER_MIDWEEK)
+    assert "the PROJECTED margin swings" in format_lineup_recommendation(plain)
+
+
+def test_in_progress_parts_add_up_to_the_printed_count(db, marginal_world):
+    """4.06 so far + 8.45 left = 12.51: printed separately that read '4.1 + 8.5'
+    beside 'counts 12.5'. The remainder is taken from the printed operands."""
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    rec = _build(db, now=_HALF_GAME,
+                 live_read=_live([_row(_LOCKED_WR, points=4.06, projected=14.0)],
+                                 read_at=_HALF_GAME))
+    row = _starter(rec, _LOCKED_WR)
+    reason = next(r for r in row.reasons if r.startswith("counted at"))
+    so_far = float(reason.split(" REALISED so far + ")[0].rsplit(" ", 1)[1])
+    rest = float(reason.split(" REALISED so far + ")[1].split(" ")[0])
+    assert round(so_far + rest, 1) == round(row.counted_points, 1)
+
+
+def test_the_posture_line_needs_a_real_swap_not_a_rounding_gap():
+    """Review finding: a posture week whose search made NO swap (margin ==
+    posture_margin exactly) printed 'gives up 0.1 projected pts' off rounding alone."""
+    rec = lineup_support.LineupRecommendation(
+        posture="FAVORITE", own_projected_total=124.84, opponent_total=114.36,
+        margin=124.84 - 114.36, win_prob=0.62, starters=(), bench=(), contingencies=(),
+        watch_list=(), sanity_blocks=(), freshness=(), notes=(), as_of="2026-10-02",
+        season=SEASON, week=4, team_id=TEAM, posture_margin=124.84 - 114.36)
+    assert "posture set on" not in format_lineup_recommendation(rec)
+    # a REAL swap that cost less than the print resolution says so, never "0.0"
+    tiny = _replace(rec, own_projected_total=124.81, opponent_total=114.41,
+                    margin=124.81 - 114.41, posture_margin=124.81 - 114.41 + 0.02)
+    assert "gives up less than 0.1 projected pts" in format_lineup_recommendation(tiny)
+
+
+def _dst_lock_specs():
+    """The lock roster with the D/ST playing the midweek game, plus a free-agent
+    D/ST the streaming shelf would rank above it."""
+    specs = _lock_specs()
+    specs[8] = dict(specs[8], team="CHI", pts=2.0)
+    return specs + [{"name": "Shelf D/ST", "pos": "D/ST", "team": "BUF", "pts": 9.0,
+                     "bye": 9}]
+
+
+def test_no_streaming_upgrade_note_for_a_slot_that_has_already_locked(
+        db, marginal_world):
+    """Review finding: the optional-upgrade note compared a free agent's projection
+    with the held D/ST's LIVE count for a slot that had already locked (real render:
+    'free agent ... 6.0 vs your Packers D/ST -6.0'). A locked slot is not a decision."""
+    marginal_world(_dst_lock_specs(), retrieved=PULL)
+    _slate(db)
+    before = _build(db, now=BEFORE_ANYTHING)
+    assert any("D/ST upgrade" in n or "streaming DST" in n for n in before.notes)
+    after = _build(db, now=AFTER_MIDWEEK, live_read=_live(
+        [_row("Home D/ST", points=-6.0, projected=5.0, slot="D/ST")]))
+    assert _starter(after, "Home D/ST").locked
+    assert not any("D/ST upgrade" in n or "streaming DST" in n for n in after.notes)
+
+
+def test_the_cli_live_flag_reads_once_and_hands_one_clock_to_both(monkeypatch, tmp_path):
+    """Review finding: no test exercised the CLI wiring. ``--live`` must make ONE
+    degrade-safe read and pass the same decision clock to the read and the card."""
+    from typer.testing import CliRunner
+
+    from ziggurat.cli import main as cli_main
+
+    calls = {}
+    sentinel = object()
+
+    def fake_read(conn, **kwargs):
+        calls["read"] = kwargs
+        return sentinel, None
+
+    def fake_build(conn, **kwargs):
+        calls["build"] = kwargs
+        return lineup_support.LineupRecommendation(
+            posture="NEUTRAL", own_projected_total=0.0, opponent_total=None,
+            margin=0.0, win_prob=0.5, starters=(), bench=(), contingencies=(),
+            watch_list=(), sanity_blocks=(), freshness=(), notes=(),
+            as_of="2026-10-04", season=SEASON, week=4, team_id=TEAM)
+
+    monkeypatch.setattr(cli_main, "read_live_for_card", fake_read)
+    monkeypatch.setattr(cli_main, "build_lineup", fake_build)
+    db_path = tmp_path / "t.sqlite"
+    runner = CliRunner()
+    res = runner.invoke(cli_main.app, ["lineup", "--team", str(TEAM), "--live",
+                                       "--now", "2026-10-04T11:35:00",
+                                       "--path", str(db_path)])
+    assert res.exit_code == 0, res.output
+    assert calls["read"]["now"] == calls["build"]["now"]
+    assert calls["build"]["now"] == datetime(2026, 10, 4, 11, 35, tzinfo=ET)
+    assert calls["read"]["credentials"] is None       # loaded inside the guard
+    assert calls["build"]["live_read"] is sentinel
+    calls.clear()
+    res = runner.invoke(cli_main.app, ["lineup", "--team", str(TEAM),
+                                       "--path", str(db_path)])
+    assert res.exit_code == 0, res.output
+    assert "read" not in calls and calls["build"]["live_read"] is None
+
+
+def test_missing_credentials_degrade_the_card_rather_than_kill_it(db, marginal_world,
+                                                                  monkeypatch):
+    marginal_world(_lock_specs(), retrieved=PULL)
+    _slate(db)
+    from ziggurat.data.nfl import espn_source
+
+    def no_creds(**_kwargs):
+        raise RuntimeError("SWID missing")
+
+    monkeypatch.setattr(espn_source, "load_espn_credentials", no_creds)
+    live, err = read_live_for_card(db, season=SEASON, as_of=PULL, now=AFTER_MIDWEEK,
+                                   team_id=TEAM)
+    assert live is None and "SWID missing" in err

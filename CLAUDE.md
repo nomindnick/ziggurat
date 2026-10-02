@@ -1706,16 +1706,23 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    journal: which claims won, which lost.
 3. `.venv/bin/ziggurat waivers --reasons` again — the pool has re-formed, and a
    FREEAGENT-status add is first-come: flag anything worth grabbing NOW.
-4. First lineup pass: `.venv/bin/ziggurat lineup --reasons`. Note the GTD /
-   Questionable starters to track through the practice week.
+4. First lineup pass: `.venv/bin/ziggurat lineup --reasons --live`. Note the GTD /
+   Questionable starters to track through the practice week. `--live` (item
+   3.17b) is one read-only ESPN GET: it adds ESPN's own projection as a second
+   opinion beside ours (never used to seat) and, once any game has been played,
+   counts locked starters at their ESPN points. A line under **NEAR TIES** is a
+   start/sit call inside the measured feed-refresh noise (under 1.0 projected
+   point apart; 19% of such pairs swapped order between the Wednesday and Sunday
+   cards in weeks 2–3) — either start is defensible; do not churn the lineup
+   over one, and say so to the operator rather than presenting a flip as news.
 5. Journal claim outcomes, grabs made or passed on, and the provisional lineup.
 
 ### Thursday–Saturday — monitoring
 - The 20-minute alert timer covers breaking news. When a push fires, evaluate
   with `.venv/bin/ziggurat waivers` / `lineup` — never react on the headline.
 - Injury reports: Wed–Fri practice participation is trajectory; **Friday's
-  designation is ground truth.** Re-run `.venv/bin/ziggurat lineup --reasons`
-  after Friday's reports.
+  designation is ground truth.** Re-run `.venv/bin/ziggurat lineup --reasons
+  --live` after Friday's reports.
 - **Read the practice report Wed/Thu/Fri for BOTH the roster and the claim
   chain** (~30 min/week, session-driven; NFL.com/injuries is free and
   fetchable). It is the only signal in the whole 2026-09-14 qualitative sweep
@@ -1734,7 +1741,10 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
   **LOCKS FIRST** (item 3.17) — the earliest-locking starters and their
   kickoff — and since item 3.13 the `--now` decision clock also decides the
   **lock fence**: a starter whose game has kicked off is PINNED where ESPN has
-  him and carried at his projection, never benched or swapped by the tool.
+  him, never benched or swapped by the tool. Without `--live` that starter is
+  carried at the PROJECTION; with it (item 3.17b) the starter counts the points
+  actually scored, so after a Thursday game the card's margin, win prob and
+  posture are real.
 - Streaming week for D/ST or K: `.venv/bin/ziggurat stream --reasons`.
 - Journal anything acted on; an empty day is fine.
 
@@ -1747,12 +1757,19 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    fires Sundays at 09:15 and 12:15 PT as the backup; when you are at the
    keyboard, run `.venv/bin/ziggurat league sync` yourself ~08:35–09:30 PT and
    confirm `league status` shows today's snapshot. Then run
-   `.venv/bin/ziggurat lineup --reasons --now "<current ET ISO datetime>"` —
+   `.venv/bin/ziggurat lineup --reasons --live --now "<current ET ISO datetime>"` —
    the real clock matters twice: the GTD contingency ladder only offers swaps
    whose window is still open (`window_closed` means that door shut), and
    since item 3.13 the same clock sets the lock fence — the card's SEATED SET
    depends on it, because a starter whose game has started is pinned in place
-   (a `LOCKED` row is not a removal and not a swap candidate).
+   (a `LOCKED` row is not a removal and not a swap candidate). `--live` (item
+   3.17b) makes the morning's already-played games COUNT: a FINAL game counts
+   the ESPN points exactly, an IN-PROGRESS one (London) counts points so far plus
+   the projection for the share of the game left (a labelled clock estimate), on
+   BOTH sides — so the posture reacts to the real score. Read the **LIVE READ**
+   block: a `LINEUP DISAGREEMENT` means the stored snapshot is behind ESPN (re-sync
+   and re-run), and a failed live read prints why and falls back to projections.
+   With `--live` and no `--now`, the read's own wall clock is the decision clock.
 2. Walk the ladder for each Questionable starter in lock-time order; execute
    the branch matching the news.
 3. A hard refusal from the seated-lineup legality check (bye/OUT starter) on a
