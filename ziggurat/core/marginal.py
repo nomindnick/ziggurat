@@ -107,6 +107,7 @@ from ziggurat.core.lineup import active_players, fill_lineup
 from ziggurat.core.valuation import (
     DEFAULT_ROSTER,
     RosterStructure,
+    WeeklyLine,
     build_valuation,
     canon_position,
     weekly_lines,
@@ -1867,6 +1868,23 @@ def _depth_links(lines, entries: Mapping[str, _Entry],
     return links, detail
 
 
+def _check_lines_window(lines, window) -> None:
+    """Refuse a caller-built ``weekly_lines`` map whose weeks fall outside
+    ``window`` (item 3.16b). Season and week sums are plain sums over
+    ``WeeklyLine.points``, so a map built over a wider span would inflate every
+    number on the board silently — the same check ``build_valuation`` makes on its
+    own ``lines=`` hand-over. A NARROWER map is legal (a player with no forecast in
+    a week simply has no point there), so only stray weeks are refused."""
+    want = frozenset(int(w) for w in window)
+    stray = {int(w) for ln in lines.values() for w in ln.points} - want
+    if stray:
+        raise ValueError(
+            f"lines were built over weeks {sorted(stray)} outside the priced window "
+            f"{sorted(want)}; build them with the same weeks (weekly_lines(..., "
+            f"weeks=<window>)) or let this function read them itself."
+        )
+
+
 @dataclass(frozen=True)
 class HandcuffLink:
     """One ``(team, position)`` starter -> handcuff pair, keyed by PLAYER IDENTITY
@@ -1925,6 +1943,7 @@ def handcuff_links(
     source: str = "sleeper_rotowire",
     handcuffs: HandcuffModel = DEFAULT_HANDCUFFS,
     view: base.AsOfView = "historical",
+    lines: Mapping[tuple, WeeklyLine] | None = None,
 ) -> list[HandcuffLink]:
     """The public, identity-keyed handcuff resolver the item-3.6 alert path calls
     instead of reaching into the private ``_depth_links`` OR re-implementing the
@@ -1940,7 +1959,10 @@ def handcuff_links(
     if weeks is None:
         weeks = resolve_weeks(conn, as_of=as_of, season=season, last_week=last_week, view=view)
     weeks = list(weeks)
-    lines = weekly_lines(conn, as_of=as_of, season=season, weeks=weeks, source=source, view=view)
+    if lines is None:
+        lines = weekly_lines(conn, as_of=as_of, season=season, weeks=weeks, source=source, view=view)
+    else:  # caller-built map (item 3.16b) — the same contract as build_board's
+        _check_lines_window(lines, weeks)
     depth = _rank_depth_chart(lines, weeks)
 
     out: list[HandcuffLink] = []
@@ -2249,6 +2271,7 @@ def build_board(
     rules: scoring.ScoringRules = scoring.HOUSE_RULES,
     view: base.AsOfView = "historical",
     today=None,
+    lines: Mapping[tuple, WeeklyLine] | None = None,
 ) -> MarginalBoard:
     """ONE scan producing the drop board AND the swap matrix (item 3.2).
 
@@ -2289,10 +2312,20 @@ def build_board(
     window = resolve_weeks(conn, as_of=as_of, season=season, weeks=weeks,
                            last_week=last_week, view=view)
     byes = bye_map(conn, as_of=as_of, season=season, source=source, view=view)
-    lines = weekly_lines(
-        conn, as_of=as_of, season=season, weeks=window, source=source,
-        rules=rules, view=view,
-    )
+    if lines is None:
+        lines = weekly_lines(
+            conn, as_of=as_of, season=season, weeks=window, source=source,
+            rules=rules, view=view,
+        )
+    else:
+        # A caller that already paid for a `weekly_lines` pass (item 3.16b: the
+        # alert tick, which needs the same map for `handcuff_links`) hands it over
+        # rather than paying a second full read of the projections table — measured
+        # 6.8 s each on the 2026-10-05 live DB. THE CALLER OWNS the as_of / season /
+        # source / rules / view contract (this function cannot re-check a gate it did
+        # not run); the week window is the half that IS checkable, and a map built
+        # over a different span would mis-price every row, so it is refused.
+        _check_lines_window(lines, window)
 
     roster_rows = [dict(r) for r in roster]
     active = active_players(roster_rows)
@@ -2497,6 +2530,7 @@ def build_board(
         view=view,
         swap_limit=swap_limit,
         report_depth=report_depth,
+        lines=lines,
     )
 
     freshness = _freshness_lines(
@@ -2567,6 +2601,7 @@ def _scan(
     view,
     swap_limit,
     report_depth,
+    lines=None,
 ):
     """The exhaustive drop x add scan. Both boards fall out of this one loop.
 
@@ -2782,7 +2817,7 @@ def _scan(
 
     rows = _apply_tiebreaks(
         rows, entries=entries, conn=conn, as_of=as_of, season=season,
-        window=window, source=source, rules=rules, view=view,
+        window=window, source=source, rules=rules, view=view, lines=lines,
     )
     order = sorted(range(len(swaps)), key=lambda i: (-swaps[i].gain, swaps[i].add,
                                                      swaps[i].drop))
@@ -2868,7 +2903,8 @@ def _reprice_swaps(swaps, keys, *, entries, model_full, model_now, depth):
     return out
 
 
-def _apply_tiebreaks(rows, *, entries, conn, as_of, season, window, source, rules, view):
+def _apply_tiebreaks(rows, *, entries, conn, as_of, season, window, source, rules, view,
+                     lines=None):
     """Sort ascending by marginal value, breaking EXACT ties by a stated ladder.
 
     Ties are not a corner case here: every player who never reaches the lineup in
@@ -2883,9 +2919,13 @@ def _apply_tiebreaks(rows, *, entries, conn, as_of, season, window, source, rule
     if not rows:
         return rows
     ros: dict[str, float] = {}
+    # `lines` is the SAME map `build_board` priced the board on (same as_of, season,
+    # window, source, rules, view), so handing it over is an identity, not an
+    # approximation — and it saves the second full projections read every board used
+    # to pay here (item 3.16b; pinned by test_tiebreak_lines_handover_is_identical).
     val_rows = build_valuation(
         conn, as_of=as_of, season=season, weeks=window, source=source,
-        rules=rules, view=view,
+        rules=rules, view=view, lines=lines,
     )
     by_gsis = {r.gsis_id: r.vor for r in val_rows if r.gsis_id}
     by_dst = {r.team: r.vor for r in val_rows if r.position == "DST"}

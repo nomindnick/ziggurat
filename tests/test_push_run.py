@@ -550,3 +550,100 @@ def test_status_across_kinds_summarises_each_kind(push_db):
     out = runs.format_status(push_db)
     assert "last REAL [alert] run: 2026-09-15T06:20:00 -> empty" in out
     assert "last REAL [brief] run: 2026-09-09T06:04:09 -> ok" in out
+
+
+# ------------------------------------------- item 3.16b: the injury arm's handcuff gate
+
+
+def _seed_other_teams_pair(conn):
+    """Someone else's starter (team 2) ruled OUT, his backup a free agent."""
+    from ziggurat.core import alerts as alerts_mod  # noqa: F401  (import check)
+
+    for pid, gsis, name, rush in ((300, "00-0000300", "Bell Cow", 90.0),
+                                  (301, "00-0000301", "The Backup", 20.0)):
+        conn.execute(
+            "INSERT INTO players (gsis_id, espn_id, name, position, retrieved_as_of, "
+            "knowable_as_of) VALUES (?, ?, ?, 'RB', '2026-09-01', '2026-09-01')",
+            (gsis, str(pid), name),
+        )
+        for wk in (2, 3, 4):
+            conn.execute(
+                "INSERT INTO projections (source, source_player_id, gsis_id, season, week, "
+                "season_type, position, team, opponent, rushing_yards, projected_points, "
+                "retrieved_as_of, knowable_as_of) VALUES ('sleeper_rotowire', ?, ?, 2026, ?, "
+                "'regular', 'RB', 'ATL', 'OPP', ?, ?, '2026-09-01', '2026-09-01')",
+                (f"S{pid}", gsis, wk, rush, rush / 10.0),
+            )
+    _snap(conn, "2026-09-09", 300, "Bell Cow", 2, "ACTIVE")
+    _snap(conn, "2026-09-10", 300, "Bell Cow", 2, "OUT")
+    _snap(conn, "2026-09-09", 301, "The Backup", None, "ACTIVE")
+    _snap(conn, "2026-09-10", 301, "The Backup", None, "ACTIVE")
+    conn.commit()
+
+
+def _flat_pricer(gain):
+    from ziggurat.core import alerts as alerts_mod
+
+    return lambda rows, *, weeks, lines: {
+        str(r["espn_player_id"]): alerts_mod.HandcuffPrice(gain, "Depth Guy", len(weeks))
+        for r in rows}
+
+
+def test_held_injury_alert_is_not_pushed_and_not_reserved(push_db):
+    """A held event is neither pushed nor written to the ledger: if his backup's price
+    rises on a later tick inside the window, it can still reach the phone."""
+    _seed_own_team(push_db)
+    _seed_other_teams_pair(push_db)
+    sent = []
+
+    def poster(url, body, headers, timeout):
+        sent.append(body.decode())
+        return 200
+
+    r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                now="2026-09-10T06:00:00", week=2, pull_news=False,
+                                config=_cfg(), poster=poster, handcuff_pricer=_flat_pricer(0.4))
+    assert sent == [] and r["pushed"] == 0 and r["withheld_injury"] == 1
+    assert r["withheld_news"] == 0
+    assert not runs.already_seen(push_db, season=2026, dedup_key="inj:300:2026-09-10:ruled_out",
+                                 channel="phone")
+    # the on-box log carries the price that held it — the review's evidence
+    log = (push_run.ALERTS_DIR / "2026-w02.jsonl").read_text().splitlines()
+    rec = json.loads(log[-1])
+    assert rec["withheld_injury"] == 1
+    ev = [e for e in rec["events"] if e["kind"] == "INJURY_OUT"][0]
+    assert ev["handcuff_gain"] == 0.4 and "below the +1.0 floor" in ev["phone_gate"]
+
+    # the price rises on a later tick -> it pushes then, exactly once
+    r2 = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                 now="2026-09-10T06:20:00", week=2, pull_news=False,
+                                 config=_cfg(), poster=poster, handcuff_pricer=_flat_pricer(4.0))
+    assert r2["pushed"] == 1 and len(sent) == 1
+    assert "Bell Cow" in sent[0] and "worth +4.0 house pts" in sent[0]
+
+
+def test_a_pricing_failure_makes_the_tick_partial_not_empty(push_db):
+    """Review finding 4: a raising pricer used to read `empty` (healthy) on `alerts
+    status` while the whole other-team injury arm was silenced."""
+    _seed_own_team(push_db)
+    _seed_other_teams_pair(push_db)
+
+    def _boom(rows, *, weeks, lines):
+        raise RuntimeError("projections table locked")
+
+    r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                now="2026-09-10T06:00:00", week=2, pull_news=False,
+                                config=_cfg(), poster=lambda *a, **k: 200, handcuff_pricer=_boom)
+    assert r["status"] == runs.STATUS_PARTIAL and r["pushed"] == 0
+    assert "handcuff gate could not price" in r["error"] and "RuntimeError" in r["error"]
+    assert r["withheld_injury"] == 1
+
+
+def test_withheld_injury_counts_a_no_positive_move_hold(push_db):
+    _seed_own_team(push_db)
+    _seed_other_teams_pair(push_db)
+    r = push_run.run_alert_tick(push_db, as_of="2026-09-10", season=2026, own_team_id=1,
+                                now="2026-09-10T06:00:00", week=2, pull_news=False,
+                                config=_cfg(), poster=lambda *a, **k: 200,
+                                handcuff_pricer=_flat_pricer(None))
+    assert r["withheld_injury"] == 1 and r["pushed"] == 0 and r["status"] == runs.STATUS_EMPTY

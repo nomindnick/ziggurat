@@ -1372,6 +1372,8 @@ def alerts_run(
         conn.close()
     typer.echo(
         f"alert tick [{result['status']}] found={result['found']} pushed={result['pushed']}"
+        f" held_back: news={result.get('withheld_news', 0)}"
+        f" injury={result.get('withheld_injury', 0)}"
         + (f"\n  note: {result['error']}" if result.get("error") else "")
     )
 

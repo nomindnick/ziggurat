@@ -2260,3 +2260,78 @@ def test_only_this_boards_own_guard_lets_a_swap_keep_an_over_cap_count():
     assert keep("WR", 2, None) is False                 # tighter than the guard 8
     assert keep("WR", 8, {"WR": 8}) is False            # the league's own 8
     assert keep("DST", None, None) is False
+
+
+# ------------------------------------- item 3.16b: the caller-built `lines` hand-over
+
+
+def test_tiebreak_lines_handover_is_identical(db, world, monkeypatch):
+    """`_apply_tiebreaks` now hands `build_valuation` the SAME map the board priced on
+    instead of re-reading the projections table (6.8 s on the live DB). That must be
+    an identity: forcing the old re-read changes no row, swap or value.
+
+    The output comparison alone cannot see a WRONG map (this world exercises no
+    rest-of-season-VOR tie rung, so `lines={}` survived it in review); the input is
+    pinned directly too: the map handed over IS the board's own, and equals a fresh
+    read."""
+    from ziggurat.core.valuation import weekly_lines
+
+    roster, pool = world
+    seen = []
+    real = marginal.build_valuation
+
+    def _spy(*a, lines=None, **k):
+        seen.append(lines)
+        return real(*a, lines=lines, **k)
+
+    monkeypatch.setattr(marginal, "build_valuation", _spy)
+    mine = weekly_lines(db, as_of=PULL, season=SEASON, weeks=list(WEEKS))
+    _board(db, roster, pool, lines=mine)
+    assert seen and seen[-1] is mine
+    _board(db, roster, pool)
+    fresh = weekly_lines(db, as_of=PULL, season=SEASON, weeks=list(WEEKS))
+    assert seen[-1] is not None
+    assert {k: v.points for k, v in seen[-1].items()} == {k: v.points for k, v in fresh.items()}
+    monkeypatch.setattr(marginal, "build_valuation", real)
+
+    def snap(b):
+        return ([(r.player, r.marginal_points) for r in b.rows],
+                [(s.add, s.drop, s.gain) for s in b.swaps], b.roster_value)
+
+    new = snap(_board(db, roster, pool))
+    orig = marginal.build_valuation
+    monkeypatch.setattr(marginal, "build_valuation",
+                        lambda *a, lines=None, **k: orig(*a, **k))  # pre-3.16b behaviour
+    assert snap(_board(db, roster, pool)) == new
+
+
+def test_build_board_accepts_a_caller_built_lines_map(db, world):
+    from ziggurat.core.valuation import weekly_lines
+
+    roster, pool = world
+    lines = weekly_lines(db, as_of=PULL, season=SEASON, weeks=list(WEEKS))
+    a, b = _board(db, roster, pool), _board(db, roster, pool, lines=lines)
+    assert [(r.player, r.marginal_points) for r in a.rows] == \
+        [(r.player, r.marginal_points) for r in b.rows]
+    assert [(s.add, s.drop, s.gain) for s in a.swaps] == [(s.add, s.drop, s.gain) for s in b.swaps]
+
+
+def test_a_lines_map_over_the_wrong_weeks_is_refused(db, world):
+    """A map built over a wider span would inflate every number silently, so the
+    week window — the one half of the contract this side can check — is enforced."""
+    from ziggurat.core.valuation import weekly_lines
+
+    roster, pool = world
+    wide = weekly_lines(db, as_of=PULL, season=SEASON, weeks=list(range(1, 18)))
+    with pytest.raises(ValueError, match="outside the priced window"):
+        _board(db, roster, pool, lines=wide)
+    with pytest.raises(ValueError, match="outside the priced window"):
+        marginal.handcuff_links(db, as_of=PULL, season=SEASON, weeks=list(WEEKS), lines=wide)
+
+
+def test_handcuff_links_with_lines_is_identical(db, world):
+    from ziggurat.core.valuation import weekly_lines
+
+    lines = weekly_lines(db, as_of=PULL, season=SEASON, weeks=list(WEEKS))
+    assert marginal.handcuff_links(db, as_of=PULL, season=SEASON, weeks=list(WEEKS)) == \
+        marginal.handcuff_links(db, as_of=PULL, season=SEASON, weeks=list(WEEKS), lines=lines)

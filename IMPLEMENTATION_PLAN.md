@@ -4837,6 +4837,148 @@ ledger shows the push count in the expected range.
 > and the first counter-example (12 bylined `Story` rows withheld) is written down
 > above before anyone can claim the gate was obviously right.
 
+### 3.16b [Fix] The phone lane's INJURY_OUT arm — a handcuff gate, and three truth checks (added 2026-10-05, from the Week-2–4 retros; amends 3.6 and 3.16)
+**Status: BUILT & TESTED 2026-10-05** (operator: "go ahead and implement the
+alert-narrowing feature", 2026-10-05, after the Week-4 retro named it as pending).
+
+**Why it exists.** Item 3.16 narrowed the NEWS arm and left `INJURY_OUT` "UNGATED,
+always pushes". Four weeks of journals showed that arm failing the same contract:
+of the ledger's **32 injury pushes (2026-08-04..10-05), 27 were about someone
+else's player**, and the weekly retros graded all of them but one no-action (the
+exception, Etienne OUT → Kamara on 09-28, became a Tuesday claim target). Worse, the
+arm told the operator things that were false. Each instance below was journaled:
+- **A reversed ruling pushed as news.** Penix, 09-18: `injury_transitions` replays
+  every crossing each tick, and an 11-day-old one surfaced the first day a
+  handcuff resolved. ESPN had moved him back to QUESTIONABLE on 09-15, three days
+  before the push.
+- **A "grab him" for a backup who could not play.** Tua (DOUBTFUL, 09-18),
+  Charbonnet (OUT, 10-02) and Ferguson (on IR, 10-05, the push that prompted this
+  build).
+- **"FREE AGENT" for players on WAIVERS.** Kamara and Gordon, 09-28. They could not
+  be clicked that night.
+- **"FREE AGENT" for a player ESPN does not list at all.** `who_held` returns `None`
+  for "never observed".
+
+**What shipped (`core/alerts.py`; `push/run.py`; one CLI echo):**
+1. **YOUR player is untouched.** Ruled out = always pushes, pinned by
+   `test_own_player_out_is_never_touched_by_the_handcuff_gate`. An unreachable
+   floor and a pricer that raises change nothing, and that test also asserts the
+   pricer is never called for him.
+2. **Someone else's player pushes only when ALL hold:**
+   - his ruling landed in the last `NON_ROSTER_LOOKBACK_DAYS = 7` days;
+   - his backup is unrostered in ESPN's own current row;
+   - the backup is not himself `OUT` / `INJURY_RESERVE` / `DOUBTFUL` / `SUSPENSION`;
+   - the backup is worth at least `HANDCUFF_PHONE_MIN_GAIN = +1.0` house pts
+     (PROJECTED, rest of season) to YOUR roster.
+
+   The price is the waiver tool's own number (`marginal.build_board`, pool = the
+   candidate backups, ONE board per tick; `price_handcuffs`): the best season-long
+   (add him, drop X) swap, or the pure add into an open active slot. It is never a
+   new score (Rule 2). A held event is still listed in the briefing and the
+   on-box log, with the price that held it (`phone_gate`, `handcuff_gain`). It is
+   never reserved in the ledger, so a later tick inside the window can still push
+   it if the price rises (pinned).
+3. **Truth checks on every injury event** (Rule 6):
+   - the player's CURRENT row must still read OUT/IR, so one he has come back
+     from is skipped and counted in a note;
+   - the CURRENT holder decides YOUR vs someone else's (Achane, dropped 09-30, is
+     no longer "YOUR");
+   - a player YOU acquired after his ruling (an IR stash, a pre-draft OUT you then
+     drafted) is listed but never pushed, because it is not news to you;
+   - only a player's LATEST ruling is listed. Reed carried three crossings, and the
+     briefing named him twice.
+4. **The acquisition label is ESPN's own token:** "a FREE AGENT (add him now)" vs
+   "on WAIVERS (a claim — it clears overnight)". A player ESPN does not list is
+   never offered.
+5. **The gate fails CLOSED and LOUD.** With no own team or a pricer exception,
+   someone else's player is held and the reason is printed on the row.
+   `AlertBoard.price_error` is set, and the tick records **PARTIAL** with the error,
+   so `alerts status` never shows a silenced arm as a healthy `empty`. It never
+   crashes the tick and never pushes. With no resolvable week window no other-team
+   event forms at all, since `handcuff_links` needs a window; the existing preseason
+   note covers that case.
+6. **Cost:** `build_alerts` now reads `weekly_lines` ONCE and hands the map to
+   both `handcuff_links` and `build_board` (`lines=` on both, window-checked by
+   `_check_lines_window`). `_apply_tiebreaks` now hands `build_valuation` the
+   board's own map instead of re-reading the projections table. That re-read cost
+   6.8 s on the 2026-10-05 live DB, on EVERY board, `ziggurat waivers` included:
+   **one board 18.3 s → 11.1 s**, pinned as an exact identity by
+   `test_tiebreak_lines_handover_is_identical`. Verified live in the same session:
+   16 drop rows, 114 swaps and the roster value were identical to 1e-9 between
+   the two paths. A live dry-run alert tick takes **9.0 s**.
+
+**Measured, not asserted.** The Week-4 retro said the gate "would have held 7 of 12"
+without measuring it. Replaying the gate over the ledger's 27 other-team pushes at
+each push's own date (historical view):
+
+| outcome under the gate | n |
+|---|---|
+| held on price (no positive move or no projection; Bowers → Mayer +0.7 < floor) | 16 |
+| never formed (player already back; backup himself out; stale preseason crossing) | 7 |
+| still pushed: Etienne OUT → Kamara, +4.5, the one the session acted on (a Tuesday claim target) | 1 |
+| cannot be replayed (a day's last sync overwrites its intraday status: Warren 08-25, Wright 09-29, Barkley 10-04) | 3 |
+
+One window, chosen after the fact, so the gate ships as a **labelled hypothesis
+with a review date, 2026-11-05**. The page that shows it is `ziggurat alerts
+status`, and the review date announces itself there (the 3.16 pattern).
+**Disclosed limits:**
+- The board OVER-values a bench body (its own static-roster caveat), so a backup QB
+  can clear +1.0 on depth alone. None did in the replay, because every QB backup
+  lacked a projection or a positive move.
+- The feed lags an injury by ≥ 1 day (wk3 finding). A backup can therefore price
+  low on the tick his starter is ruled out and rise the next morning. The 7-day
+  window plus never-reserving a held event is what lets that push arrive a day
+  late rather than never.
+- Own-roster repeats (Reed pushed three times for one injury, each a new weekly
+  crossing) are NOT gated. That is item 3.6's YOUR-player contract, and it is on
+  the 2026-10-15 review's list.
+
+**Not built, recorded:** a per-player repeat suppression for someone else's
+player. Under the price gate a repeat pushes only if the backup still prices,
+which is still an action. Also not built: "this week's opponent" as a gate arm,
+because it names no action the operator can take.
+
+**Review round (same day): one Opus reviewer, 9 minor findings, 0 critical, all
+fixed.** The reviewer confirmed on the live DB that the tiny-pool pricer reproduces
+the full waiver board's best gain and drop exactly (Maye, Charbonnet, Marks; max
+difference 0.0 over 10 shared pairs). It also confirmed the replay, and that the
+first tick after deploy pushes nothing new. Fixed:
+1. An open-slot pure add ignored the position cap. A 4th TE in a 3-TE league
+   priced +24.4 "into your open slot", a move ESPN refuses. It now clears the
+   board's effective cap first, the same fence as the claim planner's phase A.
+2. `horizon_weeks <= 1` was the wrong test for "streamed row": in the final week
+   every row has horizon 1, so every backup read "no positive move". Rows are now
+   keyed on the DROP's position, and a streamed drop (a redundant second D/ST) is
+   re-priced with `season_long_delta`.
+3. "Current holder decides YOUR" turned an IR stash acquired after its ruling into
+   a fresh push. It is now listed but not pushed.
+4. A pricer exception left the tick `empty` (healthy). It is now PARTIAL with the
+   error.
+5. A held row carried "add him now".
+6. The stale-skip note counted crossings no rule could ever have pushed (86 live).
+7. A dead branch, plus the plan sentence describing it.
+8. Five surviving mutants, each now killed by a test. The tiebreak identity test
+   also pins the INPUT map: `lines={}` survived the output-only comparison.
+9. Four doc statements corrected.
+
+Five fixes were re-checked by mutation after the round (re-introduce the bug, run
+the alert and push tests): all killed. **Full suite green after the round: 3,449
+passed, 4 skipped** (3,453 collected).
+
+**Tests:** 32 new test functions, with two of them parametrised:
+- 25 in `test_alerts.py`;
+- 3 in `test_push_run.py`;
+- 4 in `test_marginal.py` (the lines hand-over: identity with the input pinned,
+  accepted, window-refused, `handcuff_links` identity).
+
+The pre-existing handcuff tests were updated to inject a pricer. The production
+pricer is checked end to end against `build_board` on synthetic rosters on four
+paths: full-roster swap, open-slot pure add, a cap-blocked pure add, and a final
+week with a streamed drop.
+**Standing lesson: a phone push that is FALSE is worse than one that is noise.** The
+narrowing gate was the operator's ask; the truth checks are what the ledger
+showed the gate could not be trusted without.
+
 ### 3.17 [Fix] Week-1 cadence tool gaps — four small operator-facing defects (added 2026-09-15, from the Week-1 Monday retro)
 **Why it exists.** Four gaps the first live week produced, none of them worth
 points and all of them worth the operator's trust. None was built during Week 1 by
@@ -7301,6 +7443,24 @@ place; 5.4 is unchanged.
 **SCOPED 2026-09-13 by edge probe E16 and its verification; written into the plan
 2026-09-15. The exchange rate is the deliverable and it is already measured; the
 simulator is deferred behind a human gate.**
+
+> **BUILD GATE ANSWERED 2026-10-05.** The operator pasted the commissioner's early
+> announcement email; the verbatim text is in the gitignored week-4 journal, kept
+> out of this public file as league-private. In substance: the top three are
+> promoted to the Champions tier for the following season, ranked on the
+> END-OF-SEASON standings, with the consolation bracket explicitly counting; and
+> the bottom three are relegated.
+> - **Promotion is the END-OF-SEASON (post-playoff) standings, not the
+>   regular-season record.** The bracket half of this item stands.
+> - `settings_json.consolationLadderDisabled = false`: ESPN plays out every final
+>   place.
+> - The F2 numbers below already assume a third-place game. Measured:
+>   P(top-3 | bye) = p + (1−p)p = 0.756 at p = 0.506 (the 76.0% quoted).
+> - **Inference, to confirm when ESPN publishes the week-15 schedule:** 3rd place
+>   = the semifinal losers' game, rather than a points tiebreak.
+> - **New, and recorded:** the bottom three are RELEGATED, also on end-of-season
+>   standings, consolation bracket included. It does not bind a 3–1 team today,
+>   but it is part of the objective if the season turns.
 
 **The objective is P(top-3 in the PLAYOFF standings).** The operator's promotion
 rule — top three promote to the Champions tier — is **top three FROM THE

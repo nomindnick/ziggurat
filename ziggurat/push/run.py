@@ -231,6 +231,7 @@ def run_alert_tick(
     config=None,
     poster=outbound._urllib_poster,
     push=True,
+    handcuff_pricer=None,
 ) -> dict:
     """One alert tick: pull the news wire, compute alert-worthy events, dedup them
     against the ledger, and PUBLISH-THEN-RECORD the top `cap` new events to the
@@ -248,7 +249,12 @@ def run_alert_tick(
     is not phone-worthy, so it is neither pushed nor reserved, and it stays eligible
     to push should the gate ever be widened at the 2026-10-15 review. It is counted
     in the returned ``withheld_news`` and written to the on-box log with its
-    ``news_type``/``phone_gate``, which is the review's evidence."""
+    ``news_type``/``phone_gate``, which is the review's evidence.
+
+    The item-3.16b handcuff gate works the same way for someone else's
+    ``INJURY_OUT``: a held event is never reserved (so it can still push if its
+    backup's price rises on a later tick inside the gate's window), it is counted
+    in ``withheld_injury``, and its log row carries the price that held it."""
     run_id = runs.start_run(conn, kind="alert", season=season, scope="events", started_at=now)
     runs.reap_orphans(conn, now=now)
     status = runs.STATUS_OK
@@ -257,6 +263,7 @@ def run_alert_tick(
     ntfy_status = None
     new_count = 0
     withheld_news = 0
+    withheld_injury = 0
     try:
         if pull_news:
             try:
@@ -268,7 +275,15 @@ def run_alert_tick(
         board = alerts_mod.build_alerts(
             conn, as_of=as_of, season=season, own_team_id=own_team_id,
             week=week, last_week=last_week, today=today or as_of,
+            handcuff_pricer=handcuff_pricer,
         )
+        if board.price_error:
+            # Item 3.16b: the gate failed CLOSED (every other-team injury held), and
+            # that must read as a PARTIAL run on `alerts status`, never as a healthy
+            # empty tick — a persistent pricer bug would otherwise silence the arm.
+            status = runs.STATUS_PARTIAL
+            msg = f"handcuff gate could not price: {board.price_error}"
+            error = (error + "; " if error else "") + msg
 
         # phone lane = phone_worthy ONLY (the push must name an action — operator
         # decision 2026-08-05; and since item 3.16 an own-roster NEWS item must also
@@ -338,15 +353,18 @@ def run_alert_tick(
         # `phone_gate` ride every row because this log IS the data the item-3.16
         # one-month review (2026-10-15) reads: without them the review can only
         # count what the gate let through, never what it cost.
-        withheld_news = sum(1 for e in board.events if e.phone_gate)
+        withheld_news = sum(1 for e in board.events if e.phone_gate and e.kind == "NEWS")
+        withheld_injury = sum(1 for e in board.events
+                              if e.phone_gate and e.kind == "INJURY_OUT")
         _append_alert_log(season, board.week, {
             "tick": now, "as_of": str(as_of), "candidates": len(board.events),
             "new": new_count, "pushed_new": len(to_push), "overflow": len(overflow),
-            "withheld_news": withheld_news,
+            "withheld_news": withheld_news, "withheld_injury": withheld_injury,
             "events": [{"kind": e.kind, "player": e.player, "headline": e.headline,
                         "dedup_key": e.dedup_key, "severity": e.severity,
                         "phone_worthy": e.phone_worthy, "news_type": e.news_type,
-                        "phone_gate": e.phone_gate} for e in board.events],
+                        "phone_gate": e.phone_gate, "handcuff": e.handcuff_name,
+                        "handcuff_gain": e.handcuff_gain} for e in board.events],
             "notes": list(board.notes),
         })
 
@@ -358,4 +376,5 @@ def run_alert_tick(
     runs.finish_run(conn, run_id, status=status, finished_at=now, events_found=new_count,
                     events_pushed=pushed, ntfy_status=ntfy_status, error=error)
     return {"run_id": run_id, "status": status, "found": new_count, "pushed": pushed,
-            "withheld_news": withheld_news, "error": error}
+            "withheld_news": withheld_news, "withheld_injury": withheld_injury,
+            "error": error}

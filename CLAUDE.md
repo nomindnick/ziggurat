@@ -726,7 +726,11 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   status`), which cuts the Week-1 window from 37 own-roster NEWS pushes to **9**
   while every withheld row still reaches the briefing and the alert log with its
   reason attached; **`INJURY_OUT` is UNGATED by it and always pushes**, pinned by
-  a test that empties the allowlist and asserts the injury arm still fires. New permanent `ziggurat/push/` package is the **egress choke point**:
+  a test that empties the allowlist and asserts the injury arm still fires.
+  **AMENDED 2026-10-05 by item 3.16b: only YOUR player's `INJURY_OUT` is still
+  ungated.** Someone else's player pushes only when his backup is unrostered, can
+  play, and prices ≥ +1.0 house pts for your roster on the waiver tool's own board.
+  That gate is a labelled hypothesis, with a **review date of 2026-11-05**. New permanent `ziggurat/push/` package is the **egress choke point**:
   the Rule-5 **outbound scrub** (a data-driven denylist of this league's other-team
   names, checked before any send — the guarantee that makes a public-by-obscurity
   topic safe), the run-log/dedup helpers, and the orchestration. `marginal.handcuff_links()`
@@ -754,6 +758,37 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   surfaced + fixed an ESPN news-wire 403 (edge now rejects UAs that don't match
   the client fingerprint; urllib's default UA passes). Remaining: real games
   (~Sept 10).
+
+- **3.16b phone lane INJURY_OUT gate — built & tested 2026-10-05** (operator yes
+  the same day). Of the ledger's 32 injury pushes, 27 were about someone else's
+  player, and the journals graded all but one no-action; several were also FALSE.
+  - **The gate:** YOUR player ruled out still always pushes (pinned). Someone else's
+    pushes only when all of these hold:
+    - his ruling is ≤ 7 days old;
+    - his backup is unrostered on ESPN's own current row, and is not himself
+      OUT/IR/DOUBTFUL/suspended;
+    - the backup prices ≥ **+1.0** house pts for your roster
+      (`alerts.price_handcuffs` → `marginal.build_board`, the waiver tool's own
+      number).
+  - **Held events** stay in the briefing and the alert log, each with the price
+    that held it, and are never reserved in the ledger.
+  - **Truth checks on every injury event:**
+    - the CURRENT status must still be OUT/IR (a reversed ruling never pushes —
+      Penix 09-18);
+    - the CURRENT holder decides "YOUR", and a player you acquired AFTER his
+      ruling is listed but not pushed;
+    - only a player's LATEST ruling is listed;
+    - FREE AGENT vs WAIVERS comes from ESPN's own token.
+  - **Replayed over the 27** at each push's date: 16 held on price, 7 never
+    formed, 1 still pushed (Etienne → Kamara +4.5, the one acted on), 3
+    unreplayable.
+  - **Side effect, on every board:** `_apply_tiebreaks` no longer re-reads the
+    projections table (`lines=` hand-over, an exact identity). A board drops from
+    18.3 s to 11.1 s, so `ziggurat waivers` gets ~7 s faster.
+  - **Review:** an Opus review returned 9 minor findings, all fixed: a cap-blind
+    open-slot add, a final-week filter, an IR-stash push, and a pricer failure
+    that read as a healthy tick. The fixes were mutation-checked. Suite green.
+  - Details: `IMPLEMENTATION_PLAN.md` 3.16b.
 
 - **3.7 operating cadence v1 — built 2026-08-04.** The "Weekly operating
   cadence" section below is live: day-keyed workflows (Tue legality+claims, Wed
@@ -1810,8 +1845,12 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    recorded run was a preview — nothing reached the phone**, which is a process
    finding, not an empty week.
 5. **Playoff prep — the rule, stated once, to apply when the standings
-   separate** (measured 2026-09-13, F2; 120,000-draw bracket sim on this
-   league's captured format, `playoffReseed=false`): the **first-round bye
+   separate.** **Promotion is the top three of the END-OF-SEASON standings**,
+   i.e. after the playoffs (the commissioner's announcement, pasted by the
+   operator 2026-10-05; ESPN's consolation ladder is on, so every place is played
+   out). **The bottom three are relegated** on the same standings. The bye
+   rule (measured 2026-09-13, F2; 120,000-draw bracket sim on this league's
+   captured format, `playoffReseed=false`): the **first-round bye
    roughly doubles both objectives** (26.0% vs 12.6% title, 76.0% vs 37.9%
    top-3 — and the 2.0× is an arithmetic identity under no re-seeding, p² vs
    p³, not a simulation finding), while **seeds 3 through 6 are worth EXACTLY
