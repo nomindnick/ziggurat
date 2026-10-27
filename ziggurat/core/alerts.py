@@ -97,10 +97,13 @@ _OWN_BUMP = 0.5
 #: it silently.
 NEWS_PHONE_TYPES = frozenset({"HeadlineNews"})
 
-#: One month from the ship date. The alert status page reads REVIEW DUE once the day
-#: arrives — a review date nobody is reminded of is a review date that does not exist.
+#: One month from the ship date, then re-dated at the first review. The alert status
+#: page reads REVIEW DUE once the day arrives — a review date nobody is reminded of is
+#: a review date that does not exist. Reviewed 2026-10-20 (0 of 93 withheld rows
+#: carried a decision-relevant fact first): kept unchanged by operator decision, and
+#: the next review joins item 3.16b's on 2026-11-05 so one session reviews the lane.
 NEWS_GATE_ADOPTED = "2026-09-15"
-NEWS_GATE_REVIEW_DATE = "2026-10-15"
+NEWS_GATE_REVIEW_DATE = "2026-11-05"
 
 #: The evidence, quoted wherever the gate is disclosed (Rule 6). Re-measured on the
 #: live `alert_ledger` 2026-09-15; item 3.16 recorded 35 pushes / 14 Media from the

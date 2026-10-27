@@ -402,7 +402,7 @@ def test_phone_lane_policy_states_the_rules_and_dates_the_hypothesis():
     assert f"news_type in {sorted(alerts.NEWS_PHONE_TYPES)}" in page
     assert "HeadlineNews" in page
     assert "HYPOTHESIS, not a rule" in page
-    assert "review 2026-10-15 (in 14 day(s))" in page
+    assert "review 2026-11-05 (in 35 day(s))" in page
     # the flip margin is PRINTED and wired to nothing (item 3.16 did not adopt E18's
     # WATCH gate) — the disclosure must say so in the same breath as the number.
     assert "0.018-0.053 house pts/week" in page and "WIRED TO NO GATE" in page
@@ -410,10 +410,10 @@ def test_phone_lane_policy_states_the_rules_and_dates_the_hypothesis():
 
 def test_phone_lane_policy_announces_the_review_when_it_comes_due():
     """A review date nobody is reminded of is a review date that does not exist."""
-    assert "REVIEW DUE 2026-10-15 (TODAY)" in alerts.format_phone_lane_policy(today="2026-10-15")
-    overdue = alerts.format_phone_lane_policy(today="2026-11-01")
-    assert "REVIEW DUE 2026-10-15 (OVERDUE by 17 day(s))" in overdue
-    assert "review 2026-10-15 (in" in alerts.format_phone_lane_policy(today="2026-09-15")
+    assert "REVIEW DUE 2026-11-05 (TODAY)" in alerts.format_phone_lane_policy(today="2026-11-05")
+    overdue = alerts.format_phone_lane_policy(today="2026-11-22")
+    assert "REVIEW DUE 2026-11-05 (OVERDUE by 17 day(s))" in overdue
+    assert "review 2026-11-05 (in" in alerts.format_phone_lane_policy(today="2026-09-15")
 
 
 # ========= item 3.16b: the INJURY_OUT arm's handcuff gate (a dated hypothesis) =========

@@ -402,7 +402,7 @@ def test_alert_tick_pushes_an_own_roster_headlinenews_item(push_db):
 
 def test_alert_tick_withholds_a_media_item_without_consuming_it(push_db, tmp_path, monkeypatch):
     """The item-3.16 gate must route, not consume. A withheld item writes NO ledger
-    row — so widening the gate at the 2026-10-15 review republishes it rather than
+    row — so widening the gate at a review republishes it rather than
     finding it already marked seen (the item-3.6 publish-then-record lesson: the
     ledger records a side effect, never an intention)."""
     monkeypatch.setattr(push_run, "ALERTS_DIR", tmp_path / "alerts")
@@ -450,15 +450,15 @@ def test_alert_status_page_describes_the_lane_and_dates_the_review(push_db):
     page = runs.format_status(push_db, kind="alert", today="2026-10-01")
     assert "no push runs recorded yet." in page      # printed even with no runs
     assert alerts_mod.format_phone_lane_policy(today="2026-10-01") in page
-    assert "INJURY_OUT" in page and "UNGATED" in page and "review 2026-10-15" in page
+    assert "INJURY_OUT" in page and "UNGATED" in page and "review 2026-11-05" in page
 
     runs.start_run(push_db, kind="alert", season=2026, scope="events",
                    started_at="2026-09-10T06:00:00")
-    assert "review 2026-10-15" in runs.format_status(push_db, kind="alert", today="2026-10-01")
+    assert "review 2026-11-05" in runs.format_status(push_db, kind="alert", today="2026-10-01")
     # the BRIEFING page is a different lane and must not carry the alert lane's rules
     runs.start_run(push_db, kind="brief", season=2026, scope="w2",
                    started_at="2026-09-10T06:00:00")
-    assert "review 2026-10-15" not in runs.format_status(push_db, kind="brief")
+    assert "review 2026-11-05" not in runs.format_status(push_db, kind="brief")
 
 
 def test_alert_log_never_touches_operator_intel():

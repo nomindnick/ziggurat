@@ -546,8 +546,11 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
     `check_legality` had this backwards — a Q occupant was the suite's
     canonical ILLEGAL roster — and was fixed the same day. Entry
     ({OUT, INJURY_RESERVE}) and occupancy (entry ∪ {Q, D}) are now separate
-    rules in `league/state.py`. Still not seen in this league: the INVALID
-    transition itself (an occupant who comes back healthy).
+    rules in `league/state.py`. **The INVALID transition was first seen
+    2026-10-07..10-10** (team 4's occupant healed in the slot): its two
+    lineup batches went through while invalid, and it fixed the slot a
+    minute before adding, so whether ESPN blocks acquisitions on an invalid
+    roster is still unobserved (plan 3.8, addendum 2026-10-12).
   (DOUBTFUL has since appeared; that half of the next sentence is historical.)
   DOUBTFUL/PUP/NFI
   remain UNOBSERVED → INELIGIBLE, watched rather than confirmed: the report fires
@@ -722,7 +725,8 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   **AMENDED 2026-09-15 by item 3.16: own-roster is no longer sufficient for the
   NEWS arm** — it must also carry ESPN `news_type` in the allowlist
   `{HeadlineNews}` (`alerts.news_phone_gate`, a LABELLED HYPOTHESIS with a
-  self-announcing **review date of 2026-10-15**, printed on `ziggurat alerts
+  self-announcing **review date of 2026-10-15** (reviewed 2026-10-20: kept
+  unchanged, next review **2026-11-05**), printed on `ziggurat alerts
   status`), which cuts the Week-1 window from 37 own-roster NEWS pushes to **9**
   while every withheld row still reaches the briefing and the alert log with its
   reason attached; **`INJURY_OUT` is UNGATED by it and always pushes**, pinned by
@@ -1598,18 +1602,23 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    `ziggurat stream` is where that decision belongs. (0 is not "unlimited"
    here — at 0 the tool prices nothing and says so.) The roster-legality
    precheck runs FIRST and is the point:
-   ESPN blocks ALL transactions while a roster is illegal. An IR-slot
+   ESPN blocks claims and adds while a roster is illegal (its documented
+   rule; no refusal seen here yet). Lineup moves still go through: team 4
+   set its lineup twice with an invalid IR slot (observed 2026-10-08/10,
+   plan 3.8 addendum 2026-10-12, which narrowed this from "blocks ALL
+   transactions"). An IR-slot
    occupant who turns QUESTIONABLE or DOUBTFUL may STAY (ESPN's documented
    rule; corrected 2026-09-24 — this step used to say the opposite). What
    breaks legality is an occupant with NO designation (healthy again) or a
    suspension, or an oversized active roster. With room on the bench, the
    healed player's move costs nothing, but it must come FIRST: ESPN processes
-   nothing until it is made. On a full roster the tool refuses and proposes a
+   no claim or add until it is made. On a full roster the tool refuses and proposes a
    fix: either a costless swap that puts an OUT bench player into the freed IR
    slot, or a drop. Relay it to the operator, re-sync after they apply it, and
    re-run. Putting a player INTO IR uses the "Add to IR" button on the ESPN
-   website (observed 2026-09-24; the MOVE menu offered IR to nobody). How a
-   player is taken OFF IR has not been observed yet.
+   website (observed 2026-09-24; the MOVE menu offered IR to nobody). Taking
+   a player OFF IR is recorded as an ordinary lineup move (team 4, 10-10);
+   which website control does it has not been observed.
    **Every `ziggurat waivers` run is ARCHIVED (item 4.2b): the run captures a
    decision freeze.** The plan, the priced swap matrix, every evaluated
    candidate row, the pool as priced and the roster are frozen under the

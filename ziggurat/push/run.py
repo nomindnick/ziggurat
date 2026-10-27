@@ -247,7 +247,7 @@ def run_alert_tick(
 
     A NEWS item the item-3.16 gate holds back never reaches this ledger at all — it
     is not phone-worthy, so it is neither pushed nor reserved, and it stays eligible
-    to push should the gate ever be widened at the 2026-10-15 review. It is counted
+    to push should the gate ever be widened at a review. It is counted
     in the returned ``withheld_news`` and written to the on-box log with its
     ``news_type``/``phone_gate``, which is the review's evidence.
 
@@ -351,7 +351,7 @@ def run_alert_tick(
 
         # on-box record (append-only), even when nothing pushed. `news_type` and
         # `phone_gate` ride every row because this log IS the data the item-3.16
-        # one-month review (2026-10-15) reads: without them the review can only
+        # review (``alerts.NEWS_GATE_REVIEW_DATE``) reads: without them the review can only
         # count what the gate let through, never what it cost.
         withheld_news = sum(1 for e in board.events if e.phone_gate and e.kind == "NEWS")
         withheld_injury = sum(1 for e in board.events

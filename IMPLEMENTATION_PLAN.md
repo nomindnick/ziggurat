@@ -3547,6 +3547,67 @@ does not change the verdict, because the leading factor is measured at zero.
 > `waivers` claim reason — at these stakes it would report an absence of
 > opportunity in the grammar of an absence of behaviour, on the exact page that
 > says claims are free. **Reopen on the first lost contested claim.**
+>
+> ---
+>
+> **Addendum 2026-10-12 — the INVALID transition is OBSERVED for the first time
+> (team 4, 10-07..10-10), and it narrows one sentence of the cadence.** Appended
+> rather than rewritten: the 09-24 entries above are what was known then. Source:
+> `league_player_state` and `league_transactions`, read 2026-10-12; the Week-5
+> journal carries the day-by-day notes.
+>
+> **(1) What happened.** Team 4's IR occupant entered the slot at OUT (09-24
+> snapshot), then read QUESTIONABLE 09-29..10-01, OUT 10-02..10-05, QUESTIONABLE
+> 10-06, and **no designation (`ACTIVE`, `injured` false) from the 10-07
+> snapshot**, still in the IR slot through the 10-09 snapshot. Under ESPN's
+> documented occupancy rule that roster was INVALID for about three days, and
+> `ir-check` flagged it (journal, 10-08). On 10-10 at 08:46:02 PT team 4 moved
+> him from IR to a starting slot, in the same second as a drop, then made two
+> free-agent adds (08:47:05 and 08:55:31). Every row is `EXECUTED`.
+>
+> **(2) Lineup moves are NOT blocked by an invalid IR occupancy. OBSERVED.**
+> Team 4 made two LINEUP batches while the healed occupant sat in the slot:
+> 10-08 14:35:15 PT and 10-10 08:35:43 PT, three players each, all six
+> `EXECUTED`. (Its 09-30 lineup batch, with the occupant QUESTIONABLE, agrees
+> with the documented rule but adds nothing: a Q occupant is valid.)
+>
+> **(3) Whether an invalid roster blocks ACQUISITIONS is still UNOBSERVED.**
+> ESPN's Fan Support page implies it does: a Q/D occupant's manager "can make
+> claims/add players", and a healed occupant makes the roster "INVALID". Team
+> 4's sequence is consistent with that (the fix came 63 seconds before the first
+> add), but team 4 never attempted an add while invalid, so no refusal is on
+> record. A fix that precedes an add is what a manager would do whether or not
+> ESPN forced it. What would settle it: a refused or failed acquisition row from
+> a team whose occupant is invalid, or the operator reading the website's refusal.
+>
+> **(4) ESPN's `isTransactionLocked` does not carry the invalid state.** It read
+> false for team 4 on every snapshot 10-04..10-12, including the three invalid
+> days, so it is not a proxy for "this roster is blocked". The occupancy verdict
+> in `ir-check` remains the only signal we have.
+>
+> **(5) Taking a player OFF IR is an ordinary LINEUP row** (IR → a lineup slot),
+> recorded like any other lineup move. Which website control a manager uses to
+> do it is still unobserved; the operator has not had to.
+>
+> **What changes, and what does not.**
+> - CLAUDE.md, Tuesday step 2, said "ESPN blocks ALL transactions while a roster
+>   is illegal". It now says: acquisitions are blocked per ESPN's documentation
+>   (not yet seen here); lineup moves are not (observed). CLAUDE.md's 3.8
+>   bullet, which said the INVALID transition had never been seen, is updated
+>   the same day.
+> - No recommendation moves. `check_legality` already treats a no-designation
+>   occupant as INVALID and proposes the move-first fix; this is the documented
+>   rule it implements, now seen once.
+> - **Operator-facing text that is now stale, NOT changed today** (code, with
+>   tests that quote it): the illegal-roster page in `core/waiver.py` (~2021)
+>   says "ESPN is blocking all transactions"; `ziggurat league ir-check`
+>   (`league/state.py` ~2115) still prints "Still unobserved here: the INVALID
+>   transition … Record it in IMPLEMENTATION_PLAN.md §3.8 when it happens",
+>   which this note does; and the comments at `waiver.py` ~170 and
+>   `league/state.py` ~1626 / ~1705 say the same. A text-only fix, waiting on the
+>   operator's yes.
+> - Still not observed here: the acquisition block itself, and a DOUBTFUL
+>   occupant held in the slot.
 
 ### 3.11 [Build] Draft-engine integration — the composed engine ships as the default
 
@@ -4836,6 +4897,17 @@ ledger shows the push count in the expected range.
 > to look.** The alert log carries `news_type`/`phone_gate` for exactly that reason,
 > and the first counter-example (12 bylined `Story` rows withheld) is written down
 > above before anyone can claim the gate was obviously right.
+>
+> **Reviewed 2026-10-20 (five days late; operator decision the same day): KEPT
+> UNCHANGED, next review 2026-11-05**, the 3.16b date, so one session reviews the
+> whole phone lane. Evidence over the 35 days since adoption: 0 of 93 withheld
+> own-roster NEWS rows carried a decision-relevant fact first; 0 of 46 withheld
+> Media rows were bylined; the NEWS lane fell from 2.85 to 0.49 pushes/day; every
+> own-roster HeadlineNews reached the phone (17 of 17). n is one window and one
+> roster, graded against session-written journals. The optional watch list (option
+> E) was DECLINED by the operator. `NEWS_GATE_REVIEW_DATE` moved 2026-10-15 →
+> 2026-11-05 (`core/alerts.py`; the two tests that pin the date re-dated).
+> Details: gitignored `intel/research/news-gate-review-2026-10-20.md`.
 
 ### 3.16b [Fix] The phone lane's INJURY_OUT arm — a handcuff gate, and three truth checks (added 2026-10-05, from the Week-2–4 retros; amends 3.6 and 3.16)
 **Status: BUILT & TESTED 2026-10-05** (operator: "go ahead and implement the
@@ -5672,6 +5744,307 @@ leakage test; (b) the practice-report read is either wired into the GTD ladder
 with its base rate quoted, or recorded as measured-not-worth-it; (c) the
 return-discount measurement on 2021–23 is written down with intervals and a
 deploy/retire decision.
+**Update:**
+> _[To be completed]_
+
+### 3.20 [Fix] D/ST brackets priced as an expectation, not at a point estimate (added 2026-10-21, operator decision, from the operator's "why do our projections differ from ESPN?" question)
+
+**Why it exists.**
+- Sleeper serves ONE number each for a defence's points allowed (PA) and yards
+  allowed (YA). `valuation.weekly_lines` prices that number through
+  `scoring.score`, i.e. through cliff-edged brackets.
+  - 290 projected yards earns the full +2 (the 200–299 band); 311 earns 0.
+  - The value of a bracket at the mean is not the mean of the bracket. ESPN
+    serves a distribution over the bands, and
+    `espn_projections.house_points` already prices it as an expectation.
+- **Measured.** Probes are in gitignored
+  `intel/research/espn-vs-house-2026-10-21/`.
+  - **Week 7:** the five defences Sleeper projects under 300 YA (HOU, MIN,
+    CLE, DEN, TEN) are exactly the top five of the house D/ST board.
+    - They average **+2.2** bracket pts in house pricing against **+0.5**
+      under ESPN's spread.
+    - HOU: +3.0 against −0.46. The mean house − ESPN bracket gap over 28
+      teams is +0.59.
+  - **2026 weeks 1–6** (Tuesday-vintage projections against realised
+    `team_defense`, n=186):
+    - Residual sd: **PA 8.9 pts, YA 77 yds**. The bands are 4–11 pts and
+      50–100 yds wide.
+    - Projected YA falls inside ±25 of the 300 cliff in 27% of team-games.
+    - Projected YA is under 300 in **7%** of team-games; realised YA is under
+      300 in **37%**.
+  - The error therefore runs BOTH ways: it inflates the few sub-300
+    projections and deflates the many in 300–349.
+- **Every surface that quotes a D/ST house number inherits it:**
+  - the `waivers` streaming lane. Tuesday 10-20's top three (Browns +2.5,
+    Broncos +2.3, Titans +2.3) were all sub-300 cliff teams, and so was the
+    house/FP split on the Titans (house +2.3, FP DST14);
+  - `stream`'s HOUSE column, and its no-board fallback composite. That
+    composite was the ACTIVE ranker in weeks 6 and 7, because the stored FP
+    file lagged a week;
+  - `lineup` totals and win probability, on both sides of the matchup;
+  - `marginal`'s current-week K/DST horizon;
+  - the briefing.
+- On 10-21 the operator was read "house Browns 8.6 v Chiefs 5.5"; most of
+  that 3.1 is the cliff (wk07 journal, D5 correction).
+
+**What this item is NOT.**
+- It does not SELECT defences on variance, tails or bracket distributions.
+  That is measured dead and sits on the Phase-4 stop list ("the null is
+  about the decision, not the algebra"). This item corrects the MEAN.
+- By linearity of expectation, E[PA bracket + YA bracket] needs only the two
+  marginals. The two brackets' measured correlation (+0.59, edge program)
+  therefore does not enter. It would matter only for a variance, and nothing
+  here prices one.
+- ESPN's band frequencies are NOT wired into any decision (item 3.14's rule
+  stands). They are a read-only validation reference.
+- The FP weekly board stays the primary `stream` ranker.
+- Kickers are out of scope. Distance buckets are expected COUNTS (linear),
+  and their open defect is item 3.11's unbucketed `fgm` residual. Offense is
+  linear too. **PA/YA are the only point-estimate-through-bracket inputs on
+  the house spine.**
+
+**Design.**
+1. **`scoring.py` gains an expectation operator.**
+   - It takes a distribution as (value, probability) pairs per bracket input
+     and returns E[bracket] through the existing `_bracket_points`.
+   - Rule 2 holds: the bracket numbers stay only in `scoring.py`, which never
+     learns a distribution family.
+   - `score` / `score_dst` (realised scoring) are untouched. The 143/143
+     box-score reconciliation and the scoring goldens pin that.
+2. **The spread model is a LABELLED HYPOTHESIS in `core/dispersion.py`.**
+   - It is centred on Sleeper's point estimate, discretised to whole
+     points/yards, and truncated at 0.
+   - Default family: normal for both inputs, with width fitted on 2026 weeks
+     1–6 Tuesday vintage. Every reason quotes n and the dates.
+   - No 2021–25 Sleeper D/ST projection carries PA/YA, so history cannot
+     supply the Sleeper-specific width.
+   - History CAN supply PA's SHAPE: 2021–25 realised PA around the
+     `game_odds` closing-line implied opponent points, n ≈ 2,800 (football
+     scores are lumpy at 3/7). Adopt an empirical shape only if it moves the
+     live board's expected bracket by more than 0.1 pt.
+   - The measured YA level bias (residual mean −14 yds) is REPORTED, never
+     applied. Correcting Sleeper's level is a different claim, and fitting
+     it in-sample is tuning.
+3. **One seam.**
+   - `valuation.weekly_lines` prices DST rows through the expectation by
+     default (`dst_pricing="expected"`). `"point"` stays as an explicit
+     keyword. `totals["bracket_pts"]` carries the expected contribution.
+   - The draft path (`draft.simulator.load_board`, via `build_valuation`, and
+     `draft.grader`) passes `"point"` explicitly. The frozen 2026-08-30 board
+     and `test_the_live_board_still_matches_the_frozen_board` stay valid.
+     Next season's draft prep flips that one keyword; record it beside
+     Rule 8's retention note.
+   - The D/ST sigma prior (σ = 5.29 + 0.153×proj, fitted on REALISED scores)
+     is unchanged; only its input moves.
+4. **Rule 6.** Every renderer that prints a D/ST house number says once that
+   the brackets are priced over a measured spread, with the hypothesis label.
+5. **Validation, pre-registered** in a dated note under `intel/research/`
+   BEFORE the first comparison is read.
+   - (a) Modelled band probabilities against ESPN's, on any week ESPN's bands
+     are read. Reported, not gated: they are different forecasters.
+   - (b) Held-out weeks 7+: realised house D/ST points (`team_defense`
+     through `score_dst`) against both pricings. Measures: mean squared error,
+     calibration slope/intercept (item 4.7's method), Spearman.
+   - (c) A decision diff on the archived Tuesday captures: how many D/ST lane
+     orderings, fallback stream ranks and lineup D/ST seats change.
+   - **The default switches on correctness grounds** (pricing a cliff at a
+     point is wrong whenever the outcome is uncertain). The held-out check is
+     a guard against a mis-specified spread, not an edge claim.
+   - Revert to `"point"` only if (b) reads clearly WORSE.
+   - Power, stated now: weekly D/ST sd ≈ 6.6 and ~28 team-games a week, so
+     only a large difference is detectable by week 10.
+
+**Value, stated on the card.**
+- Unmeasured, and likely small in points: the FP board, not this number,
+  chooses the streamed D/ST, and the D/ST slot is one seat in nine.
+- Currency, should it ever be measured: +1.0 house pt/wk = +2.21 pp P(title).
+- The case is Rule 6: the house D/ST numbers read aloud every Tuesday are
+  wrong in a known direction near a cliff.
+- **Timing:** before the Tue 10-27 workflow if a session has room; nothing
+  breaks if it waits.
+
+**Done when:**
+- (a) the expectation operator has tests: a point mass reproduces
+  `score_dst` exactly; a
+  hand-computed spread across the 300 cliff matches; realised scoring is
+  byte-unchanged;
+- (b) the spread hypothesis is fitted and labelled in `dispersion.py`, with
+  n and dates;
+- (c) `weekly_lines` defaults to `"expected"`, the draft path is pinned to
+  `"point"`, and the frozen-board check is green;
+- (d) the pre-registration is frozen, and the first held-out read (after
+  week 9) is written down with a keep/revert decision;
+- (e) the renderers label the pricing, and CLAUDE.md's status names the item.
+
+**Update:**
+> _[To be completed]_
+
+### 3.21 [Experiment] Game dossiers — per-player game analysis by subagents, journaled as graded opinions (added 2026-10-25, operator request, from the Week-7 MNF FLEX question)
+
+**Why it exists.**
+- Sun 10-25, ~18:30 PT: down 19.2 with only Lamb (FLEX, DAL @ PHI MNF) left.
+  The operator asked about the game itself:
+  - is the defence tough;
+  - will Lamb get targets and catch them;
+  - what the projections might not anticipate;
+  - is a low-projection, high-upside "wild card" worth a swing at a 15% win
+    chance?
+- The session answered from data we already hold (wk07 journal, D19):
+  - PHI is 3rd-most generous to WRs (38.3 house pts/g v 32.2);
+  - Lamb averages 11.5 targets/g, catches 70% and scores 21.9 house pts/g
+    REALISED;
+  - PHI's slot CB and an edge rusher are OUT and Hurts is on IR;
+  - the line moved PHI −3 → DAL −4.5 (total 43.5), which raises the
+    game-script risk;
+  - a long-shot test on REALISED 2021–25 weeks (below).
+- The answer CONFIRMED the obvious start; it changed nothing. The operator
+  found it the most useful read of the week and asked that it become
+  standing practice:
+  - for starters AND waiver/free-agent pickups;
+  - run by subagents;
+  - carrying our own observations forward from week to week.
+- **The operator's second observation is the real defect it exposes: our
+  skill-position number does not move with the matchup and the others do.**
+  - That is item 3.2's finding: the Sleeper feed is a FLAT SEASON RATE
+    (week-to-week CV ~1%). The number on our card knows nothing about who
+    the player faces.
+  - ESPN's weekly projection (printed beside ours since 3.17b) and FP's
+    weekly ranks are week-specific. Tonight they agreed with ours on START
+    and disagreed only on size (house 17.3 v ESPN 18.5 v FP WR5).
+
+**What earlier measurement says this can and cannot buy. Inherit it; do not
+re-derive it.**
+- **The matchup half is mostly priced already.**
+  - Item 4.6: a market game-environment multiplier changes seated REALISED
+    points by ≈ −0.14/wk (CI covers 0, 2021–23).
+  - A defence-vs-position term reads +0.27 [−0.0004, +0.54], which this
+    season is ~6× too short to grade.
+  - FP and ESPN already carry the matchup, and the operator can read both.
+  - **A dossier that re-rates a matchup is re-deriving the consensus.**
+- **The role half is the largest prize measured and the least reachable.**
+  - E19: perfect role foresight is worth +1.5 house pts/wk in lineup units
+    and +5.4/wk on the waiver shortlist.
+  - Every obtainable STATISTICAL signal recovers 0% of it.
+  - Film and beat reading were "not tested, and not judged". This item is
+    the first test of that arm.
+- **The narrative experiment (09-23..10-20) says where an outside read
+  actually paid:**
+  - platform rules (ESPN's IR rule changed an action);
+  - availability facts from primary sources (Reed's prognosis, Jacobs'
+    suspension arithmetic), which our ESPN wire carried late or never;
+  - "who gets the work" football reads went 3 for 10;
+  - verdict INCONCLUSIVE at tiny n.
+- **The long-shot question has a measured answer** (REALISED 2021–25 REG,
+  each week bucketed by the player's average in his OTHER games that
+  season): a WR whose typical game is 5–8 house pts reaches 30 in **0.2%**
+  of weeks; 8–11: **0.7%**; 11–14: **2.8%**; 17–20: **6.3%**; 20+:
+  **19.1%**. RB and TE follow the same pattern.
+  - Low projections do not carry bigger booms, only smaller ones.
+  - The underdog posture's ceiling lean is a tiebreak between SIMILAR
+    means; it never justifies giving up 10 points of mean.
+  - Every dossier that touches a "swing for variance" question quotes this
+    table.
+
+**So the dossier's plausible value, in order:**
+1. **Earlier availability and role facts** from primary sources: practice
+   reports, coach and beat quotes with URL and date, game-day inactives
+   (read from ESPN's per-team injury feed, which is complete and
+   timestamped; its per-game summary caps at five per team).
+2. **Explanation** for a novice operator (Rule 6). This is worth having even
+   when it changes nothing, as on 10-25.
+3. **Near-tie decisions**, where a 1-point projection gap is inside the feed's
+   refresh noise (3.17b) and a role or script read is the only tiebreak.
+
+The re-rated matchup comes last, because it is mostly what FP and ESPN
+already say.
+
+**Design.**
+- **Triggers, not every player.** A dossier runs for:
+  - each lineup-card NEAR TIE (< 1.0 pt), or a pair whose order house, ESPN
+    and FP disagree on;
+  - each numbered Tuesday claim, plus its top refusal: "renting a week or
+    buying a role?" (cadence step 5). First case: the Croskey-Merritt
+    revisit, Tue 10-27;
+  - each starter with a Q/D designation or role news;
+  - each late-window swing question like 10-25's.
+  - A disagreement between our flat number and BOTH week-specific numbers is
+    a trigger. It is not evidence that ours is wrong.
+- **One fixed template**, so dossiers are comparable and gradable:
+  - **Usage:** targets/share, catch rate, snaps, carries, air yards — last 3
+    games and the season, REALISED.
+  - **Opponent:** house pts allowed to the position, with league rank, and
+    the opposing injuries that matter (secondary and pass rush for a
+    receiver; front for a back).
+  - **Environment:** spread, total, implied team total, line movement,
+    weather.
+  - **Script:** how this player's usage moved with his team's game state in
+    his own log.
+  - **Availability:** designation, practice trajectory, sourced quotes.
+  - **Numbers:** ours, ESPN's and FP's, side by side, each labelled with its
+    kind.
+  - **Verdict:** START X over Y, or ABOVE/BELOW our projection. It carries
+    a confidence and a **falsifier stated in POINTS**, against the
+    week-specific baseline. Claims whose decisive input is the consensus
+    number get a tag, because they test our feed, not the dossier (all three
+    are the narrative experiment's re-run lessons).
+- **Two halves, built in this order.**
+  - **(a) A deterministic FACT SHEET first:** a thin `ziggurat dossier
+    facts --player … --week …` over the as-of accessors, with logic in
+    `core/` (Rules 1, 3).
+    - Why first: probe hygiene. `weekly_stats` holds two retrieval vintages
+      of every 2021–23 row, and on 10-25 a raw `team_defense` query
+      returned each game up to 7×. Subagents doing SQL arithmetic will
+      double-count.
+    - The 10-25 scratch scripts are the prototype.
+  - **(b) The qualitative half, by subagents** (Opus; one per dossier, in
+    parallel). Each reads the fact sheet, the web (NFL.com injuries, team
+    sites, beat reporters, ESPN's per-team injury feed) and the player's
+    carry-forward file.
+    - Every factual claim carries a URL and a date, and a fact-check pass
+      verifies them (the Cowork report's pattern).
+- **Carry-forward memory** (gitignored, Rule 5: colleague and league-private
+  material stays in `intel/`):
+  - one file per player, `intel/players/<espn_id>.md`, appended each week
+    with the dossier's verdict and, on Monday, its graded outcome;
+  - per-team notes for durable context, `intel/teams/<TEAM>.md` (e.g.
+    "PHI: Hurts IR from wk6");
+  - the next dossier reads "we said X in wk N; it went Y" before it writes.
+- **Grading (the 5.2 discipline; pre-registered and sha256-frozen before the
+  first graded dossier, as 4.2c was):**
+  - every verdict is journaled PRE-game as a labelled hypothesis;
+  - Monday grades it against REALISED house points with the per-direction
+    BASE RATE (BELOW wins > 50% alone, because points are right-skewed;
+    from the narrative GRADING.md);
+  - lead time is measured against FP rank and ownership moves;
+  - tallies are kept per claim family (availability / role / matchup /
+    script);
+  - promotion goes through the `intel/heuristics.md` ladder only.
+- **Fences.**
+  - A dossier never re-orders the waiver chain or seats a player silently.
+    It is an input the session weighs and DISCLOSES beside the tool's line,
+    as `candidates`' USAGE / ROLE EVIDENCE is (cadence step 3).
+  - Rule-6 hard gates (OUT / bye) are untouched.
+  - Every number in a dossier says PROJECTED or REALISED (item 4.7).
+
+**Honest expectation, written before the first dossier.**
+- At ~10–20 graded verdicts a week, 5–6 weeks gives n ≈ 60–100. That is
+  enough to see a claim FAMILY with lead time; it is not enough to prove a
+  points edge.
+- The likely outcome is "inconclusive overall, one family worth keeping".
+  Availability is the prior favourite.
+- The explanation value (2) is real even if the points tally is null.
+  Record it as a separate, ungraded benefit; never present it as an edge.
+
+**Done when:**
+- (a) the fact-sheet command exists with a leakage test and a de-duplication
+  test;
+- (b) the template, the subagent prompt and the pre-registered scorecard are
+  frozen in `intel/research/dossiers-3.21/`;
+- (c) the first triggered week's dossiers are journaled pre-game and graded
+  the following Monday;
+- (d) after ~5 weeks, a keep / narrow / retire decision per claim family is
+  written here.
+
 **Update:**
 > _[To be completed]_
 
