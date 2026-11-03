@@ -6048,6 +6048,104 @@ already say.
 **Update:**
 > _[To be completed]_
 
+### 3.22 [Fix] A returning IR occupant is priced as gone for the season — every add at his position is inflated (added 2026-11-02, operator decision, from the Week-7/8 journals)
+
+**Why it exists.**
+- `marginal.build_board` values the roster through `lineup.active_players`
+  (`core/marginal.py:2331`, `core/lineup.py:220`), which drops every
+  `lineup_slot == "IR"` row before pricing. That is right for a season-ending
+  occupant. It is wrong for one who is coming back: the board prices the
+  roster as if he were gone for the whole horizon, so any add at his position
+  fills a hole that will not exist once he returns.
+- **The feed already knows he is coming back.** On 2026-11-02 the projection
+  feed carried David Montgomery (QUESTIONABLE, in our IR slot) at 11.3 house
+  pts in week 9 and 10.2–11.9 in every week through 18. The board never reads
+  those rows.
+- **Measured twice by hand, as an A/B** (`build_board` run with Montgomery
+  stripped from IR, as shipped, and again with him on the bench; weeks 8–17,
+  PROJECTED):
+
+  | Date | Add | As shipped | Montgomery counted |
+  |---|---|---|---|
+  | Tue 10-27 | Rico Dowdle (RB) | chain **#1**, pure add **+4.70** | no positive swap row |
+  | Tue 10-27 | Jacory Croskey-Merritt (RB) | pure add +3.70 | no positive swap row |
+  | Wed 10-28 | Tyrone Tracy Jr. (RB) | FREE-AGENT GRAB **#1**, +2.13 | no positive swap row |
+  | Wed 10-28 | Tyler Allgeier (RB) | ← Metcalf +1.44 | no positive swap row |
+  | Tue 10-27 | Jacoby Brissett (QB, control) | pure add +3.95 | pure add +3.81 |
+
+  - The control at another position barely moves, which is what pins the
+    effect on the IR occupant.
+  - The week-7 Croskey-Merritt +4.9 (wk07 D15) was the first sighting,
+    flagged as "inferred, not A/B-tested" at the time.
+- **On two consecutive days the tool's #1 line was this artefact.** The
+  session caught both only because it re-ran the board by hand, with a script
+  that lived in a session scratchpad and is now gone. A novice operator
+  cannot smell this (Rule 6).
+- **Other surfaces that inherit it:** `alerts.price_handcuffs` (item 3.16b
+  prices a backup on the same board, so the phone gate can over-price a
+  handcuff at an IR occupant's position), the Wednesday briefing's claim list,
+  and `ziggurat marginal`. `lineup` is NOT affected: an IR player cannot be
+  started, and excluding him there is correct.
+
+**What this item is NOT.**
+- It does not change ESPN legality. `waiver.py`'s precheck recounts IR from
+  the raw rows and stays as it is. That count (16 active + 1 IR) is a rule;
+  this item is about VALUE.
+- It does not forecast return dates. The feed's own weekly rows are the
+  return signal (zero or absent while he is out, populated from his return),
+  the same coverage test item 3.2 already uses (`WeeklyLine.played_weeks`).
+- A season-ending occupant (no forecast row left in any remaining week, the
+  item-3.2 `SEASON_OVER_EVIDENCE` case) stays excluded, exactly as now.
+
+**Design.**
+1. **Price the occupant from his own feed rows.** `build_board` carries an
+   IR occupant who has forecast rows inside the window into `V(K)`, priced
+   week by week from those rows. In weeks with no row he contributes 0.
+2. **Enforce the slot cost of his return.** He comes off IR only into an
+   active slot. From his first forecast week, the roster sheds its cheapest
+   active body (the drop board's own minimum, recomputed per candidate roster
+   `K`), so an add is never credited with a 17th body. This is the part the
+   hand A/B ignored ("on the bench" = 17 bodies), so the true number sits
+   between the two boards above.
+3. **One seam.** The change lives in `build_board`'s roster assembly. Swap
+   rows, `value_after` (item 3.4b's chain) and `price_handcuffs` all read
+   `V(K)` and inherit the fix with no code of their own.
+4. **Rule 6.** Every page that prices an add at the occupant's position says
+   once, unconditionally: "<player> (IR) is priced as returning from week N
+   on the feed's rows; his return costs one active slot." A page where the
+   occupant has no forecast row left says he is priced as gone, and why.
+5. **A disclosed fallback while unbuilt:** none. The session keeps running the
+   A/B by hand (priors and `intel/heuristics.md`, 2026-11-02), and the
+   journal records when it moves a line.
+
+**Value, stated on the card.**
+- Small in points. Obeying the two inflated #1 lines would have spent a
+  claim and a roster slot on a non-starter and forced an extra drop at
+  Montgomery's return. Neither would have started over Gordon in week 8
+  (FP RB30 / no game).
+- The case is Rule 6: the tool's top line was wrong twice in two days, in a
+  known direction, and only a hand re-run caught it.
+- **Timing:** it bites only while a returning player sits in the IR slot,
+  which is now (Montgomery, est. return week 9). Before the Tue 11-03
+  workflow if a session has room; otherwise the hand A/B covers it.
+
+**Done when:**
+- (a) a test where an IR occupant with forecast rows makes a same-position
+  add's gain fall, and a different-position add's gain stay within a stated
+  tolerance (the Brissett control);
+- (b) a test that the return sheds one body, so `V(K)` never counts 17
+  active players in any week;
+- (c) a test that a season-ending occupant (no rows left) prices exactly as
+  today, so his row is byte-unchanged;
+- (d) the live board re-run on the 10-27 and 10-28 captures: Dowdle, Tracy,
+  Allgeier and Croskey-Merritt no longer price as top lines, and Brissett
+  stays positive;
+- (e) the renderers print the disclosure, and CLAUDE.md's status names the
+  item.
+
+**Update:**
+> _[To be completed]_
+
 ---
 
 ## Phase 4: Backtest & Signal Program (rolling; scoped by Checkpoint 1)
