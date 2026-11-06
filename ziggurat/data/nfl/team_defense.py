@@ -23,6 +23,11 @@ opponent scored against *our* offense count against our D/ST? ESPN: no) is
 deferred to item 3.8; v1 charges the opponent's full final score. The audit
 columns ``team_score``/``opp_score`` are retained so 3.8 can refine without
 re-ingesting. See intel/research/ingestion-1.5-design.md §5.
+
+Measured 2026-11-05 (mid-season review Q17): ESPN's points allowed EXCLUDES
+defensive TDs scored against the opponent's offense (−6, PAT still charged)
+and safeties (−2); special-teams return TDs still count, per ESPN's
+documented rule. The derivation is not yet changed (item 3.8 deliverable 6).
 """
 
 import pandas as pd

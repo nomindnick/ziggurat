@@ -527,6 +527,7 @@ def test_an_asset_with_no_download_url_is_refused_rather_than_requested():
         ff_opportunity._open(asset.url)
 
 
+@pytest.mark.canonical_archive_dirs  # compares the REAL default; writes nothing
 def test_the_mirror_path_is_dated_and_lives_under_the_gitignored_data_tree():
     """A bare `ep_weekly_2026.parquet` would silently become a DIFFERENT file on
     the next download, and the vintage the database describes would exist nowhere.

@@ -48,6 +48,124 @@ def _backtest_cache_dirs_never_canonical(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(T, "DEFAULT_CACHE_DIR", base / "replay-4.2")
 
 
+@pytest.fixture(autouse=True)
+def _briefing_mirror_never_the_operator_vault(monkeypatch):
+    """No test may write into the operator's real briefing mirror (item 3.6).
+
+    `push.run.run_briefing` defaults `mirror_dir` to BRIEFING_MIRROR_DIR, which
+    `briefing_mirror_dir()` reads from the repo .env — on the cadence box, the
+    Obsidian vault that syncs to the operator's phone.  The briefing tests in
+    test_push_run.py redirect BRIEFINGS_DIR but not the mirror, so on that box
+    EVERY suite run copied a fixture briefing (built from an empty DB) over the
+    operator's real `2026-w02-briefing.md` there: noticed 2026-11-05, when the
+    vault copy carried the 06:30 timestamp of that morning's test run.
+
+    Setting the variable to the empty string (not deleting it) is the guard:
+    dotenv's `override=False` skips a key that is already in the environment,
+    even an empty one, so the .env value never loads and the default resolves to
+    None.  A test that wants a mirror passes `mirror_dir=` explicitly, or
+    monkeypatches `briefing_mirror_dir`.  `test_push_mirror_guard.py` pins this
+    against a .env that DOES name a mirror."""
+    monkeypatch.setenv("BRIEFING_MIRROR_DIR", "")
+
+
+# The operator's real repo `.env`, resolved from this file rather than from
+# `ziggurat.paths.REPO_ROOT`, which tests monkeypatch.
+OPERATOR_DOTENV = (Path(__file__).resolve().parents[1] / ".env").resolve()
+# Every key the cadence box's `.env` carries or a loader reads, except
+# BRIEFING_MIRROR_DIR (its own guard above sets it to "", and
+# test_push_mirror_guard.py asserts that exact value).
+OPERATOR_ENV_KEYS = ("SWID", "ESPN_S2", "ESPN_LEAGUE_ID", "NTFY_TOPIC", "NTFY_SERVER",
+                     "NTFY_TOKEN", "ZIGGURAT_FP_WEEK_PAGE")
+
+
+@pytest.fixture(autouse=True)
+def _operator_dotenv_never_loads(monkeypatch):
+    """No test may load the operator's real `.env` (mid-season review P2(b)).
+
+    Four modules call `load_dotenv(REPO_ROOT / ".env", override=False)` inside a
+    function body: `push.run.briefing_mirror_dir`, `push.outbound.load_ntfy_config`,
+    `data.nfl.espn_source.load_espn_credentials` and
+    `data.nfl.fp_weekly.week_page_enabled`.  On the cadence box that copied the
+    ESPN cookies, the private league id, the ntfy topic (the topic's password) and
+    the FantasyPros page flag into `os.environ` the first time any test reached
+    one of them, and they stayed there for every later test: a test could pass or
+    fail on what this box holds, and a misrouted push would carry the real topic.
+    `4ae29fc` fixed one test that tripped on it; this closes the class.
+
+    The guard patches `dotenv.load_dotenv` (each loader imports it inside its
+    body, so it resolves the patched attribute at call time):
+    - a call on the real `.env`, or with no path (dotenv's default search walks
+      up from the caller and finds the same file), is a no-op returning False;
+    - a call on any other file still loads it, and every key it adds is undone
+      at teardown, so a temp `.env` cannot leak into the next test either.
+    The operator keys are also deleted, in case something loaded them before
+    this fixture ran (or the shell exported them).  A test that needs a value
+    sets it with `monkeypatch.setenv` or passes `environ=`.
+    `test_suite_isolation_guard.py` pins this."""
+    import os
+
+    import dotenv
+
+    real_load = dotenv.load_dotenv
+
+    def guarded_load(dotenv_path=None, stream=None, *args, **kwargs):
+        if stream is None:
+            if dotenv_path is None or str(dotenv_path) == "":
+                return False
+            if Path(dotenv_path).expanduser().resolve() == OPERATOR_DOTENV:
+                return False
+            for key in dotenv.dotenv_values(dotenv_path):
+                if key in os.environ:  # records today's value for the undo (override=True)
+                    monkeypatch.setenv(key, os.environ[key])
+                else:  # records "absent" for the undo, then clears it again so
+                    monkeypatch.setenv(key, "")  # the real load still sees it unset
+                    del os.environ[key]
+        return real_load(dotenv_path, stream, *args, **kwargs)
+
+    monkeypatch.setattr(dotenv, "load_dotenv", guarded_load)
+    for key in OPERATOR_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "canonical_archive_dirs: read the REAL ingest archive-dir defaults "
+        "(the test must write nothing)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _ingest_archives_never_the_real_data_tree(request, monkeypatch, tmp_path_factory):
+    """No test may read or write the real ingest archive mirrors (mid-season review P2(c)).
+
+    `refresh.FFOPP_ARCHIVE_DIR` (`data/ffopp/`), `MARKET_ARCHIVE_DIR`
+    (`data/backtest/`) and `SLEEPER_RESEARCH_DIR` (`data/backtest/sleeper-research/`)
+    are read at call time by the registry's pull/scope functions.  A test that
+    runs a source through the REAL orchestrator without redirecting them points
+    the pull at the operator's mirrors.  `ff_opportunity.pull_ff_opportunity`
+    calls `sweep_stale_parts` first, which deletes `*.parquet.part` files beside
+    the mirror path: two `test_nfl_ff_opportunity.py` orchestrator tests did
+    exactly that to the real `data/ffopp/`.  The `.part` files are by
+    construction garbage, but a test must not delete operator files at all, nor
+    read whether today's mirror exists (which made one test date-dependent,
+    2026-09-15).  `MARKET_ARCHIVE_DIR` and `SLEEPER_RESEARCH_DIR` are
+    independent attributes (the second is NOT re-derived from the first), so each
+    is redirected.  A test that sets its own value still wins (its monkeypatch
+    runs after this one).  A test marked `canonical_archive_dirs` sees the real
+    defaults; it may only compare paths.  `test_suite_isolation_guard.py` pins
+    this."""
+    if request.node.get_closest_marker("canonical_archive_dirs"):
+        return
+    from ziggurat.data.nfl import refresh
+
+    base = tmp_path_factory.mktemp("ingest-archives")
+    monkeypatch.setattr(refresh, "FFOPP_ARCHIVE_DIR", base / "ffopp")
+    monkeypatch.setattr(refresh, "MARKET_ARCHIVE_DIR", base / "backtest")
+    monkeypatch.setattr(refresh, "SLEEPER_RESEARCH_DIR", base / "backtest" / "sleeper-research")
+
+
 @pytest.fixture()
 def push_db():
     """A full-schema in-memory DB for the item-3.6 push-layer tests (schema 8+

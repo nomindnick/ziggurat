@@ -1027,6 +1027,7 @@ def test_the_run_log_names_the_anomaly_not_unstampable(grid_db, tmp_path, monkey
     assert "unstampable" not in run["reason"]
 
 
+@pytest.mark.canonical_archive_dirs  # compares the REAL defaults; writes nothing
 def test_the_archives_live_under_the_gitignored_data_tree():
     """Rule 5: harvested ownership/rankings never enter the repo."""
     from ziggurat.paths import REPO_ROOT

@@ -504,7 +504,15 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   false`, every acquisition/move limit at ESPN's −1) — with a counter finding
   recorded on the mapper so nothing ever misreads it: **`transactionCounter.acquisitions`
   did NOT increment for three won waiver claims**, so `league_teams.acquisitions`
-  is not a count of claims won. **The trade deadline localises to Wed 2026-12-02
+  is not a count of claims won. **Corrected 2026-11-05 (mid-season review
+  Q11): `transactionCounter.acquisitions` DOES count won waiver claims and
+  free-agent adds.** It equals every add a team has made EXCEPT the six made
+  while ESPN's current scoring period was still 1 (the 09-02 batch, 09-07,
+  09-08), on 670 of 670 team-day snapshots 2026-08-31..11-05; `drops` counts
+  every drop, preseason included (670/670). The 09-02 reading (three won
+  claims, counter 0) was a correct observation of preseason claims, generalised
+  too far. The cutoff (period 1 vs kickoff) cannot be identified, and nothing
+  in `ziggurat/` reads the column. **The trade deadline localises to Wed 2026-12-02
   09:00 PST**, and the NFL week it precedes (13) is a JOIN against `schedules`,
   not arithmetic — 2026's Week 1 opens on a Wednesday. **The waiver batch runs
   00:01–01:13 PACIFIC** (n=29 from ESPN's own `waiverProcessStatus`), not the
@@ -643,7 +651,19 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   through the migration-013 buckets); 16 MNF entries re-run 09-15. The one
   discrepancy the week's journal carried was a session hand-read of a CBS box,
   not an engine gap. The module's boxed TODO is narrowed to return-TD
-  attribution (no Week-1 instance). Wave B deliverables 1–3 still open.
+  attribution (no Week-1 instance). ~~Wave B deliverables 1–3 still open.~~
+  **Corrected 2026-11-05 (mid-season review Q17):**
+  - weeks 2–8 found 13 of 1,132 entries off by ±1–2, from three ingestion
+    derivations Week 1 never exercised: blocked FGs, defensive scores inside
+    points allowed, lateral fumbles (see Rule 2);
+  - the open wave-B set is deliverables **5–8** (1–3 were wave A, closed
+    09-02);
+  - 5–6 (D/ST charge semantics, return TDs) become next-season ingestion fixes;
+  - 7 (the `map_matchup` coalesce) rides with the next `league/state.py` edit;
+  - 8 (per-player capture) is replaced by a no-migration ESPN fetch at each
+    review and a season-end capture, because within-season retrieval of past
+    weeks works.
+
   Details: `IMPLEMENTATION_PLAN.md` 3.8 + gitignored
   `intel/research/scoring-reconciliation-2026-wk01.md`.
 
@@ -725,16 +745,18 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   **AMENDED 2026-09-15 by item 3.16: own-roster is no longer sufficient for the
   NEWS arm** — it must also carry ESPN `news_type` in the allowlist
   `{HeadlineNews}` (`alerts.news_phone_gate`, a LABELLED HYPOTHESIS with a
-  self-announcing **review date of 2026-10-15** (reviewed 2026-10-20: kept
-  unchanged, next review **2026-11-05**), printed on `ziggurat alerts
-  status`), which cuts the Week-1 window from 37 own-roster NEWS pushes to **9**
+  self-announcing **review date of 2026-10-15** (reviewed 2026-10-20 and again
+  2026-11-05: kept unchanged both times, next review **2026-12-03**), printed on
+  `ziggurat alerts status`), which cuts the Week-1 window from 37 own-roster NEWS pushes to **9**
   while every withheld row still reaches the briefing and the alert log with its
   reason attached; **`INJURY_OUT` is UNGATED by it and always pushes**, pinned by
   a test that empties the allowlist and asserts the injury arm still fires.
   **AMENDED 2026-10-05 by item 3.16b: only YOUR player's `INJURY_OUT` is still
   ungated.** Someone else's player pushes only when his backup is unrostered, can
   play, and prices ≥ +1.0 house pts for your roster on the waiver tool's own board.
-  That gate is a labelled hypothesis, with a **review date of 2026-11-05**. New permanent `ziggurat/push/` package is the **egress choke point**:
+  That gate is a labelled hypothesis. Reviewed 2026-11-05: kept unchanged, next
+  review **2026-12-03** (evidence: gitignored
+  `intel/research/phone-gate-review-2026-11-05.md`). New permanent `ziggurat/push/` package is the **egress choke point**:
   the Rule-5 **outbound scrub** (a data-driven denylist of this league's other-team
   names, checked before any send — the guarantee that makes a public-by-obscurity
   topic safe), the run-log/dedup helpers, and the orchestration. `marginal.handcuff_links()`
@@ -865,6 +887,19 @@ the three. Both widened; a boundary pattern is now assumed narrow until tested.
   PAGES that do not. It closes as a **Rule-6 correctness fix worth ~0 points**,
   with that stated on the card — scope, sizing and the ordering behind item 4.6a
   step 1 are in `IMPLEMENTATION_PLAN.md` 3.11.
+  **Corrected 2026-11-05 (mid-season review Q14): the 50+ defect has largely
+  healed upstream.**
+  - The "544 of 544 NULL" statement was true of the 09-13 vintage. From the
+    2026-09-22 pull the Sleeper feed serves the 50–59 bucket again: on 11-05,
+    272 of 272 forecast kicker-weeks for weeks 10+ (511 of 543 overall; the
+    rest are stale week-1 rows), and the shipped mapper prices it.
+  - Still open: `fg_made_60` is always NULL, so a 60+ make scores 5, not 6
+    (negligible); and about 0.27 makes per kicker-week fall outside every
+    distance bucket, and their price cannot be identified from what we hold.
+  - **The in-season repair closes as re-scoped: no kicker re-pricing.** The
+    ingest run log's wording "the feed serves no 50+ bucket" is corrected. One
+    session did add realised 50+ rates on top of a board that already priced
+    them (10-13), which is why this sentence matters.
 
   **Two disclosures the ship summary led without, both from the variant's own
   module docstring:** the week-by-week term does NOT fix the 3-QB/3-TE
@@ -1211,7 +1246,16 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   Operator steps now in the cadence: Tuesday step 6's `league sync` right after
   submitting, and the Mon 09-14 belt-and-braces forced stats pull. Wave 2 (the
   tie-bug fix + frozen re-run, the vintage diff, the coverage note, `decisions
-  record/classify/latency`, migration 019) has no date; 4.2c opens 09-15.
+  record/classify/latency`, migration 019) ~~has no date; 4.2c opens 09-15.~~
+  **Corrected 2026-11-05 (mid-season review):** Wave 2 takes **the next free
+  migration number, 020 today** (019 went to item 3.18) and is **deferred to
+  the off-season**. It changes no 2026 decision, and a mid-season migration
+  under working-tree timers is the risk the standing rules name. **4.2b's
+  first-live-Tuesday done-when is met:** `ok` captures exist for every week
+  2–9. **4.2c OPENED 09-15:** its pre-registration is frozen, but the grader
+  and TRAIN scorecards are not built. It is deferred and is a strike candidate
+  at next-season planning (26% power at its floor; TRAIN-only, so it cannot
+  grade 2026's chain).
 
 - **Edge / literature / qualitative program — measured 2026-09-13..14, folded
   into the plan 2026-09-15.** Three sweeps, no production code touched: a
@@ -1226,22 +1270,32 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   is in three places the market cannot reach: the **house scoring rules** (priced
   exactly — the only validated structural edge), the **room's inattention** (4 of
   9 rivals have made no transaction since the draft; hygiene is an avoided-loss
-  edge that grows from Week 5), and **execution** (never a zero, legality, the
+  edge that grows from Week 5 — **Corrected 2026-11-05:** by week 9 one rival
+  had made no acquisition and one had made two; the league's first trade
+  executed 2026-11-04), and **execution** (never a zero, legality, the
   chain, streaming). **The one place a better rule earned points is the D/ST
   slot** (+2.02 house pts/wk over holding a drafted incumbent, 95% CI [−0.32,
   +4.42], n=41 paired weeks — and the arm we would build first, the free
   FantasyPros weekly board, was never measured against holding at all) → item
-  3.14. **Everything else that promised points measured zero** — the stop list is
+  3.14. **Corrected 2026-11-05:** item 3.14 measured the FantasyPros-board arm
+  against holding on 2026-09-15: **+1.84 [−0.47, +4.16], n = 38** (sign
+  p 0.041). It ships as `stream`'s D/ST ranker. The `waivers` streaming lane is
+  still ordered by the house one-week gain (item 3.14 amendment).
+  **Everything else that promised points measured zero** — the stop list is
   now a standing section in the Phase 4 header so nobody re-derives it. **Three
   shipped tools tell the operator something false or impossible** (the seater
   benches players whose game already finished → 3.13; the kicker board scores
-  every projected 50+ FG as zero while charging −1/miss → 3.11's amendment; the
+  every projected 50+ FG as zero while charging −1/miss → 3.11's amendment
+  (largely healed upstream from 09-22; see 3.11's 2026-11-05 correction); the
   Sunday pre-lock sync gap → 3.12, closed 09-13) — Rule-6 fixes worth ~0 points
   that protect against a ten-point hole. **The exchange rate is now recorded and
   costs nothing to use: +1.0 house pt/wk = +2.21 pp P(title) / +3.96 pp
   P(top-3)** on this roster (120,000-draw bracket sim on the captured format,
   MC SE ≤ 0.14 pp) — so item 3.4b's live chain (+0.25 pts/wk) is worth +0.55 pp
-  title / +0.99 pp top-3. **The biggest result is negative: measured permission
+  title / +0.99 pp top-3. **Corrected 2026-11-05 (mid-season review Q8):**
+  these are FULL-SEASON rates (as of week 1). From week N quote the
+  from-week-N rate (at week 9 about +0.9 pp title / +1.9 pp top-3 per pt/wk;
+  Monday step 5). **The biggest result is negative: measured permission
   not to build** — eighteen proposals priced by their own authors at 63–103 build
   days; the program recommends about four. Plan items written 2026-09-15: 3.12
   (done), **3.13 / 3.14 / 3.15 / 3.16 / 3.17 / 3.18 / 3.19**, **4.6a**, **4.7**,
@@ -1267,6 +1321,47 @@ are deferred behind more critical work — not struck, not dated.** Item 4.0
   gate silently double-counts (two probes in this run did exactly that; the
   inference survived, every reported `n` did not).
 
+- **Mid-season review — done 2026-11-05 (weeks 1–8); operator rulings
+  2026-11-06.** Two workflows: a verified season grading (gitignored
+  `intel/research/season-review-2026-11-05/MIDSEASON-REVIEW-2026-wk01-08.md`)
+  and a system and plan review (`wf2/MIDSEASON-SYSTEM-REVIEW-2026-wk01-08.md`).
+  **Headline: nothing left to build this season is worth measurable points.**
+  On the week-9 roster the claim chain prints about +0.27 PROJECTED pts/wk, of
+  which about +0.15 is defensible (the other line rests on a projection that
+  outlives an IR designation), and realised-points grading of the chain would
+  need about 1,800–2,800 lines to have power, so it is retired as a recurring
+  metric. The remaining work is protective:
+  - a kickoff fence on `stream` (the one defect that recurs every week);
+  - D/ST-lane honesty text;
+  - the 3.16b F1/F2 fixes;
+  - a batch of corrected sentences (Rule 2, the acquisitions counter, the
+    kicker 50+ status, the exchange rate) — applied 2026-11-06;
+  - pre-lock syncs for non-Sunday-morning kickoff waves (operator yes
+    2026-11-06; the separate `ziggurat-league-sync-waves.timer`, item 3.12);
+  - item 3.22, built when a returning player next occupies our IR slot.
+
+  The playoff bracket is MEASURED from the league's 2025 season (identical
+  settings): the semifinal losers play a 3rd-place game in week 17, and the
+  consolation ladder requires winning weeks 16 and 17 to finish 7th.
+  Measured answers along the way: ESPN does not revise past-week projections
+  (65 of 65 post-game quotes unchanged); the 13 scoring mismatches are three
+  ingestion derivations; ESPN's Tuesday OUT→QUESTIONABLE reset is a real
+  availability-pricing hole (decision-week absence 56% vs 22% priced, n = 36),
+  deferred to a next-season re-fit (item 4.8) with the standing-QUESTIONABLE
+  under-pricing beside it.
+  **Operator rulings 2026-11-06:**
+  - **Checkpoint 3 is CLOSED:** decision (a) is ruled — the in-season "beyond
+    stats" work is item 3.21 (game dossiers); podcasts (4.3/4.4) move to next
+    season;
+  - **no trade opener:** inbound offers only, priced by hand (plan 5.3);
+  - **item 3.20 is deferred to the off-season** (reverses 2026-10-21);
+  - an own-roster `INJURY_OUT` ruled after his kickoff still pushes as today
+    (left unchanged for now; plan 3.16b).
+
+  Next reviews: pre-playoff Tue 2026-12-08 (started early, so it can reach
+  week 14's claims; otherwise findings-only); season-end, captured
+  2027-01-05.
+
 Update this section whenever a phase or checkpoint closes.
 
 ## Standing rules (non-negotiable, from the SPEC)
@@ -1289,6 +1384,27 @@ Update this section whenever a phase or checkpoint closes.
    2026-09-14** (Week 1, item 3.8 wave B: 143 of 143 played rostered players
    across all 10 rosters exact, D/ST and K included); the module's TODO is
    narrowed to return-TD attribution, which had no Week-1 instance.
+   **Corrected 2026-11-05 (mid-season review Q17): "validated" covers Week 1
+   only.** Weeks 1–8 (re-read 2026-11-05): 1,119 of 1,132 played rostered
+   entries exact. The `ScoringRules` numbers have no known error. The 13 misses
+   come from three INGESTION derivations that feed them, and Week 1 contained
+   no instance of any of them:
+   - a blocked field goal is a miss to ESPN (attempts − makes), but nflverse's
+     `fg_missed` excludes `fg_blocked`, which `weekly_stats` does not store
+     (kickers, house +1);
+   - ESPN's D/ST points allowed leaves out a pick-six or fumble-return TD
+     scored against our OFFENSE (6 points; the PAT is still charged) and a
+     safety (2 points, one instance), while `team_defense` charges the
+     opponent's full final score (house −1);
+   - nflverse credits no fumble to a lateral's receiver (house +2, one
+     instance).
+
+   Decision cost is about 0: ESPN is the scorer, and the projection path
+   already counts blocks. The ingestion fixes are next-season work (item 3.8
+   deliverables 5–6). Still unverified: ESPN's documented rule that
+   special-teams return TDs DO count against a D/ST; defensive two-point
+   returns and one-point safeties, which `team_defense` never derives; and
+   return-TD attribution to individual returners.
 3. **No logic in the CLI layer** (`ziggurat/cli/`). Commands parse, call, print.
 4. **Every LLM call goes through the router** (`ziggurat/llm/`, config in
    `config/llm.toml`). No component imports a model SDK or shells out to a
@@ -1368,10 +1484,14 @@ git config core.hooksPath scripts/hooks   # per clone, required
 
 # routinely:
 .venv/bin/pytest                          # must stay green
+# building in a git worktree? the editable install points .venv at the MAIN
+# tree, so tests silently import main's code and main's .env. Run instead:
+#   PYTHONPATH=<worktree> .venv/bin/python -m pytest
 .venv/bin/ziggurat smoke                  # spine wiring sanity check
 
 # in-season, on the machine that runs the cadence, once each:
 scripts/install-league-sync.sh            # item 3.1 — systemd user timer, 4x/day
+#   ...and its pre-lock WAVES timer (item 3.12, 2026-11-06): ~16:00 PT before TNF/SNF/MNF + holiday waves
 scripts/install-nfl-ingest.sh             # item 3.1b — daily / weekly / gameday timers
 scripts/install-push.sh                   # item 3.6 — Wed briefing + 20-min alert tick
 scripts/install-decisions.sh              # item 4.2b — Tuesday 18:30 PT freeze timer
@@ -1536,6 +1656,14 @@ time on every run, so this is checkable rather than remembered.
 **Division of labor:** the tools recommend and explain; only the operator acts
 in the ESPN app (claims, adds, lineup changes, IR moves). Every workflow ends
 by writing what was decided and why to the week's journal.
+Every request to the operator names its deadline, set by the ESPN mechanic it
+depends on (mid-season review, 2026-11-05):
+- an IR entry: before his kickoff;
+- a claim: before ~23:59 PT Tuesday;
+- a free-agent grab: Wednesday morning.
+
+A deadline that falls 19:00–21:00 PT moves earlier. Fetch ESPN Fan Support
+before advising on any mechanic this file does not already state.
 
 **Journal discipline:** one file per NFL week at `intel/weekly/<season>-wkNN.md`,
 created from `intel/weekly/week-TEMPLATE.md` when the week's first decision is
@@ -1553,6 +1681,16 @@ wrong).
 .venv/bin/ziggurat ingest status   # per-source staleness (a stale read is Rule-1-invisible)
 .venv/bin/ziggurat alerts status   # the 20-min tick is alive ('empty' is healthy)
 ```
+
+**After the preflight and before any decision tool, read the week journal's
+OPEN TRIGGERS table and last Monday's retro** (mid-season review,
+2026-11-05).
+- The table lists every pass, override, written hold-rule, and injured or
+  suspended player we dropped in the last 14 days.
+- For each row, write "unchanged" or name the changed fact.
+- Only a named changed fact re-opens a decision (plan item 5.2 habit #2).
+
+Three of the season's process errors were premises that changed unread.
 
 Missing league days go in the journal (that history is gone — item 3.1). A
 source that `ingest status` calls stale and that feeds today's decision gets
@@ -1616,9 +1754,23 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    fix: either a costless swap that puts an OUT bench player into the freed IR
    slot, or a drop. Relay it to the operator, re-sync after they apply it, and
    re-run. Putting a player INTO IR uses the "Add to IR" button on the ESPN
-   website (observed 2026-09-24; the MOVE menu offered IR to nobody). Taking
-   a player OFF IR is recorded as an ordinary lineup move (team 4, 10-10);
-   which website control does it has not been observed.
+   website (observed 2026-09-24; the MOVE menu offered IR to nobody).
+   **The clock for that move is the player's own KICKOFF, so it is a SUNDAY
+   decision, not a Tuesday one** (Sunday step 1b; mid-season review
+   2026-11-05). Tuesday is too late: the player locked at his kickoff, and
+   Tuesday's tag reset may leave him QUESTIONABLE and ineligible. Taking a
+   healed occupant OFF IR on a full active roster: drop first, then Activate
+   (Activate on 16 of 16 is unobserved). Taking
+   a player OFF IR is recorded as an ordinary lineup move (team 4, 10-10).
+   The website control was observed 2026-11-03 (operator, Montgomery):
+   on the team page click "IR". That opens a separate page listing the IR
+   occupant(s); click "Activate" there. ESPN chooses where he lands, and
+   the manager does not pick. He landed on the BENCH, so go back to the
+   team page and move him from there if wanted. The drop came first, so
+   the roster had one open active spot. His only eligible starting spots
+   (RB, FLEX) were full. Two cases are still unobserved: whether Activate
+   fills an open STARTING slot, and what it does on a full 16-of-16
+   roster.
    **Every `ziggurat waivers` run is ARCHIVED (item 4.2b): the run captures a
    decision freeze.** The plan, the priced swap matrix, every evaluated
    candidate row, the pool as priced and the roster are frozen under the
@@ -1697,6 +1849,12 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    priority. The chain's number order decides what you queue; among what you
    queue, contention decides the order you list it in. If those two orders
    disagree, say so out loud and journal which one you used.
+   **Declining a chain line** (mid-season review, 2026-11-05). Each line's
+   gain assumes every lower-numbered line landed, so declining line k stops
+   the chain at k. If you take exactly one later line instead, its "(+X alone)"
+   number is exact for that case. A changed drop is a NEW line, priced by
+   hand, not the printed one. (`waivers` has no flag to exclude a line, so
+   "re-run without it" is not available.)
 5. **Look one week ahead before you finish** (guides' near-unanimous in-season
    rule; nothing in the stack asks this yet — it is a habit until item 3.14/5.2
    turn it into a column). Two questions, answered from the schedule and the
@@ -1778,6 +1936,16 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
   with documented team-to-team variance. What it buys is an avoided hole, not
   an edge — and a coach's role quote is logged as a tracked hypothesis with a
   pre-committed 4-week check, not acted on.
+- **Saturday morning:** check news on the injured or suspended players we
+  dropped in the last 14 days (the OPEN TRIGGERS table's DROP rows), using the
+  read-only runner `.venv/bin/python intel/scripts/drop_news.py --as-of
+  <today, PT>` (it wraps `drop_news.sql`; this box has no `sqlite3` CLI)
+  (mid-season review,
+  2026-11-05). The Friday pass is too early: one reinstatement headline this
+  season landed Friday 14:47 PT, and the re-add came about 42 h later. **This
+  check needs a session, and fails silently when one is skipped** (that is how
+  this season's lag happened), so Sunday step 1 runs the same query again as a
+  backstop.
 - Before the week's FIRST kickoff (usually Thursday night — but check the
   schedule; the 2026 opener is a Wednesday), settle any starter playing in it.
   Slot-lock discipline is in the tool: earliest kickoffs in dedicated slots,
@@ -1800,7 +1968,9 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    and `INJURY_OUT` phone alerts ride the sync boundary). The sync timer now
    fires Sundays at 09:15 and 12:15 PT as the backup; when you are at the
    keyboard, run `.venv/bin/ziggurat league sync` yourself ~08:35–09:30 PT and
-   confirm `league status` shows today's snapshot. Then run
+   confirm `league status` shows today's snapshot. Re-run
+   `intel/scripts/drop_news.py --as-of <today>` for the OPEN TRIGGERS table's DROP rows (the
+   backstop for a skipped Saturday). Then run
    `.venv/bin/ziggurat lineup --reasons --live --now "<current ET ISO datetime>"` —
    the real clock matters twice: the GTD contingency ladder only offers swaps
    whose window is still open (`window_closed` means that door shut), and
@@ -1814,6 +1984,18 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    block: a `LINEUP DISAGREEMENT` means the stored snapshot is behind ESPN (re-sync
    and re-run), and a failed live read prints why and falls back to projections.
    With `--live` and no `--now`, the read's own wall clock is the decision clock.
+1b. **IR entry, before the player's kickoff.** If a rostered player is OUT
+   this week and putting him on IR is under consideration, decide it in this
+   pass, before HIS kickoff (mid-season review, 2026-11-05):
+   - ESPN locks a player at his kickoff, and after that only the League
+     Manager can move him (ESPN Fan Support). This league's settings say the
+     same: `rosterLocktimeType` and `lineupLocktimeType` are both
+     `INDIVIDUAL_GAME`.
+   - The scoring period rolls only on TUESDAY, and Tuesday's tag reset may
+     leave him QUESTIONABLE and ineligible.
+   - Every IR entry in this league through week 9 came on or before the
+     player's game day, none on a Monday.
+   - The lock rule is documented, not yet observed directly here.
 2. Walk the ladder for each Questionable starter in lock-time order; execute
    the branch matching the news.
 3. A hard refusal from the seated-lineup legality check (bye/OUT starter) on a
@@ -1865,9 +2047,22 @@ the run timestamp — UTC rolls past midnight hours before a Pacific evening doe
    p³, not a simulation finding), while **seeds 3 through 6 are worth EXACTLY
    ZERO to chase** — seeds 3 and 6 play each other and the winner faces seed 2,
    so their paths are structurally identical. **Never spend anything to move
-   from the 6 seed to the 3 seed.** Real playoff games here are near coin flips
+   from the 6 seed to the 3 seed.** (Identical as PATHS when opponents are
+   exchangeable. With a much stronger team at seed 1, the 3/6 side can be
+   worth about +1–2 pp top-3; INFERRED, mid-season review 2026-11-05. The rule
+   still stands: never SPEND to move between them.) Real playoff games here are near coin flips
    (p ≈ 0.506). The currency for every other decision: **+1.0 house pt/wk =
-   +2.21 pp P(title) / +3.96 pp P(top-3)** on this roster. And the bye cut is
+   +2.21 pp P(title) / +3.96 pp P(top-3)** on this roster, **over a FULL
+   season** (corrected 2026-11-05, mid-season review Q8):
+   - the rate shrinks as weeks are used up: at week 9 it was about
+     **+0.9 / +1.9** (INFERRED, the mid-season review's crude simulation,
+     which leaves out rivals' forced zeros);
+   - quote the from-week-N figure from the latest season-odds run, never the
+     full-season one, from week 2 on;
+   - it prices OUR points against the field. It does not price a deficit some
+     rivals carry, and it does not price a gap already inside the odds.
+
+   And the bye cut is
    decided by the points-for tiebreak in 44.8% of simulated seasons (the
    operator is personally in that tie in 13.1%), so points-for is not a
    consolation statistic.
@@ -1895,7 +2090,21 @@ Also in `docs/runbook-strix-halo.md` §3.5.
 
 ## Heuristics promotion criteria
 
-> **PLACEHOLDER — lands with item 5.2.** Ladder: observation → hypothesis
-> (tracked, not applied) → rule (applied, evidence cited), in
-> `intel/heuristics.md`. Backtest findings are strong priors; in-season
-> evidence must be repeated and strong to override them.
+**Interim criteria (2026-11-05, mid-season review; approved 2026-11-06; item
+5.2 owns the final form).** The ladder (observation → hypothesis → rule) lives
+in `intel/heuristics.md`:
+- **Observation → Hypothesis** needs a stated mechanism plus 2 events or a
+  measured base rate. The hypothesis is written with its test, its n, its
+  review date, what would falsify it, and **its power**. "Not gradable this
+  season" is a legal status. A hypothesis is never "retired" on a test that
+  had no power.
+- **Hypothesis → Rule** needs either a passed pre-stated test, or 3
+  same-direction events with none contrary. The rule must not contradict a
+  backtest or stop-list finding without a new reason, names the premise it
+  rests on, and carries a review date.
+- **A rule that already lives in this file's cadence is listed in
+  `heuristics.md` as a pointer, never copied.**
+- **ESPN platform mechanics** are facts, not heuristics. They go in the
+  cadence with their source.
+- Backtest findings remain strong priors; in-season evidence must be repeated
+  and strong to override them.

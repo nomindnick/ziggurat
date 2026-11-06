@@ -1,0 +1,76 @@
+# Ziggurat league-state sync: PRE-LOCK runs for the kickoff waves the base
+# 4x/day schedule misses (item 3.12's amendment, mid-season review 2026-11-05;
+# operator yes 2026-11-06) — systemd USER timer.
+#
+# WHY A SEPARATE TIMER, NEVER A DROP-IN. It triggers the SAME service as
+# ziggurat-league-sync.timer (Unit= below). A drop-in on that timer would need an
+# `OnCalendar=` reset line to change its schedule, and a single empty
+# `OnCalendar=` silently REMOVES every base entry — the 4x/day schedule that
+# protects league history ESPN cannot give back (item 3.1). A second timer only
+# ADDS starts; disabling it can never touch the base schedule.
+#
+# WHAT IT COVERS. The NFL posts inactives ~90 min before each kickoff, and a
+# player locks at HIS kickoff (rosterLocktimeType / lineupLocktimeType are
+# INDIVIDUAL_GAME in this league). The base 17:15 run carries a 300 s random
+# delay, so it lands AT or AFTER a Thursday/Monday 17:15 PT kickoff and 0-5 min
+# before Sunday night's 17:20 PT one — after the inactives, but too late to act
+# on them. Each run below lands after its wave's inactives and well before its
+# kickoff. Times are the box's local clock (Pacific on the desktop that runs the
+# cadence); kickoffs from the 2026 `schedules` table, read 2026-11-06.
+#
+#   regular  Thu 17:15 PT (TNF)  -> Thu 16:00   inactives ~15:45
+#            Sun 17:20 PT (SNF)  -> Sun 16:05   inactives ~15:50
+#            Mon 17:15 PT (MNF)  -> Mon 16:00   inactives ~15:45
+#   wk 12    Wed 11-25 17:00     -> 15:45
+#            Thu 11-26 10:00     -> 08:45   (the review made this one conditional
+#                                            on a player of ours in that game; it
+#                                            is scheduled unconditionally because a
+#                                            sync costs one ESPN read and a
+#                                            conditional timer needs a session on
+#                                            11-24 to arm it)
+#            Thu 11-26 13:30     -> 12:15
+#            Thu 11-26 17:20     -> the regular Thu 16:00
+#            Fri 11-27 12:00     -> covered by the base 11:15 run
+#   wk 15    Sat 12-19 14:00     -> 12:45
+#            Sat 12-19 17:20     -> 16:05
+#   wk 16    Thu 12-24 17:15     -> the regular Thu 16:00
+#            Fri 12-25 10:00     -> 08:45
+#            Fri 12-25 13:30     -> 12:15
+#            Fri 12-25 17:15     -> 16:00
+#   wk 17    Thu 12-31 / Sun 01-03 / Mon 01-04 -> the regular entries
+# Sunday-morning waves (10:00, 13:05/13:25) stay on the base timer's Sunday
+# 09:15 and 12:15 runs; the week-10 London game (06:30 PT) is covered by the
+# base 05:15 run. The regular entries are bounded to the 2026 fantasy season
+# (weeks 9-17; week 18 is not a fantasy week), so this timer goes quiet on its
+# own after Mon 2027-01-04. Re-plan it for 2027.
+#
+# Base rate (mid-season review): 0 process zeros in 108 non-Sunday starter-weeks
+# league-wide in weeks 1-8. This is insurance, weighted to the playoff weeks.
+
+[Unit]
+Description=Ziggurat league-state sync, pre-lock runs for non-Sunday-morning kickoff waves
+Documentation=file://@REPO@/IMPLEMENTATION_PLAN.md
+
+[Timer]
+OnCalendar=Thu,Mon 2026-11,12-* 16:00:00
+OnCalendar=Sun 2026-11,12-* 16:05:00
+OnCalendar=2027-01-03 16:05:00
+OnCalendar=2027-01-04 16:00:00
+OnCalendar=2026-11-25 15:45:00
+OnCalendar=2026-11-26 08:45:00
+OnCalendar=2026-11-26 12:15:00
+OnCalendar=2026-12-19 12:45:00
+OnCalendar=2026-12-19 16:05:00
+OnCalendar=2026-12-25 08:45:00
+OnCalendar=2026-12-25 12:15:00
+OnCalendar=2026-12-25 16:00:00
+# NOT Persistent: a pre-lock run caught up after the lock is worth nothing, and
+# the base timer (Persistent=true) already owns resilience.
+Persistent=false
+# A small spread only: every run here has at least ~70 min before its kickoff.
+RandomizedDelaySec=120
+AccuracySec=1m
+Unit=ziggurat-league-sync.service
+
+[Install]
+WantedBy=timers.target

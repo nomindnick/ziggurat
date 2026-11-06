@@ -102,8 +102,12 @@ NEWS_PHONE_TYPES = frozenset({"HeadlineNews"})
 #: a review date that does not exist. Reviewed 2026-10-20 (0 of 93 withheld rows
 #: carried a decision-relevant fact first): kept unchanged by operator decision, and
 #: the next review joins item 3.16b's on 2026-11-05 so one session reviews the lane.
+#: Reviewed again 2026-11-05 with 3.16b (16 pushes 10-20..11-05, all HeadlineNews;
+#: 0 of 37 withheld rows carried a decision fact first): kept unchanged by operator
+#: decision, next review 2026-12-03 — before the fantasy playoffs, so any change is
+#: live for them. Evidence: gitignored intel/research/phone-gate-review-2026-11-05.md.
 NEWS_GATE_ADOPTED = "2026-09-15"
-NEWS_GATE_REVIEW_DATE = "2026-11-05"
+NEWS_GATE_REVIEW_DATE = "2026-12-03"
 
 #: The evidence, quoted wherever the gate is disclosed (Rule 6). Re-measured on the
 #: live `alert_ledger` 2026-09-15; item 3.16 recorded 35 pushes / 14 Media from the
@@ -165,8 +169,12 @@ HANDCUFF_PHONE_MIN_GAIN = 1.0
 #: briefing's ALERTS block is "since the last check", not a season ledger.
 NON_ROSTER_LOOKBACK_DAYS = 7
 
+#: Reviewed 2026-11-05 (first review): 12 rival rulings formed in the window, 11
+#: held and 1 pushed — Love -> Allgeier, a false positive caused by item 3.22's
+#: IR-occupant board artefact, not by this gate; 0 held backups were added by a
+#: rival. Kept unchanged by operator decision; next review 2026-12-03, with 3.16's.
 INJURY_GATE_ADOPTED = "2026-10-05"
-INJURY_GATE_REVIEW_DATE = "2026-11-05"
+INJURY_GATE_REVIEW_DATE = "2026-12-03"
 
 INJURY_GATE_LABEL = (
     f"HYPOTHESIS, not a rule (item 3.16b, adopted {INJURY_GATE_ADOPTED}, REVIEW "

@@ -24,9 +24,11 @@ Two knowledge-time regimes (design §2, §4.4):
 durable PK spine, so an unresolved ``gsis_id`` (DEF, rookies) never drops a row.
 
 ONE MAPPED SOURCE KEY THE 2026 FEED DOES NOT SERVE, and what is done about it:
-``fgm_50p``. See :func:`unbucketed_fg_makes` — it reads nothing on the current
-feed, so every projected 50+ field goal scores ZERO while ``fg_missed`` goes on
-charging -1 a miss. The makes are recoverable from the feed's own arithmetic;
+``fgm_50p``. See :func:`unbucketed_fg_makes` — it read nothing on the
+2026-09-13 vintage, so every projected 50+ field goal scored ZERO while
+``fg_missed`` went on charging -1 a miss. (Corrected 2026-11-05, mid-season
+review Q14: from the 2026-09-22 pull the feed serves ``fgm_50p`` again and this
+mapping prices it; what remains unbucketed is a small residual, below.) The makes are recoverable from the feed's own arithmetic;
 the recovery ships as the opt-in ``derive_fg_50_plus`` flag (OFF by default,
 because turning it on re-prices a board), a decomposition too broken to derive
 from refuses the batch on that opt-in path only, and what the default leaves
@@ -78,11 +80,14 @@ _DST_MAP = {
 # Kicker made-FG count buckets (direct). ``fgm_50p`` is LOSSY: it bundles 60+, so
 # a 60+ FG scores +5 not +6 (rare); ``fg_made_60`` cannot be filled from source.
 #
-# ``fgm_50p`` READS NOTHING ON THE 2026 FEED and is kept deliberately — see
-# :func:`unbucketed_fg_makes` for the whole story and the measurements. Short
-# version: the 2026 feed serves no 50+ bucket under any name (0 of 2,754 kicker
-# rows), so every projected 50+ make scored 0 while ``fg_missed`` went on
-# charging -1 a miss. It is upstream DRIFT, not a mis-transcription: the 2021,
+# ``fgm_50p`` READ NOTHING ON THE 2026 FEED UNTIL 2026-09-22 and is kept
+# deliberately — see :func:`unbucketed_fg_makes` for the whole story and the
+# measurements. Short version: on the 2026-09-13 vintage the feed served no 50+
+# bucket (every projected 50+ make scored 0 while ``fg_missed`` charged -1 a
+# miss). From the 2026-09-22 pull it serves ``fgm_50p`` again (272/272 forecast
+# kicker-weeks for weeks 10+ on 11-05; mid-season review Q14), and this mapping
+# prices it. ``fg_made_60`` is never served (a 60+ make scores 5, not 6); about
+# 0.27 makes per kicker-week still fall outside every bucket, unpriced. It is upstream DRIFT, not a mis-transcription: the 2021,
 # 2022, 2023, 2024 and 2025 feeds all serve ``fgm_50p`` when read today. It
 # therefore stays mapped rather than deleted, so a feed that does serve the
 # bucket is priced from the SOURCE rather than from a derivation — and so the
@@ -207,6 +212,15 @@ def unbucketed_fg_makes(stats) -> float | None:
 
     ``None`` when the row has no ``fgm`` at all (not a kicker row, or a kicker
     the feed does not forecast) — "we cannot tell", never 0.0.
+
+    CORRECTED 2026-11-05 (mid-season review Q14): the defect below is the
+    2026-08-30..09-13 vintage. From the 2026-09-22 pull the feed serves
+    ``fgm_50p`` again (272 of 272 forecast kicker-weeks for weeks 10+ on 11-05),
+    and :data:`_KICKER_DIRECT_MAP` prices it. What this function still finds is
+    a residual of about 0.27 makes per kicker-week outside every distance
+    bucket, whose price cannot be identified from what we hold (level
+    calibration implies ~0.8 pt a make, the cross-section 10.5 ± 5.9), so no
+    re-pricing ships. ``fg_made_60`` is still never served.
 
     THE DEFECT THIS FUNCTION EXISTS FOR, measured 2026-08-30 against the live
     Sleeper feed (season 2026, weeks 1-18, 2,754 kicker rows). ``fgm_50p`` is
@@ -563,7 +577,7 @@ def ingest_projections(conn, rows, *, retrieved_as_of: str, bulk_historical: boo
         base.note_incomplete(
             "projections", unbucketed_rows, kicker_rows,
             why=f"{unbucketed_makes:.1f} made FGs of 50+ yds stored as ZERO while "
-                "fg_missed still charges every miss (the feed serves no 50+ bucket; "
+                "fg_missed still charges every miss (these makes sit outside every distance bucket the feed serves; "
                 "pass derive_fg_50_plus=True, or read core/kicker_board)",
         )
     if mismatched_rows:

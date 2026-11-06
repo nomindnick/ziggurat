@@ -16,10 +16,16 @@
 #      calendar day collapse to the last one. The real waiver case spans days;
 #      same-day churn does not survive.
 #
-# Times are chosen around the league's rhythm (SPEC): ESPN processes waiver
-# claims ~03:00-04:30 ET Wednesday, so the 05:15 run lands just after the batch
-# and before the operator's breakfast read; 17:15 precedes Thursday kickoff;
-# 23:15 closes the day out.
+# Times are chosen around the league's rhythm: ESPN's waiver batch runs just
+# after midnight PACIFIC (00:01-00:26 PT observed, item 3.8a), so the 23:15
+# run is the last pre-batch state and the 05:15 run the first post-batch one.
+# NOTE: with RandomizedDelaySec the 17:15 run lands AT or AFTER Thursday and
+# Monday kickoff (17:15 PT) and 0-5 min before Sunday night's (17:20 PT); the
+# pre-lock syncs for those waves live in the SEPARATE
+# ziggurat-league-sync-waves.timer (item 3.12's amendment, 2026-11-05), never
+# in a drop-in here: an OnCalendar= reset in a drop-in clears this schedule.
+# (Corrected 2026-11-05, mid-season review: this comment used to say the batch
+# ran ~03:00-04:30 ET and that 17:15 precedes Thursday kickoff; both were false.)
 
 [Unit]
 Description=Ziggurat league-state snapshot schedule

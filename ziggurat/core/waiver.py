@@ -167,7 +167,10 @@ KIND_UNKNOWN = ACQ_UNKNOWN          # anything else (incl. a leaked 'ONTEAM'): v
 #     written — "ESPN forces an ineligible player onto your active roster" — was
 #     wrong in mechanism: ESPN does not move him, it refuses transactions until YOU
 #     do. The fix this module proposes is the same move either way.
-#   * STILL UNSEEN in this league: the INVALID transition itself.
+#   * OBSERVED 2026-10-07..10-10 (another team's healed occupant): the INVALID
+#     transition itself; lineup moves went through while invalid (plan 3.8,
+#     addendum 2026-10-12). STILL UNSEEN: whether ESPN blocks an acquisition on
+#     an invalid roster.
 IR_FIX_MODEL_LABEL = (
     "IR-slot rules this fix follows — ENTRY observed 2026-09-24 on the ESPN website "
     "(the \"Add to IR\" button, not the MOVE menu, lists exactly the players ESPN "
@@ -2018,7 +2021,7 @@ def build_waiver_plan(
                     str(r.get("player")) for r in reslotted if _slot(r) != "IR"
                 )
                 notes.append(
-                    f"the roster is illegal and ESPN is blocking all transactions; "
+                    f"the roster is illegal, so ESPN blocks claims and adds (its documented rule; lineup moves still go through, observed 2026-10-08/10); "
                     f"the week window could not be resolved to price a specific forced "
                     f"drop ({exc}). Pass --from-week. Drop your lowest-value active "
                     f"body to reach {roster_structure.active_slots}. Active bodies: "

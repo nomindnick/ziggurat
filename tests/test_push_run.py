@@ -450,15 +450,15 @@ def test_alert_status_page_describes_the_lane_and_dates_the_review(push_db):
     page = runs.format_status(push_db, kind="alert", today="2026-10-01")
     assert "no push runs recorded yet." in page      # printed even with no runs
     assert alerts_mod.format_phone_lane_policy(today="2026-10-01") in page
-    assert "INJURY_OUT" in page and "UNGATED" in page and "review 2026-11-05" in page
+    assert "INJURY_OUT" in page and "UNGATED" in page and "review 2026-12-03" in page
 
     runs.start_run(push_db, kind="alert", season=2026, scope="events",
                    started_at="2026-09-10T06:00:00")
-    assert "review 2026-11-05" in runs.format_status(push_db, kind="alert", today="2026-10-01")
+    assert "review 2026-12-03" in runs.format_status(push_db, kind="alert", today="2026-10-01")
     # the BRIEFING page is a different lane and must not carry the alert lane's rules
     runs.start_run(push_db, kind="brief", season=2026, scope="w2",
                    started_at="2026-09-10T06:00:00")
-    assert "review 2026-11-05" not in runs.format_status(push_db, kind="brief")
+    assert "review 2026-12-03" not in runs.format_status(push_db, kind="brief")
 
 
 def test_alert_log_never_touches_operator_intel():

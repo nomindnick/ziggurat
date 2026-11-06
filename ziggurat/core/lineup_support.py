@@ -28,7 +28,9 @@ THE DECISION, formally
 ``mu_opp``  the opponent's deterministic all-healthy best-lineup total (symmetric
             and legible), or an explicit ``opponent_total`` override
 ``var_opp`` the opponent seated lineup's variance, or a flat league-typical
-            fallback when his roster cannot be read
+            figure when ``--opponent-total`` supplies his total (when his
+            roster cannot be read, posture is NEUTRAL and P(win) a flat 0.5 —
+            plan fold F6)
 
     P(win) = Phi( (mu(L) - mu_opp) / sqrt(var(L) + var_opp) )
 
@@ -313,14 +315,21 @@ DEFAULT_VARIANCE = VarianceModel(
     # columns in migration 013 (item 4.1), so score_kicker CAN now be exercised
     # on historical K rows — the OLS re-fit is a recorded follow-up. 3.5 = a
     # kicker's ~8-pt week swing on 1-2 makes plus -1/miss; a hypothesis until
-    # that fit lands.
+    # that fit lands. Measured since (edge probe E11, plan fold F6): realised
+    # kicker weekly house-point sd 3.73 (IQR [3.11, 4.25], n=96 player-seasons
+    # >=8 games, 2021-23) — to adopt with the next real edit of this constant.
     k_flat_sigma=3.5,
     # A QB and a pass-catcher on his own NFL team score together (the same drives
-    # produce both). rho=+0.35 is a hypothesis, NOT measured (Phase 4); all other
-    # cross-player correlations are 0. It is the strongest underdog "stack" lever.
+    # produce both). rho=+0.35 is the shipped hypothesis; measured since (edge
+    # probe E11, plan fold F6): QB-own WR +0.315 (n=2,547), QB-own TE +0.297
+    # (n=730) — to adopt with the next real edit. All other cross-player
+    # correlations are 0. It is the strongest underdog "stack" lever.
     correlation_qb_passcatcher=0.35,
-    # A full opponent lineup TOTAL has a std of ~17-18 house points; used as the
-    # opponent variance only when his roster cannot be read (a labelled fallback).
+    # A full opponent lineup TOTAL has a std of ~17-18 house points. It reaches a
+    # decision ONLY via --opponent-total: when the opponent's roster cannot be
+    # read, mu_opp is None, posture is NEUTRAL and win_prob is a hard-coded 0.5,
+    # so this constant is never read on that path (corrected per plan fold F6;
+    # the earlier "used when his roster cannot be read" was false).
     opp_flat_sigma=17.5,
     cohort="cohort: nflverse weekly_stats (offense) + team_defense (DST), 2021-2025 "
            "REG only, per-(player|team)-season with >=8 scored games, weekly points "

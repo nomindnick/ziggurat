@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Install the Ziggurat league-state sync timer (item 3.1) as a systemd USER unit.
+# Install the Ziggurat league-state sync timer (item 3.1) as a systemd USER unit,
+# plus its pre-lock waves timer (item 3.12's amendment, 2026-11-06): a SECOND
+# timer on the same service, never a drop-in on the first (see that unit file).
 #
 # User-level on purpose: no root, no system-wide side effects, and it reads the
 # repo's own .env and virtualenv. Uninstall is one command (printed at the end).
@@ -27,10 +29,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $UNINSTALL -eq 1 ]]; then
+  systemctl --user disable --now ziggurat-league-sync-waves.timer 2>/dev/null || true
   systemctl --user disable --now ziggurat-league-sync.timer 2>/dev/null || true
-  rm -f "$UNIT_DIR/ziggurat-league-sync.timer" "$UNIT_DIR/ziggurat-league-sync.service"
+  rm -f "$UNIT_DIR/ziggurat-league-sync-waves.timer" \
+        "$UNIT_DIR/ziggurat-league-sync.timer" "$UNIT_DIR/ziggurat-league-sync.service"
   systemctl --user daemon-reload
-  echo "removed ziggurat-league-sync timer + service"
+  echo "removed ziggurat-league-sync timers (base + waves) + service"
   exit 0
 fi
 
@@ -54,19 +58,22 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "--- would install to $UNIT_DIR ---"
   render ziggurat-league-sync.service
   render ziggurat-league-sync.timer
+  render ziggurat-league-sync-waves.timer
   exit 0
 fi
 
 mkdir -p "$UNIT_DIR"
 render ziggurat-league-sync.service > "$UNIT_DIR/ziggurat-league-sync.service"
 render ziggurat-league-sync.timer   > "$UNIT_DIR/ziggurat-league-sync.timer"
+render ziggurat-league-sync-waves.timer > "$UNIT_DIR/ziggurat-league-sync-waves.timer"
 
 systemctl --user daemon-reload
 systemctl --user enable --now ziggurat-league-sync.timer
+systemctl --user enable --now ziggurat-league-sync-waves.timer
 
-echo "installed: $UNIT_DIR/ziggurat-league-sync.{service,timer}  (season $SEASON)"
+echo "installed: $UNIT_DIR/ziggurat-league-sync.{service,timer} + ziggurat-league-sync-waves.timer  (season $SEASON)"
 echo
-systemctl --user list-timers ziggurat-league-sync.timer --no-pager || true
+systemctl --user list-timers ziggurat-league-sync.timer ziggurat-league-sync-waves.timer --no-pager || true
 cat <<EOF
 
 next steps
@@ -80,4 +87,6 @@ Cron alternative (if this box has no user systemd) — keep the timeout, cron ha
 no equivalent of TimeoutStartSec and a hung pull would otherwise never end:
   15 5,11,17,23 * * * cd $REPO && timeout 600 .venv/bin/ziggurat league sync --season $SEASON >> data/league-sync.log 2>&1
   15 9,12 * * 0 cd $REPO && timeout 600 .venv/bin/ziggurat league sync --season $SEASON >> data/league-sync.log 2>&1   # Sunday pre-lock runs
+  0 16 * 11,12 1,4 cd $REPO && timeout 600 .venv/bin/ziggurat league sync --season $SEASON >> data/league-sync.log 2>&1   # TNF/MNF pre-lock (waves timer; holiday dates: see the unit file)
+  5 16 * 11,12 0 cd $REPO && timeout 600 .venv/bin/ziggurat league sync --season $SEASON >> data/league-sync.log 2>&1    # SNF pre-lock
 EOF

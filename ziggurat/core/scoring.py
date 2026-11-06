@@ -23,6 +23,10 @@ pass silently.
     │ `team_defense`'s points_allowed / yards_allowed / fumble_recoveries   │
     │ agree with what ESPN charges a fantasy D/ST (9 of 9). Note:           │
     │ gitignored intel/research/scoring-reconciliation-2026-wk01.md.        │
+    │ CORRECTED 2026-11-05 (mid-season review Q17): Week 1 agreed 9 of 9;   │
+    │ weeks 1-8: 1,119 of 1,132 exact. The 13 misses are blocked FGs,       │
+    │ defensive scores inside points allowed, and a lateral fumble, all     │
+    │ ingestion-side. No `ScoringRules` number is in error.                 │
     │ TODO(narrowed): return-TD attribution — ESPN credits kick/punt-return │
     │ TDs to the D/ST (`def_tds`); confirm the box-score feed agrees and    │
     │ that individual returners are not also being credited (double count).│

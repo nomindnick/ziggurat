@@ -122,8 +122,12 @@ def kicker_scoring_inputs(row) -> dict[str, int] | None:
 
     Blocked field goals are NOT charged: nflverse counts ``fg_blocked``
     separately from ``fg_missed``, the house charges per missed FG (ESPN "FGM"),
-    and ESPN's blocked-kick convention is not in the settings fixture — item
-    3.8's post-Week-1 box-score validation confirms it. Missed PATs are not
+    and ESPN's blocked-kick convention is not in the settings fixture. **ESPN
+    DOES charge a blocked FG as a miss** (stat 85 = attempts − makes): 8 of 8
+    kicker mismatches in weeks 2–8 were blocks (mid-season review Q17). Week 1
+    held no block, so its validation could not test this. The house therefore
+    under-charges by one miss per block; the fix (store and charge
+    ``fg_blocked``) is item 3.8 deliverable 5, next season. Missed PATs are not
     persisted because the house has no missed-PAT stat (``score_kicker``
     ignores ``pat_missed``).
     """

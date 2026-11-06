@@ -368,12 +368,12 @@ def map_team(raw: dict, *, season: int, scoring_period=None) -> dict:
         "points_against": record.get("pointsAgainst"),
         "streak_length": record.get("streakLength"),
         "streak_type": record.get("streakType"),
-        # NOT A COUNT OF CLAIMS WON (measured 2026-09-02, item 3.8a): team 10 won
-        # THREE waiver claims in that morning's batch and ESPN's counter still read
-        # {acquisitions: 0, drops: 3}; a second team read {acquisitions: 0,
-        # drops: 1, moveToActive: 5}. Whatever ESPN increments it on, it is not a
-        # won claim in this league. Nothing in ziggurat/ reads it (grep verified) —
-        # if you are about to be the first, measure it again first.
+        # COUNTS EVERY ADD EXCEPT PRESEASON ONES (re-measured 2026-11-05, mid-season
+        # review Q11; supersedes the 2026-09-02 note here and in migration 014's
+        # header, which cannot be edited): acquisitions == all adds minus those made
+        # while ESPN's current scoring period was 1, on 670/670 team-days; drops ==
+        # all drops incl. preseason. The 09-02 reading was right about preseason
+        # claims and wrong as a general rule. Nothing in ziggurat/ reads it.
         "acquisitions": counter.get("acquisitions"),
         "drops": counter.get("drops"),
         "trades": counter.get("trades"),
@@ -1622,8 +1622,8 @@ class IRRuleReport:
         # Under ESPN's OCCUPANCY rule a false flag is NOT news by itself: every
         # QUESTIONABLE/DOUBTFUL occupant carries one and may stay. Only an occupant
         # who may NOT stay (no designation, suspended) or whose stay cannot be
-        # verified is — and that one is the transition the rule has not yet been
-        # seen on (a healed occupant making a roster INVALID).
+        # verified is — and that one is the transition first seen 2026-10-07..10-10
+        # (a healed occupant making a roster INVALID; plan 3.8 addendum 2026-10-12).
         flagged = [o for o in self.ir_occupants
                    if ir_occupancy_verdict(o.get("injured"), o.get("injury_status")) != "OK"]
         if flagged:
@@ -1702,8 +1702,10 @@ def ir_rule_check(conn, *, as_of, season, own_team_id: int | None = None,
     ESPN's IR SLOT accepts is a separate question: ENTRY was observed 2026-09-24
     (the "Add to IR" page offered exactly the OUT player; the first occupant
     followed), and OCCUPANCY is ESPN's documented rule (``IR_RULES_SOURCE``) —
-    the invalid transition itself has not yet been seen in this league, which is
-    why ``ir_occupants`` is always reported, including as an explicit zero.
+    the invalid transition itself was first seen in this league 2026-10-07..10-10
+    (plan 3.8 addendum 2026-10-12); whether ESPN then blocks acquisitions is still
+    unobserved. ``ir_occupants`` is always reported, including as an explicit
+    zero.
 
     ``own_team_id`` narrows the COVERAGE half of ``has_news`` to the reader's own
     roster. A flag hole on a rival's bench is real league-health information (and
@@ -2112,8 +2114,9 @@ def format_ir_rule_report(report: IRRuleReport) -> str:
             "ESPN will accept (it offered the one OUT player and withheld DAY_TO_DAY "
             "and ACTIVE players), and the first occupant was accepted and held. "
             f"Occupancy follows ESPN's documented rule — {IR_RULES_SOURCE}. Still "
-            "unobserved here: the INVALID transition (an occupant who returns with no "
-            "designation). Record it in IMPLEMENTATION_PLAN.md §3.8 when it happens."
+            "observed 2026-10-07..10-10: the INVALID transition (an occupant who returned "
+            "with no designation; lineup moves went through). Still unobserved: whether "
+            "ESPN blocks an acquisition on an invalid roster. See IMPLEMENTATION_PLAN.md §3.8."
         )
 
     # ALWAYS printed, including the pre-draft n=0 case: a suppressed coverage line
