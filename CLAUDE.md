@@ -524,7 +524,10 @@ draft-day machine. Details in IMPLEMENTATION_PLAN.md Checkpoint 2 notes.
   recorded on **every** day **including Tuesday 2026-09-08**, against a
   `waiverProcessDays` that omits Tuesday. Whether ESPN runs a batch nightly or
   merely touches the field cannot be separated from what we hold; the ~23:59 PT
-  deadline follows either way.
+  deadline follows either way. **Corrected 2026-11-09: the tightening did not
+  hold.** `league_settings.waiver_last_execution` records 69 executions,
+  2026-09-02..11-09, one per calendar day. They span **00:01:56–01:34:42 PT**,
+  and 32 of them fall after 00:25:47. The ~23:59 PT deadline is unaffected.
   **What did NOT get settled, and says so:** the IR-SLOT MECHANISM. `injured`
   and `injury_status` are two encodings of ONE fact agreeing — that is a
   tautology, not evidence about what ESPN's IR slot accepts, and **0 of 10
@@ -1639,9 +1642,11 @@ mechanism to rebuild; reopen it on the first lost contested claim.
 
 **The batch runs just after MIDNIGHT PACIFIC, not "3–4 AM" — measured, item
 3.8a.** ESPN's own `waiverProcessStatus` map holds every batch it has ever run:
-29 of them (28 in 2025 + 2026-09-02) span **00:01–01:13 PT**, and twelve further
-in-season observations (2026-09-02..09-13) tighten that to **00:01:56–00:25:47
-PT**. The 3–4 AM figure that was in circulation here was the EASTERN clock. An
+29 of them (28 in 2025 + 2026-09-02) span **00:01–01:13 PT**. In-season, 69
+executions (2026-09-02..11-09, one per calendar day) span **00:01:56–01:34:42
+PT**, and 32 of them ran after 00:25:47. That corrects the 2026-09-15 reading
+of 00:01:56–00:25:47, which rested on the first twelve days (corrected
+2026-11-09, `league_settings.waiver_last_execution`). The 3–4 AM figure that was in circulation here was the EASTERN clock. An
 execution is recorded **every day, including Tuesday** (09-08), against a
 `waiverProcessDays` that omits Tuesday — whether that is a batch or a touched
 field is unresolved from what we hold, and the deadline below follows either
@@ -1709,9 +1714,14 @@ Two output notes: (1) `'empty' is healthy` refers to empty alert TICKS — the
 distinct string `no push runs recorded yet` means the push layer has never run
 on this box (not installed, or `NTFY_TOPIC` unset; see `scripts/install-push.sh`
 under Dev workflow). Until that is fixed, Wednesday step 1 has no briefing to
-read — journal that, don't treat the silence as healthy. (2) Run timestamps
-print in UTC; judge "did today's sync land" by the `snapshot <date>` line, not
-the run timestamp — UTC rolls past midnight hours before a Pacific evening does.
+read — journal that, don't treat the silence as healthy. (2) The reports do not
+share a clock (corrected 2026-11-09):
+- `league status` and `ingest status` print run timestamps in UTC (`+00:00`);
+- `decisions status` prints Pacific time with its offset (`-08:00`);
+- `brief status` and `alerts status` print Pacific time with NO zone suffix.
+
+Judge "did today's sync land" by the `snapshot <date>` line, not the run
+timestamp; UTC rolls past midnight hours before a Pacific evening does.
 
 ### Tuesday — roster legality + waiver claims
 1. Preflight. If today's league sync hasn't landed, run

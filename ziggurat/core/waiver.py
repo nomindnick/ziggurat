@@ -171,15 +171,24 @@ KIND_UNKNOWN = ACQ_UNKNOWN          # anything else (incl. a leaked 'ONTEAM'): v
 #     transition itself; lineup moves went through while invalid (plan 3.8,
 #     addendum 2026-10-12). STILL UNSEEN: whether ESPN blocks an acquisition on
 #     an invalid roster.
+#   * OBSERVED 2026-10-27..11-02 (the operator's own QUESTIONABLE occupant): the
+#     2026-10-28 00:25 PT batch EXECUTED two of his claims with that player in the
+#     IR slot, so a Q occupant left the roster valid. ESPN's documented rule held.
+#     League-wide, `league_player_state` holds 8 QUESTIONABLE/DOUBTFUL occupants on
+#     6 teams, 2026-09-29..11-04. The label said "not yet seen here" until
+#     2026-11-09.
 IR_FIX_MODEL_LABEL = (
     "IR-slot rules this fix follows — ENTRY observed 2026-09-24 on the ESPN website "
     "(the \"Add to IR\" button, not the MOVE menu, lists exactly the players ESPN "
-    "will accept; an OUT player was accepted and held). OCCUPANCY is ESPN's "
-    "documented rule, not yet seen here: a player already on IR may stay at "
-    "QUESTIONABLE or DOUBTFUL, but one with NO injury designation (or a suspension) "
-    "makes your roster INVALID — ESPN then processes no claim or add until you move "
-    "him to the bench, which needs an open active slot (a drop if you have none). "
-    "`ziggurat league ir-check` lists every occupant with ESPN's own flag."
+    "will accept; an OUT player was accepted and held). OCCUPANCY, seen here and "
+    "ESPN's documented rule: a player already on IR may stay at QUESTIONABLE or "
+    "DOUBTFUL (your claims processed on 2026-10-28 with a QUESTIONABLE player in "
+    "your IR slot). One with NO injury designation (or a suspension) makes your "
+    "roster INVALID (seen 2026-10-07..10-10, when lineup moves still went through). "
+    "ESPN documents that it then processes no claim or add until you move him to "
+    "the bench — that block is not yet seen here — and moving him needs an open "
+    "active slot (a drop if you have none). `ziggurat league ir-check` lists every "
+    "occupant with ESPN's own flag."
 )
 
 # The staleness banner shouts past this many days between the data's pull date and

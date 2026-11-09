@@ -345,10 +345,15 @@ def test_ir_eligibility_is_a_labelled_hypothesis():
     assert "measured 2026-09-02" in IR_ELIGIBLE_LABEL
     # the MECHANISM half: since 2026-09-24 it says which part was OBSERVED (entry),
     # which is ESPN's DOCUMENTED rule (occupancy) and what is still unseen — and it
-    # names the website control, never the MOVE menu (which never lists IR)
+    # names the website control, never the MOVE menu (which never lists IR).
+    # Since 2026-11-09 occupancy is SEEN too (claims processed 10-28 with a Q
+    # occupant); the one unseen piece is ESPN's acquisition block on an INVALID
+    # roster, and the label must still say so.
     lab = waiver.IR_FIX_MODEL_LABEL
     assert "ENTRY observed 2026-09-24" in lab
-    assert "OCCUPANCY is ESPN's documented rule, not yet seen here" in lab
+    assert "OCCUPANCY, seen here and ESPN's documented rule" in lab
+    assert "OCCUPANCY is ESPN's documented rule, not yet seen here" not in lab
+    assert "that block is not yet seen here" in lab
     assert "QUESTIONABLE or DOUBTFUL" in lab and "INVALID" in lab
     assert '"Add to IR" button' in lab
     assert "UNVERIFIED" not in lab
@@ -457,11 +462,13 @@ def test_a_zero_drop_ir_move_is_the_primary_fix_when_an_eligible_body_exists(db,
     assert plan.ir_move_fix, "the costless IR move must be surfaced"
     move_blob = " ".join(plan.ir_move_fix)
     assert "NO drop" in move_blob and "Lead Runner" in move_blob and "IR Guy" in move_blob
-    # it carries the IR-slot rules it follows — since 2026-09-24 ENTRY is observed
-    # and OCCUPANCY is ESPN's documented rule, and the label says which is which
+    # it carries the IR-slot rules it follows — since 2026-09-24 ENTRY is observed;
+    # since 2026-11-09 OCCUPANCY is seen as well as documented, and the label says
+    # which piece is still unseen
     assert any("ENTRY observed 2026-09-24" in line for line in plan.ir_move_fix)
-    assert any("OCCUPANCY is ESPN's documented rule" in line
+    assert any("OCCUPANCY, seen here and ESPN's documented rule" in line
                for line in plan.ir_move_fix)
+    assert any("that block is not yet seen here" in line for line in plan.ir_move_fix)
     # the DESTINATION's "(IR-eligible)" ships its per-player evidence — which field
     # decided it (ESPN's own flag, or the injury-tag proxy when the flag was not
     # captured), the same line the occupant rows carry (item 3.8a audit)

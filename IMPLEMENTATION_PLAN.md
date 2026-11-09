@@ -3552,6 +3552,11 @@ does not change the verdict, because the leading factor is measured at zero.
 > and the two **cannot be separated from what we hold** — so the tightened window
 > ships with that sentence attached. The **~23:59 PT submission deadline is
 > unchanged**: it follows either way. CLAUDE.md's cadence preamble carries both.
+> **Corrected 2026-11-09: the tightening did not hold.** Through 2026-11-09,
+> `waiver_last_execution` records 69 executions, one per calendar day. They span
+> **00:01:56–01:34:42 PT**, and 32 of them fall after 00:25:47. That is wider
+> than the n=29 band's 01:13 too. The nightly execution still holds, and so does
+> the ~23:59 PT deadline.
 >
 > **(2) The weekly waiver-order reset is OBSERVED, 2026-09-15 — the first time.**
 > Until today `waiverOrderReset = 1` was a setting asserted as behaviour: our rank
