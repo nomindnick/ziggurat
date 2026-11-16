@@ -8344,6 +8344,27 @@ afterwards — results go in the Update block as dated amendments).**
 >   season, only if earned. Rule 2 is untouched. Nothing deploys in 2026.
 > - Graded at the season-end review.
 > - Data note: the `WAS569019` placeholder rows (3.18 residual).
+>
+> **Frozen 2026-11-12 14:09:58 PT** (gitignored
+> `intel/research/calibration-4.7r-prereg-2026-11-12.md`, sha256
+> `a95f0cffbdf2c44efdc59c8016246effeceb2a99088b452d318f078bc09e9711`).
+> - About 14 h late against the 11-11 23:59 date, but about 3 h before week
+>   10's first kickoff (17:15 PT), so it is still outcome-blind: no realised
+>   week-10+ stat existed.
+> - Estimator: the exploratory one, unchanged, with a reproduction gate (it
+>   must re-read 0.478 [0.259, 0.948] on weeks 1–8 before any week-10+ row is
+>   read).
+>   - Decision points: the Tuesday 18:30 timer captures of weeks 10–17.
+>   - Units: horizon 1–3, realised weeks 10–17 only.
+> - RB only. **EARNED** if the upper bound is < 0.90. **RETIRED** only if
+>   b̂ ≥ 0.90 AND the lower bound is ≥ 0.75; that clause is the width rule.
+>   Otherwise **OPEN**, and the rows pool with 2027 under a new
+>   pre-registration.
+> - Expected n is about 250–300 RB rows, not 180: weeks 10–17 give 21
+>   capture-week slots, as weeks 1–8 did.
+> - Power (INFERRED): P(EARNED) ≈ 0.66 at a true 0.48 and ≈ 0.40 at 0.60.
+>   P(RETIRED) is ≤ 0.29 even at a true 1.0. The test can earn H-b but can
+>   hardly retire it, by design.
 
 ### 4.8 [Experiment] Availability over the horizon — one pre-registered re-fit (added 2026-11-05, mid-season review Q15; next season)
 **Why it exists.** Three measured availability biases in the shipped model,
