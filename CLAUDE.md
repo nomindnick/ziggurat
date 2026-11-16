@@ -2006,6 +2006,15 @@ timestamp; UTC rolls past midnight hours before a Pacific evening does.
    - Every IR entry in this league through week 9 came on or before the
      player's game day, none on a Monday.
    - The lock rule is documented, not yet observed directly here.
+1c. **Add/drops stay open after the first kickoff (OBSERVED 2026-11-15).**
+   Under this league's INDIVIDUAL_GAME lock, a player whose game has not
+   started, including a bye-week player, can still be added or dropped after
+   the day's first kickoff. ESPN's "Lineup and Roster Lock Times" help page
+   says add/drops lock at the day's first game; this league contradicts it.
+   The evidence: 13 earlier post-kickoff add/drops in `league_transactions`,
+   and our own drop of bye-week Waddle at 13:46 PT on 11-15 (wk10 journal
+   D9). So an opponent's empty or bye slot stays fillable, and blockable,
+   until that position's last game locks.
 2. Walk the ladder for each Questionable starter in lock-time order; execute
    the branch matching the news.
 3. A hard refusal from the seated-lineup legality check (bye/OUT starter) on a
